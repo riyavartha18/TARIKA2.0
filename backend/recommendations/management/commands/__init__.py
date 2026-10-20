@@ -1,0 +1,3 @@
+"""
+Recommendations management commands package.
+"""

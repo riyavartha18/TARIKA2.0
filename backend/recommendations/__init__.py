@@ -1,0 +1,3 @@
+"""
+Recommendations Django App package.
+"""

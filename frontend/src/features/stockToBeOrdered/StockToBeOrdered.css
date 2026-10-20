@@ -1,0 +1,390 @@
+/* ═══════════════════════════════════════════════════════
+   Stock to Be Ordered — Warehouse Manager UI
+   Matches the Tarika warehouse portal design system
+   (light cream theme, #1F191B text, #B8505E accent)
+═══════════════════════════════════════════════════════ */
+
+/* ── Wrapper ─────────────────────────────────────────── */
+.stbo-wrapper {
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  color: #1F191B;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Page Header ─────────────────────────────────────── */
+.stbo-page-header {
+  background: #FFFFFF;
+  border-radius: 20px;
+  padding: 1.75rem 2rem;
+  border: 1px solid #F0E2E0;
+  box-shadow: 0 8px 30px rgba(184, 80, 94, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+
+.stbo-page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.stbo-header-icon-wrap {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: rgba(216, 114, 126, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.stbo-header-icon {
+  font-size: 1.6rem;
+}
+
+.stbo-title {
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin: 0 0 4px;
+  font-family: 'Playfair Display', Georgia, serif;
+}
+
+.stbo-subtitle {
+  font-size: 0.85rem;
+  color: #6B5E63;
+  margin: 0;
+}
+
+.stbo-forecast-month {
+  color: #B8505E;
+  font-weight: 700;
+}
+
+/* ── Search ──────────────────────────────────────────── */
+.stbo-search-wrap {
+  position: relative;
+  min-width: 220px;
+  max-width: 320px;
+  flex: 1;
+}
+
+.stbo-search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.85rem;
+  pointer-events: none;
+  color: #B8505E;
+}
+
+.stbo-search-input {
+  width: 100%;
+  padding: 9px 14px 9px 36px;
+  border-radius: 9999px;
+  border: 1px solid #F0E2E0;
+  background: #FAF7F5;
+  color: #1F191B;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.stbo-search-input:focus {
+  border-color: #D8727E;
+  box-shadow: 0 0 0 3px rgba(216, 114, 126, 0.1);
+}
+
+.stbo-search-input::placeholder {
+  color: #9E8F94;
+}
+
+/* ── Error ───────────────────────────────────────────── */
+.stbo-error {
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+  border-radius: 12px;
+  padding: 14px 18px;
+  color: #DC2626;
+  font-size: 0.88rem;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* ── Table card ──────────────────────────────────────── */
+.stbo-table-card {
+  background: #FFFFFF;
+  border-radius: 20px;
+  border: 1px solid #F0E2E0;
+  box-shadow: 0 8px 30px rgba(184, 80, 94, 0.04);
+  overflow: hidden;
+}
+
+/* ── Table wrapper (scroll) ──────────────────────────── */
+.stbo-table-wrap {
+  overflow-x: auto;
+}
+
+/* ── Table ───────────────────────────────────────────── */
+.stbo-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+/* ── Header row ──────────────────────────────────────── */
+.stbo-th {
+  padding: 14px 18px;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #6B5E63;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid #F0E2E0;
+  background: #FAF7F5;
+  white-space: nowrap;
+}
+
+.stbo-th-rank {
+  width: 48px;
+  text-align: center;
+}
+
+.stbo-th-sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.stbo-th-sortable:hover {
+  color: #B8505E;
+}
+
+.stbo-th-active {
+  color: #B8505E;
+}
+
+.stbo-sort-arrow {
+  font-size: 0.7rem;
+  margin-left: 2px;
+}
+
+/* ── Body cells ──────────────────────────────────────── */
+.stbo-td {
+  padding: 13px 18px;
+  border-bottom: 1px solid rgba(240, 226, 224, 0.7);
+  color: #1F191B;
+  vertical-align: middle;
+}
+
+.stbo-td-rank {
+  text-align: center;
+  color: #9E8F94;
+  font-size: 0.78rem;
+}
+
+.stbo-td-name {
+  font-weight: 500;
+  color: #1F191B;
+  min-width: 180px;
+}
+
+.stbo-td-variant {
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #6B5E63;
+  min-width: 70px;
+}
+
+.stbo-td-num {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Row states ──────────────────────────────────────── */
+.stbo-row:hover td {
+  background: rgba(216, 114, 126, 0.03);
+}
+
+.stbo-row-urgent td {
+  background: rgba(216, 114, 126, 0.025);
+}
+
+.stbo-row-urgent:hover td {
+  background: rgba(216, 114, 126, 0.05);
+}
+
+/* ── Number styles ───────────────────────────────────── */
+.stbo-stock-num {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #6B5E63;
+}
+
+.stbo-demand-num {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1F191B;
+}
+
+/* ── Need to Order badge ─────────────────────────────── */
+.stbo-order-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stbo-order-needed {
+  background: rgba(184, 80, 94, 0.1);
+  color: #B8505E;
+  border: 1px solid rgba(216, 114, 126, 0.25);
+}
+
+.stbo-order-ok {
+  background: rgba(5, 150, 105, 0.08);
+  color: #059669;
+  border: 1px solid rgba(5, 150, 105, 0.2);
+}
+
+/* ── Empty row ───────────────────────────────────────── */
+.stbo-empty-row {
+  text-align: center;
+  padding: 3.5rem 1rem;
+  color: #9E8F94;
+  font-size: 0.9rem;
+}
+
+/* ── Skeleton loading rows ───────────────────────────── */
+.stbo-skeleton-tr td {
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(240, 226, 224, 0.7);
+}
+
+.stbo-skel {
+  display: inline-block;
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    #F7F0EE 25%,
+    #EDE0DC 50%,
+    #F7F0EE 75%
+  );
+  background-size: 200% 100%;
+  animation: stbo-shimmer 1.4s infinite;
+}
+
+.stbo-skel-sm { width: 48px; }
+.stbo-skel-lg { width: 140px; }
+
+@keyframes stbo-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Table footer ────────────────────────────────────── */
+.stbo-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 20px;
+  border-top: 1px solid #F0E2E0;
+  background: #FAF7F5;
+}
+
+.stbo-footer-count {
+  font-size: 0.8rem;
+  color: #6B5E63;
+}
+
+/* ── Pagination ──────────────────────────────────────── */
+.stbo-pagination {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stbo-page-btn {
+  padding: 5px 10px;
+  background: #FFFFFF;
+  border: 1px solid #F0E2E0;
+  border-radius: 8px;
+  color: #6B5E63;
+  cursor: pointer;
+  font-size: 0.82rem;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.stbo-page-btn:hover:not(:disabled) {
+  border-color: #D8727E;
+  color: #B8505E;
+}
+
+.stbo-page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.stbo-page-info {
+  padding: 0 6px;
+  font-size: 0.82rem;
+  color: #6B5E63;
+}
+
+/* ── Header Right Controls ────────────────────────────── */
+.stbo-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* ── Responsive ──────────────────────────────────────── */
+@media (max-width: 768px) {
+  .stbo-page-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .stbo-header-right {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .stbo-search-wrap {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .stbo-title {
+    font-size: 1.25rem;
+  }
+
+  .stbo-table-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+

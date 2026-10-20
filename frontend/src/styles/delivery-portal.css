@@ -1,0 +1,919 @@
+/* ============================================================
+   TARIKA DELIVERY PARTNER PORTAL STYLESHEET
+   Design System: Haute Atelier Luxe / Logistics Dispatch
+   ============================================================ */
+
+.delivery-portal-root {
+  min-height: 100vh;
+  background-color: #FAF7F5;
+  color: #1F191B;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header & Top Bar */
+.delivery-header {
+  background: #FFFFFF;
+  border-bottom: 1px solid #F0E2E0;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  box-shadow: 0 4px 20px rgba(31, 25, 27, 0.03);
+}
+
+.delivery-header-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.delivery-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.delivery-brand-logo {
+  text-decoration: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.delivery-brand-name {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.65rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: #1F191B;
+  line-height: 1;
+}
+
+.delivery-brand-tagline {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: #D8727E;
+  text-transform: uppercase;
+  margin-top: 3px;
+}
+
+.delivery-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  background: #FBF1F0;
+  border: 1px solid #F0CFCD;
+  color: #8E3642;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.delivery-courier-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: #FAF7F5;
+  border: 1px solid #E5D0CD;
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #6B5E63;
+}
+
+.delivery-profile-menu {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.delivery-user-info {
+  display: flex;
+  flex-direction: column;
+  text-align: right;
+}
+
+.delivery-user-name {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #1F191B;
+}
+
+.delivery-user-email {
+  font-size: 0.74rem;
+  color: #9E8F94;
+}
+
+.delivery-btn-icon {
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  color: #6B5E63;
+  padding: 0.55rem;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.delivery-btn-icon:hover {
+  background: #FBF1F0;
+  color: #8E3642;
+  border-color: #F0CFCD;
+}
+
+.delivery-btn-signout {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  color: #8E3642;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.55rem 1.1rem;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.delivery-btn-signout:hover {
+  background: #FBF1F0;
+  border-color: #D8727E;
+}
+
+/* Main Container */
+.delivery-container {
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+  flex: 1;
+}
+
+/* Page Title & Intro */
+.delivery-hero-banner {
+  background: linear-gradient(135deg, #FFFDFD 0%, #FBF1F0 100%);
+  border: 1px solid #F0CFCD;
+  border-radius: 20px;
+  padding: 1.75rem 2rem;
+  margin-bottom: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 8px 30px rgba(184, 80, 94, 0.04);
+}
+
+.delivery-hero-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.85rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin: 0 0 0.25rem 0;
+}
+
+.delivery-hero-subtitle {
+  color: #6B5E63;
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+/* Metrics Grid */
+.delivery-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 2.25rem;
+}
+
+.delivery-metric-card {
+  background: #FFFFFF;
+  border: 1px solid #F0E2E0;
+  border-radius: 16px;
+  padding: 1.35rem 1.5rem;
+  box-shadow: 0 4px 18px rgba(31, 25, 27, 0.03);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.delivery-metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px rgba(184, 80, 94, 0.08);
+}
+
+.delivery-metric-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+}
+
+.delivery-metric-card.metric-total::before { background: #8E3642; }
+.delivery-metric-card.metric-pending::before { background: #D97706; }
+.delivery-metric-card.metric-transit::before { background: #2563EB; }
+.delivery-metric-card.metric-delivered::before { background: #059669; }
+.delivery-metric-card.metric-exception::before { background: #DC2626; }
+
+.delivery-metric-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.delivery-metric-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9E8F94;
+}
+
+.delivery-metric-icon-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.metric-total .delivery-metric-icon-wrap { background: #FBF1F0; color: #8E3642; }
+.metric-pending .delivery-metric-icon-wrap { background: #FEF3C7; color: #D97706; }
+.metric-transit .delivery-metric-icon-wrap { background: #EFF6FF; color: #2563EB; }
+.metric-delivered .delivery-metric-icon-wrap { background: #ECFDF5; color: #059669; }
+.metric-exception .delivery-metric-icon-wrap { background: #FEF2F2; color: #DC2626; }
+
+.delivery-metric-value {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #1F191B;
+  line-height: 1;
+  margin-bottom: 0.35rem;
+}
+
+.delivery-metric-hint {
+  font-size: 0.74rem;
+  color: #6B5E63;
+}
+
+/* Control Toolbar */
+.delivery-toolbar {
+  background: #FFFFFF;
+  border: 1px solid #F0E2E0;
+  border-radius: 16px;
+  padding: 1.15rem 1.5rem;
+  margin-bottom: 1.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.delivery-search-box {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: #FAF7F5;
+  border: 1px solid #E5D0CD;
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  width: 100%;
+  max-width: 380px;
+  transition: border-color 0.2s ease;
+}
+
+.delivery-search-box:focus-within {
+  border-color: #D8727E;
+  background: #FFFFFF;
+}
+
+.delivery-search-box input {
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 0.86rem;
+  color: #1F191B;
+  width: 100%;
+}
+
+.delivery-filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.delivery-tab-btn {
+  padding: 0.45rem 0.95rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: #FAF7F5;
+  color: #6B5E63;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.delivery-tab-btn:hover {
+  background: #FBF1F0;
+  color: #8E3642;
+}
+
+.delivery-tab-btn.active {
+  background: #8E3642;
+  color: #FFFFFF;
+  border-color: #8E3642;
+}
+
+/* Deliveries Grid */
+.delivery-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 1.25rem;
+}
+
+.delivery-card {
+  background: #FFFFFF;
+  border: 1px solid #F0E2E0;
+  border-radius: 18px;
+  padding: 1.4rem;
+  box-shadow: 0 4px 16px rgba(31, 25, 27, 0.03);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.delivery-card:hover {
+  border-color: #D8727E;
+  box-shadow: 0 10px 30px rgba(184, 80, 94, 0.08);
+}
+
+.delivery-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px dashed #F0E2E0;
+}
+
+.delivery-ids-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.delivery-id-title {
+  font-family: monospace;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #1F191B;
+  letter-spacing: 0.04em;
+}
+
+.delivery-order-id-sub {
+  font-size: 0.74rem;
+  color: #9E8F94;
+}
+
+/* Status Badges */
+.delivery-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: capitalize;
+}
+
+.status-assigned {
+  background: #FEF3C7;
+  color: #92400E;
+  border: 1px solid #FDE68A;
+}
+
+.status-picked-up {
+  background: #EEF2FF;
+  color: #3730A3;
+  border: 1px solid #C7D2FE;
+}
+
+.status-in-transit {
+  background: #EFF6FF;
+  color: #1E40AF;
+  border: 1px solid #BFDBFE;
+}
+
+.status-delivered {
+  background: #ECFDF5;
+  color: #065F46;
+  border: 1px solid #A7F3D0;
+}
+
+.status-delayed {
+  background: #FFF7ED;
+  color: #9A3412;
+  border: 1px solid #FED7AA;
+}
+
+.status-failed {
+  background: #FEF2F2;
+  color: #991B1B;
+  border: 1px solid #FECACA;
+}
+
+/* Customer & Delivery Info Section */
+.delivery-recipient-box {
+  margin-bottom: 1rem;
+}
+
+.delivery-recipient-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin-bottom: 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.delivery-recipient-address {
+  font-size: 0.82rem;
+  color: #6B5E63;
+  line-height: 1.4;
+  margin-bottom: 0.4rem;
+}
+
+.delivery-contact-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: #8E3642;
+}
+
+.delivery-tel-link {
+  text-decoration: none;
+  color: #8E3642;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  background: #FBF1F0;
+  border-radius: 6px;
+  transition: background 0.2s ease;
+}
+
+.delivery-tel-link:hover {
+  background: #F7E4E2;
+}
+
+/* Order Details strip */
+.delivery-meta-strip {
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  border-radius: 10px;
+  padding: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.15rem;
+  font-size: 0.78rem;
+}
+
+.delivery-meta-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.delivery-meta-title {
+  font-size: 0.68rem;
+  color: #9E8F94;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.delivery-meta-val {
+  font-weight: 700;
+  color: #1F191B;
+  margin-top: 2px;
+}
+
+/* Exception Alert inside card */
+.delivery-exception-banner {
+  background: #FFF1F2;
+  border: 1px solid #FECDD3;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.78rem;
+  color: #9F1239;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+/* Action Button Groups */
+.delivery-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: auto;
+}
+
+.delivery-btn-primary {
+  flex: 1;
+  background: #8E3642;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 10px;
+  padding: 0.65rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  transition: all 0.2s ease;
+}
+
+.delivery-btn-primary:hover {
+  background: #B8505E;
+}
+
+.delivery-btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.delivery-btn-secondary {
+  background: #FAF7F5;
+  color: #6B5E63;
+  border: 1px solid #E5D0CD;
+  border-radius: 10px;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  transition: all 0.2s ease;
+}
+
+.delivery-btn-secondary:hover {
+  background: #FBF1F0;
+  color: #8E3642;
+  border-color: #F0CFCD;
+}
+
+.delivery-btn-issue {
+  background: #FFF1F2;
+  color: #BE123C;
+  border: 1px solid #FECDD3;
+  border-radius: 10px;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  transition: all 0.2s ease;
+}
+
+.delivery-btn-issue:hover {
+  background: #FFE4E6;
+}
+
+/* Modals */
+.delivery-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(31, 25, 27, 0.65);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.delivery-modal-window {
+  background: #FFFFFF;
+  border-radius: 24px;
+  max-width: 680px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  border: 1px solid #E5D0CD;
+  box-shadow: 0 20px 60px rgba(31, 25, 27, 0.2);
+  padding: 2.25rem;
+  position: relative;
+}
+
+.delivery-modal-close {
+  position: absolute;
+  top: 1.5rem;
+  right: 1.5rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9E8F94;
+  padding: 6px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s ease;
+}
+
+.delivery-modal-close:hover {
+  color: #1F191B;
+}
+
+/* Items inside Detail Modal */
+.delivery-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.delivery-items-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #9E8F94;
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid #F0E2E0;
+}
+
+.delivery-items-table td {
+  padding: 0.85rem 0.5rem;
+  border-bottom: 1px solid #FAF7F5;
+  font-size: 0.84rem;
+  vertical-align: middle;
+}
+
+.delivery-item-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #FBF1F0;
+  border: 1px solid #F0E2E0;
+}
+
+/* Empty State */
+.delivery-empty-state {
+  background: #FFFFFF;
+  border: 1px dashed #E5D0CD;
+  border-radius: 20px;
+  padding: 4rem 2rem;
+  text-align: center;
+  margin-top: 2rem;
+}
+
+.delivery-empty-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: #FBF1F0;
+  color: #D8727E;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 1.25rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .delivery-header-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .delivery-profile-menu {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .delivery-hero-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  .delivery-cards-grid {
+    grid-template-columns: 1fr;
+  }
+  .delivery-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .delivery-search-box {
+    max-width: 100%;
+  }
+}
+
+/* ============================================================
+   RETURN PICKUPS SECTION & REVERSE LOGISTICS ENHANCEMENTS
+   ============================================================ */
+
+.delivery-flow-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+  border-bottom: 2px solid #F0E2E0;
+  padding-bottom: 0.25rem;
+}
+
+.delivery-flow-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  padding: 0.75rem 1.25rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #6B5E63;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  transition: all 0.2s ease;
+  position: relative;
+  bottom: -2px;
+}
+
+.delivery-flow-btn:hover {
+  color: #8E3642;
+}
+
+.delivery-flow-btn.active {
+  color: #8E3642;
+  border-bottom-color: #8E3642;
+  font-weight: 700;
+}
+
+.delivery-flow-btn.return-mode.active {
+  color: #92400E;
+  border-bottom-color: #D97706;
+}
+
+.flow-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: #FBF1F0;
+  color: #8E3642;
+  border: 1px solid #F0CFCD;
+}
+
+.flow-count-badge.return-badge {
+  background: #FEF3C7;
+  color: #92400E;
+  border-color: #FDE68A;
+}
+
+/* Return Pickup Specific Card Styling */
+.delivery-card.return-card {
+  border-top: 4px solid #D97706;
+  background: #FFFFFF;
+  position: relative;
+}
+
+.return-flow-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: #FEF3C7;
+  color: #92400E;
+  border: 1px solid #FDE68A;
+}
+
+.return-product-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  border-radius: 10px;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.return-product-img {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #FFF;
+  border: 1px solid #E5D0CD;
+  flex-shrink: 0;
+}
+
+.return-product-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.return-product-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1F191B;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.return-product-sub {
+  font-size: 0.75rem;
+  color: #6B5E63;
+  margin-top: 2px;
+}
+
+.return-reason-box {
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: #78350F;
+}
+
+.return-reason-label {
+  font-weight: 700;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.status-pickup-assigned {
+  background: #FEF3C7;
+  color: #92400E;
+  border: 1px solid #FDE68A;
+}
+
+.status-pickup-accepted {
+  background: #EEF2FF;
+  color: #3730A3;
+  border: 1px solid #C7D2FE;
+}
+
+.status-picked-up {
+  background: #E0F2FE;
+  color: #0369A1;
+  border: 1px solid #BAE6FD;
+}
+
+.status-received-at-warehouse {
+  background: #ECFDF5;
+  color: #047857;
+  border: 1px solid #A7F3D0;
+}
+

@@ -1,0 +1,657 @@
+/* TARIKA Haute Editorial Styling */
+:root {
+  --tarika-bg: #FAF7F5;
+  --tarika-bg-alt: #FFFBF9;
+  --tarika-card-bg: #FFFFFF;
+  --tarika-blush-light: #FBF1F0;
+  --tarika-blush-soft: #F7E4E2;
+  --tarika-blush-medium: #F0CFCD;
+  --tarika-rose: #D8727E;
+  --tarika-rose-dark: #B8505E;
+  --tarika-rose-deep: #8E3642;
+  --tarika-gold-accent: #D4AF37;
+  --tarika-text-main: #1F191B;
+  --tarika-text-muted: #6B5E63;
+  --tarika-text-subtle: #9E8F94;
+  --tarika-border: #F0E2E0;
+  --tarika-border-darker: #E5D0CD;
+  
+  --font-serif: 'Playfair Display', Georgia, serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-script: 'Alex Brush', cursive;
+  
+  --shadow-soft: 0 8px 30px rgba(184, 80, 94, 0.06);
+  --shadow-hover: 0 16px 40px rgba(184, 80, 94, 0.12);
+  --shadow-float: 0 20px 50px rgba(0, 0, 0, 0.08);
+}
+
+/* Base resets & typography */
+.tarika-home {
+  font-family: var(--font-sans);
+  background-color: var(--tarika-bg);
+  color: var(--tarika-text-main);
+  min-height: 100vh;
+  overflow-x: hidden;
+  line-height: 1.5;
+}
+
+.tarika-serif {
+  font-family: var(--font-serif);
+}
+
+.tarika-script {
+  font-family: var(--font-script);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes floatSlow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 15px rgba(216, 114, 126, 0.25); }
+  50% { box-shadow: 0 0 30px rgba(216, 114, 126, 0.5); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-float {
+  animation: floatSlow 6s ease-in-out infinite;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--tarika-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--tarika-blush-medium);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--tarika-rose);
+}
+
+/* Image zoom utilities */
+.zoom-container {
+  overflow: hidden;
+}
+.zoom-container img {
+  transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.zoom-container:hover img {
+  transform: scale(1.06);
+}
+
+/* Buttons */
+.tarika-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: linear-gradient(135deg, #D8727E 0%, #C45766 100%);
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  padding: 0.85rem 1.85rem;
+  border-radius: 9999px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(216, 114, 126, 0.35);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  text-decoration: none;
+}
+.tarika-btn-primary:hover {
+  background: linear-gradient(135deg, #E2818D 0%, #B8505E 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(216, 114, 126, 0.45);
+}
+.tarika-btn-primary:active {
+  transform: translateY(0);
+}
+
+.tarika-btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--tarika-text-main);
+  font-weight: 600;
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  padding: 0.85rem 1.85rem;
+  border-radius: 9999px;
+  border: 1px solid var(--tarika-border-darker);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: all 0.3s ease;
+  text-decoration: none;
+}
+.tarika-btn-outline:hover {
+  background: #ffffff;
+  border-color: var(--tarika-rose);
+  color: var(--tarika-rose);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+/* Badge styles */
+.tarika-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.65rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.tarika-badge-new {
+  background-color: #D8727E;
+  color: #FFFFFF;
+}
+.tarika-badge-bestseller {
+  background-color: #D97706;
+  color: #FFFFFF;
+}
+.tarika-badge-sale {
+  background-color: #E11D48;
+  color: #FFFFFF;
+}
+
+/* Category Circle Card */
+.category-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.3s ease;
+}
+.category-card:hover {
+  transform: translateY(-4px);
+}
+.category-circle {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  border: 2px solid var(--tarika-border);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+  transition: all 0.3s ease;
+  position: relative;
+}
+.category-card:hover .category-circle {
+  border-color: var(--tarika-rose);
+  box-shadow: 0 10px 24px rgba(216, 114, 126, 0.2);
+}
+.category-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--tarika-text-main);
+  letter-spacing: 0.02em;
+  transition: color 0.2s ease;
+}
+.category-card:hover .category-label {
+  color: var(--tarika-rose);
+}
+
+/* Product Card */
+.tarika-product-card {
+  background: #FFFFFF;
+  border-radius: 16px;
+  border: 1px solid var(--tarika-border);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.tarika-product-card:hover {
+  transform: translateY(-6px);
+  box-shadow: var(--shadow-hover);
+  border-color: var(--tarika-border-darker);
+}
+
+.wishlist-btn {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(216, 114, 126, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  z-index: 10;
+  color: var(--tarika-text-muted);
+}
+.wishlist-btn:hover {
+  background: #FFFFFF;
+  color: var(--tarika-rose);
+  transform: scale(1.1);
+}
+.wishlist-btn.active {
+  background: #FFFFFF;
+  color: var(--tarika-rose);
+}
+
+/* Responsive grid layouts */
+@media (max-width: 1024px) {
+  .category-circle {
+    width: 80px;
+    height: 80px;
+  }
+}
+
+/* ==========================================================================
+   TARIKA Auth Pages (Login & Signup)
+   ========================================================================== */
+
+.tarika-auth-page {
+  min-height: 100vh;
+  width: 100%;
+  background-color: var(--tarika-bg, #FAF7F5);
+  background-image: 
+    radial-gradient(circle at 12% 18%, rgba(247, 228, 226, 0.65) 0%, transparent 40%),
+    radial-gradient(circle at 88% 82%, rgba(251, 241, 240, 0.75) 0%, transparent 45%),
+    radial-gradient(circle at 50% 50%, #FAF7F5 0%, #FAF7F5 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1.5rem;
+  font-family: var(--font-sans, 'Plus Jakarta Sans', sans-serif);
+  color: var(--tarika-text-main, #1F191B);
+  box-sizing: border-box;
+}
+
+.tarika-auth-container {
+  width: 100%;
+  max-width: 1060px;
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  border-radius: 24px;
+  overflow: hidden;
+  background-color: #FFFFFF;
+  border: 1px solid var(--tarika-border, #F0E2E0);
+  box-shadow: 0 24px 60px rgba(184, 80, 94, 0.08), 0 4px 16px rgba(31, 25, 27, 0.03);
+}
+
+/* Left Hero / Atelier Panel */
+.tarika-auth-hero {
+  background: linear-gradient(155deg, #FBF2F0 0%, #F8E7E5 50%, #F3DCD9 100%);
+  padding: 3.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  border-right: 1px solid var(--tarika-border, #F0E2E0);
+  overflow: hidden;
+}
+
+.tarika-auth-hero-glow {
+  position: absolute;
+  top: -15%;
+  left: -15%;
+  width: 320px;
+  height: 320px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.7) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.tarika-auth-brand-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  background: rgba(216, 114, 126, 0.12);
+  border: 1px solid rgba(216, 114, 126, 0.22);
+  color: var(--tarika-rose-dark, #B8505E);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 1.25rem;
+}
+
+.tarika-auth-hero-title {
+  font-family: var(--font-serif, 'Playfair Display', Georgia, serif);
+  font-size: 2.25rem;
+  line-height: 1.25;
+  font-weight: 700;
+  color: var(--tarika-text-main, #1F191B);
+  margin-bottom: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.tarika-auth-hero-desc {
+  color: var(--tarika-text-muted, #6B5E63);
+  font-size: 0.925rem;
+  line-height: 1.65;
+  margin-bottom: 2rem;
+}
+
+.tarika-auth-perk-card {
+  padding: 1.25rem 1.35rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(240, 226, 224, 0.9);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 4px 18px rgba(184, 80, 94, 0.05);
+}
+
+.tarika-auth-perk-icon-wrap {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(216, 114, 126, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tarika-rose, #D8727E);
+  flex-shrink: 0;
+}
+
+.tarika-auth-perk-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--tarika-text-main, #1F191B);
+  margin-bottom: 0.2rem;
+}
+
+.tarika-auth-perk-sub {
+  font-size: 0.78rem;
+  color: var(--tarika-text-muted, #6B5E63);
+  line-height: 1.45;
+}
+
+.tarika-auth-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.tarika-auth-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--tarika-text-muted, #6B5E63);
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+/* Right Form Section */
+.tarika-auth-form-side {
+  padding: 3.5rem 3.25rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background-color: #FFFFFF;
+}
+
+.tarika-auth-form-header {
+  margin-bottom: 1.85rem;
+}
+
+.tarika-auth-form-title {
+  font-family: var(--font-serif, 'Playfair Display', Georgia, serif);
+  font-size: 1.95rem;
+  font-weight: 700;
+  color: var(--tarika-text-main, #1F191B);
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.01em;
+}
+
+.tarika-auth-form-subtitle {
+  color: var(--tarika-text-muted, #6B5E63);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+/* Alert Banner */
+.tarika-auth-alert {
+  background: #FFF1F2;
+  border: 1px solid #FECDD3;
+  color: #9F1239;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  margin-bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+/* Form Fields */
+.tarika-form-group {
+  margin-bottom: 1.15rem;
+}
+
+.tarika-form-label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #382E32;
+  margin-bottom: 0.45rem;
+  letter-spacing: 0.01em;
+}
+
+.tarika-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.tarika-input-icon {
+  position: absolute;
+  left: 1rem;
+  color: var(--tarika-text-subtle, #9E8F94);
+  pointer-events: none;
+  transition: color 0.2s ease;
+}
+
+.tarika-input {
+  width: 100%;
+  padding: 0.85rem 1rem 0.85rem 2.75rem;
+  background-color: #FFFDFD;
+  border: 1.5px solid var(--tarika-border, #F0E2E0);
+  border-radius: 12px;
+  color: var(--tarika-text-main, #1F191B);
+  font-size: 0.925rem;
+  font-family: inherit;
+  transition: all 0.25s ease;
+  box-sizing: border-box;
+}
+
+.tarika-input::placeholder {
+  color: #B5A7AA;
+}
+
+.tarika-input:focus {
+  outline: none;
+  border-color: var(--tarika-rose, #D8727E);
+  background-color: #FFFFFF;
+  box-shadow: 0 0 0 3.5px rgba(216, 114, 126, 0.16);
+}
+
+.tarika-input-wrap:focus-within .tarika-input-icon {
+  color: var(--tarika-rose, #D8727E);
+}
+
+.tarika-password-toggle {
+  position: absolute;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: var(--tarika-text-subtle, #9E8F94);
+  cursor: pointer;
+  padding: 0.25rem;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s ease;
+}
+
+.tarika-password-toggle:hover {
+  color: var(--tarika-text-main, #1F191B);
+}
+
+/* Primary Button */
+.tarika-btn-auth-primary {
+  width: 100%;
+  padding: 0.9rem 1.5rem;
+  background: linear-gradient(135deg, #D8727E 0%, #C45766 100%);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 6px 20px rgba(216, 114, 126, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.tarika-btn-auth-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #E2818D 0%, #B8505E 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(216, 114, 126, 0.42);
+}
+
+.tarika-btn-auth-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.tarika-btn-auth-primary:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* Secondary Button (Google) */
+.tarika-btn-auth-secondary {
+  width: 100%;
+  padding: 0.85rem 1.5rem;
+  background-color: #FFFFFF;
+  border: 1.5px solid var(--tarika-border, #F0E2E0);
+  color: var(--tarika-text-main, #1F191B);
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  transition: all 0.2s ease;
+}
+
+.tarika-btn-auth-secondary:hover {
+  background-color: #FFFBF9;
+  border-color: var(--tarika-rose, #D8727E);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(216, 114, 126, 0.1);
+}
+
+/* Divider */
+.tarika-auth-divider {
+  display: flex;
+  align-items: center;
+  margin: 1.65rem 0;
+  color: var(--tarika-text-subtle, #9E8F94);
+  font-size: 0.78rem;
+}
+
+.tarika-auth-divider-line {
+  flex: 1;
+  height: 1px;
+  background-color: var(--tarika-border, #F0E2E0);
+}
+
+.tarika-auth-divider-text {
+  padding: 0 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+/* Auth Footer */
+.tarika-auth-footer {
+  margin-top: 1.75rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--tarika-text-muted, #6B5E63);
+}
+
+.tarika-auth-link {
+  color: var(--tarika-rose, #D8727E);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.tarika-auth-link:hover {
+  color: var(--tarika-rose-dark, #B8505E);
+  text-decoration: underline;
+}
+
+/* Spinner */
+.tarika-auth-spinner {
+  width: 1.15rem;
+  height: 1.15rem;
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #FFFFFF;
+  border-radius: 50%;
+  animation: tarikaSpin 0.7s linear infinite;
+}
+
+@keyframes tarikaSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive adjustments */
+@media (max-width: 900px) {
+  .tarika-auth-container {
+    grid-template-columns: 1fr;
+  }
+  .tarika-auth-hero {
+    padding: 2.5rem 2rem;
+    border-right: none;
+    border-bottom: 1px solid var(--tarika-border, #F0E2E0);
+  }
+  .tarika-auth-form-side {
+    padding: 2.5rem 2rem;
+  }
+}
+

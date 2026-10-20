@@ -1,0 +1,14 @@
+# Environment variables
+backend/.env
+frontend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+
+password.txt

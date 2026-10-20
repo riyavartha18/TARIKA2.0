@@ -1,0 +1,347 @@
+/* ==========================================================================
+   TARIKA DATA MINING — DEMAND PREDICTION & ANALYTICS MODULE STYLES
+   Haute Retail Luxury Design System
+   ========================================================================== */
+
+/* Main Container */
+.dp-analytics-container {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  width: 100%;
+}
+
+/* Section Header */
+.dp-analytics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(216, 114, 126, 0.15);
+}
+
+.dp-analytics-title-group h1 {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.85rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin: 0 0 0.4rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.dp-analytics-title-group p {
+  color: #6B5E63;
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.dp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.dp-badge-crimson {
+  background: rgba(184, 80, 94, 0.1);
+  color: #B8505E;
+  border: 1px solid rgba(184, 80, 94, 0.25);
+}
+
+.dp-badge-emerald {
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.dp-badge-amber {
+  background: rgba(245, 158, 11, 0.1);
+  color: #D97706;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.dp-badge-rose {
+  background: rgba(239, 68, 68, 0.1);
+  color: #DC2626;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.dp-badge-purple {
+  background: rgba(139, 92, 246, 0.1);
+  color: #7C3AED;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+
+/* Feature Grid Cards */
+.dp-featured-card {
+  background: #FFFFFF;
+  border: 1px solid rgba(216, 114, 126, 0.2);
+  border-radius: 16px;
+  padding: 2rem;
+  box-shadow: 0 8px 30px rgba(31, 25, 27, 0.04);
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.dp-featured-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 100%;
+  background: linear-gradient(180deg, #B8505E 0%, #8E3642 100%);
+}
+
+.dp-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+
+.dp-card-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin: 0.5rem 0 0.3rem 0;
+}
+
+.dp-card-desc {
+  color: #6B5E63;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  margin-bottom: 1.5rem;
+}
+
+/* Quick Metrics Row */
+.dp-quick-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.dp-stat-box {
+  background: #FAF7F5;
+  border: 1px solid rgba(216, 114, 126, 0.12);
+  border-radius: 12px;
+  padding: 1.1rem;
+
+}
+
+.dp-stat-box .label {
+  font-size: 0.78rem;
+  color: #6B5E63;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dp-stat-box .value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #1F191B;
+
+}
+
+.dp-stat-box .subtext {
+  font-size: 0.75rem;
+  color: #9E8F94;
+  margin-top: 0.25rem;
+}
+
+/* Buttons */
+.dp-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: linear-gradient(135deg, #B8505E 0%, #8E3642 100%);
+  color: #FFFFFF;
+  font-weight: 600;
+  font-size: 0.92rem;
+  padding: 0.75rem 1.4rem;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(184, 80, 94, 0.25);
+  transition: all 0.2s ease;
+}
+
+.dp-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(184, 80, 94, 0.35);
+}
+
+.dp-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #FFFFFF;
+  color: #1F191B;
+  font-weight: 600;
+  font-size: 0.88rem;
+  padding: 0.65rem 1.1rem;
+  border-radius: 8px;
+  border: 1px solid rgba(216, 114, 126, 0.3);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.dp-btn-secondary:hover {
+  background: #FAF7F5;
+  border-color: #B8505E;
+}
+
+/* Detail View Layout */
+.dp-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #FFFFFF;
+  border-bottom: 1px solid rgba(216, 114, 126, 0.15);
+  padding: 1.25rem 2rem;
+  margin: -2rem -2.5rem 2rem -2.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* Analysis Section Box */
+.dp-section-box {
+  background: #FFFFFF;
+  border: 1px solid rgba(216, 114, 126, 0.15);
+  border-radius: 16px;
+  padding: 1.75rem;
+  box-shadow: 0 4px 20px rgba(31, 25, 27, 0.03);
+}
+
+.dp-section-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin: 0 0 1rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Feature Information Gain Bars */
+.dp-ig-bar-wrapper {
+  margin-bottom: 1rem;
+}
+
+.dp-ig-label-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1F191B;
+  margin-bottom: 0.35rem;
+}
+
+.dp-ig-bar-bg {
+  height: 12px;
+  background: #FAF7F5;
+  border: 1px solid rgba(216, 114, 126, 0.15);
+  border-radius: 9999px;
+  overflow: hidden;
+  position: relative;
+}
+
+.dp-ig-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #B8505E 0%, #E29B9B 100%);
+  border-radius: 9999px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Tree Visualization */
+.dp-tree-node {
+  background: #FAF7F5;
+  border: 1px solid rgba(216, 114, 126, 0.2);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 0.75rem;
+  position: relative;
+}
+
+.dp-tree-node.is-leaf {
+  background: #FFFFFF;
+  border-left: 4px solid #059669;
+}
+
+.dp-tree-node.is-root {
+  border-left: 4px solid #B8505E;
+}
+
+/* Table Styling */
+.dp-table-container {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(216, 114, 126, 0.15);
+}
+
+.dp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.dp-table th {
+  background: #FAF7F5;
+  color: #6B5E63;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 0.85rem 1.2rem;
+  border-bottom: 1px solid rgba(216, 114, 126, 0.15);
+}
+
+.dp-table td {
+  padding: 0.95rem 1.2rem;
+  border-bottom: 1px solid rgba(216, 114, 126, 0.1);
+  color: #1F191B;
+}
+
+.dp-table tbody tr:hover {
+  background: rgba(250, 247, 245, 0.6);
+}
+
+/* Future Data Mining Cards Grid */
+.dp-future-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.dp-future-card {
+  background: #FFFFFF;
+  border: 1px dashed rgba(216, 114, 126, 0.3);
+  border-radius: 14px;
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+}
+
+.dp-future-card:hover {
+  border-style: solid;
+  border-color: #B8505E;
+  background: #FAF7F5;
+}
