@@ -1,4 +1,25 @@
+import re
+
 from django.db import models
+
+
+def parse_product_price(raw_value):
+    """
+    Parse the real products.actual_price TEXT column into a float.
+
+    The Supabase column is TEXT (e.g. '599' or '1,099'), so strip any
+    currency symbols / thousands separators defensively. Returns None
+    when no numeric value can be extracted.
+    """
+    if raw_value is None:
+        return None
+    cleaned = re.sub(r'[^\d.]', '', str(raw_value))
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 class Category(models.Model):
@@ -39,47 +60,47 @@ class Manufacturer(models.Model):
 
 
 class Product(models.Model):
-    product_id = models.CharField(max_length=255, primary_key=True)
-    product_name = models.CharField(max_length=255, blank=True, null=True)
-    category = models.ForeignKey(
-        Category,
-        to_field='category_id',
-        db_column='category_id',
-        on_delete=models.DO_NOTHING,
-        blank=True,
-        null=True,
-        related_name='products'
-    )
-    manufacturer = models.ForeignKey(
-        Manufacturer,
-        to_field='manufacturer_id',
-        db_column='manufacturer_id',
-        on_delete=models.DO_NOTHING,
-        blank=True,
-        null=True,
-        related_name='products'
-    )
-    sku = models.CharField(max_length=100, blank=True, null=True)
-    description = models.TextField(blank=True, null=True)
-    gender = models.CharField(max_length=50, blank=True, null=True)
-    color = models.CharField(max_length=100, blank=True, null=True)
-    size = models.CharField(max_length=50, blank=True, null=True)
-    material = models.CharField(max_length=100, blank=True, null=True)
-    cost_price = models.BigIntegerField(blank=True, null=True)
-    base_price = models.BigIntegerField(blank=True, null=True)
-    selling_price = models.BigIntegerField(blank=True, null=True)
-    launch_date = models.CharField(max_length=100, blank=True, null=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.CharField(max_length=100, blank=True, null=True)
-    updated_at = models.CharField(max_length=100, blank=True, null=True)
+    """
+    Maps the real Supabase `public.products` table.
+
+    Legacy Python attribute names (product_id, product_name, selling_price,
+    base_price) are preserved via db_column / properties so existing
+    serializers, services and frontend contracts keep working unchanged.
+    """
+    product_id = models.CharField(max_length=255, primary_key=True, db_column='product_key')
+    product_name = models.CharField(max_length=1000, blank=True, null=True, db_column='name')
+    main_category = models.CharField(max_length=255, blank=True, null=True, db_column='main_category')
+    sub_category = models.CharField(max_length=255, blank=True, null=True, db_column='sub_category')
+    image = models.CharField(max_length=2000, blank=True, null=True, db_column='image')
+    link = models.CharField(max_length=2000, blank=True, null=True, db_column='link')
+    discount_price = models.FloatField(blank=True, null=True, db_column='discount_price')
+    # NOTE: the real column is TEXT, not numeric.
+    actual_price_text = models.TextField(blank=True, null=True, db_column='actual_price')
+    # Real stock/availability source for the new `public.products` schema.
+    # There is no separate inventory table in this database; availability is
+    # carried directly on the product row as a numeric quantity.
+    available_quantity = models.FloatField(blank=True, null=True, db_column='available_quantity')
 
     class Meta:
         db_table = 'products'
         managed = False
-        ordering = ['-launch_date', 'product_name']
+        ordering = ['product_name', 'product_id']
 
     def __str__(self):
-        return f"{self.product_name or 'Product'} ({self.sku or self.product_id})"
+        return f"{self.product_name or 'Product'} ({self.product_id})"
+
+    # ------------------------------------------------------------------
+    # Legacy field-name compatibility (mapping layer for the new schema)
+    # ------------------------------------------------------------------
+    @property
+    def selling_price(self):
+        """Current/discounted price -> real `discount_price` column."""
+        return self.discount_price
+
+    @property
+    def base_price(self):
+        """List/original price -> real `actual_price` TEXT column, parsed."""
+        return parse_product_price(self.actual_price_text)
 
 
 class Inventory(models.Model):

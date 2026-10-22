@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 import jwt
 from datetime import datetime, timedelta, timezone
@@ -81,22 +82,29 @@ class SupabaseAuthService:
 
     @classmethod
     def register_customer(cls, email, password, full_name, phone=None, **extra_fields):
-        email = email.lower().strip()
-        
-        # 1. Validate if user already exists
+        # Normalise email so capitalisation / stray whitespace never breaks lookup.
+        email = cls._normalize_email(email)
+
+        # 1. Reject duplicate Supabase Auth accounts.
         with connection.cursor() as cursor:
-            cursor.execute("SELECT id FROM auth.users WHERE LOWER(email) = LOWER(%s);", [email])
+            cursor.execute("SELECT 1 FROM auth.users WHERE LOWER(email) = LOWER(%s);", [email])
             if cursor.fetchone():
                 raise ValidationError({"email": "An account with this email address already exists."})
 
-        # 2. Check if already in customer table
-        if Customer.objects.filter(email__iexact=email).exists():
-            raise ValidationError({"email": "A customer profile with this email already exists."})
+        # 2. Reject duplicate customer profiles (public.customers).
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM public.customers WHERE LOWER(email) = LOWER(%s);", [email])
+            if cursor.fetchone():
+                raise ValidationError({"email": "A customer profile with this email already exists."})
 
-        # 3. Create user in auth.users using pgcrypto bcrypt
         auth_user_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
-        
+        # Keep customer_id compatible with the existing 'U##########' format used
+        # by cart / orders / wishlist foreign keys (unique text id, not the auth UUID).
+        customer_id = 'U' + uuid.uuid4().hex[:10].upper()
+
+        # Credentials live in Supabase Auth (auth.users, bcrypt) - NOT as a
+        # plaintext column on public.customers.
         with transaction.atomic():
             with connection.cursor() as cursor:
                 cursor.execute("""
@@ -117,25 +125,23 @@ class SupabaseAuthService:
                     now,
                     now,
                     now,
-                    f'{{"full_name":"{full_name}"}}'
+                    json.dumps({"full_name": full_name}),
                 ])
 
-            # 4. Create customer business profile
-            customer_id = str(uuid.uuid4())
-            Customer.objects.create(
-                customer_id=customer_id,
-                auth_user_id=auth_user_id,
-                full_name=full_name,
-                email=email,
-                phone=phone,
-                city=extra_fields.get('city'),
-                state=extra_fields.get('state'),
-                country=extra_fields.get('country', 'India'),
-                registration_date=now.strftime('%Y-%m-%d'),
-                is_active=True,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat()
-            )
+            # Create the business profile in the real public.customers table.
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO public.customers (customer_id, customer_name, email, phone)
+                        VALUES (%s, %s, %s, %s);
+                        """,
+                        [customer_id, full_name, email, str(phone) if phone not in (None, '') else None],
+                    )
+            except Exception:
+                # Never leave an orphaned auth account if the profile insert fails.
+                transaction.set_rollback(True)
+                raise ValidationError({"detail": "Could not create the customer profile. Please try again."})
 
         tokens = cls.generate_token_pair(auth_user_id, email, Role.CUSTOMER)
         return {
@@ -149,18 +155,92 @@ class SupabaseAuthService:
             'tokens': tokens
         }
 
+    # Trusted mapping from app_users.role (lowercase) to the Role constants the
+    # API and frontend routes rely on. Never taken from client input.
+    STAFF_ROLE_MAP = {
+        'admin': Role.ADMIN,
+        'warehouse_manager': Role.WAREHOUSE_MANAGER,
+        'delivery': Role.DELIVERY_PARTNER,
+    }
+
+    @staticmethod
+    def _normalize_email(email):
+        return str(email or '').strip().lower()
+
+    @classmethod
+    def verify_staff_credentials(cls, email, password):
+        """Authenticate a staff member against public.app_users.
+
+        Password verification is performed server-side with pgcrypto bcrypt:
+        `password_hash = crypt(%s, password_hash)` is evaluated inside the
+        database, so the stored hash is never returned to the application or
+        the browser.
+        """
+        norm = cls._normalize_email(email)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT user_id, email, role, is_active,
+                       (password_hash = crypt(%s, password_hash)) AS password_ok
+                FROM public.app_users
+                WHERE LOWER(email) = LOWER(%s)
+                LIMIT 1;
+                """,
+                [password, norm],
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            raise AuthenticationFailed("Invalid email or password.")
+
+        user_id, db_email, db_role, is_active, password_ok = row
+        if not is_active:
+            raise AuthenticationFailed("This account is inactive. Please contact the administrator.")
+        if not password_ok:
+            raise AuthenticationFailed("Invalid email or password.")
+
+        role = cls.STAFF_ROLE_MAP.get(str(db_role).strip().lower())
+        if not role:
+            raise AuthenticationFailed("Unrecognized staff role.")
+
+        return {
+            'user_id': str(user_id),
+            'email': db_email,
+            'role': role,
+            'is_active': True,
+        }
+
     @classmethod
     def login(cls, email_or_username, password):
-        identifier = email_or_username.lower().strip()
-        
+        norm = cls._normalize_email(email_or_username)
+
+        # ---- Staff path: public.app_users (bcrypt verified server-side) ----
         with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT id, email, encrypted_password 
-                FROM auth.users 
-                WHERE LOWER(email) = LOWER(%s)
-                   OR LOWER(email) = LOWER(%s || '@iras.com')
-                   OR LOWER(email) LIKE LOWER(%s || '%%');
-            """, [identifier, identifier, identifier])
+            cursor.execute("SELECT 1 FROM public.app_users WHERE LOWER(email) = LOWER(%s) LIMIT 1;", [norm])
+            is_staff = cursor.fetchone() is not None
+
+        if is_staff:
+            staff = cls.verify_staff_credentials(norm, password)
+            tokens = cls.generate_token_pair(staff['user_id'], staff['email'], staff['role'])
+            display_name = staff['email'].split('@')[0].replace('.', ' ').replace('_', ' ').title()
+            return {
+                'user': {
+                    'id': staff['user_id'],
+                    'email': staff['email'],
+                    'full_name': display_name,
+                    'role': staff['role'],
+                    'warehouse_id': None,
+                    'is_active': True,
+                },
+                'tokens': tokens
+            }
+
+        # ---- Customer path: Supabase Auth (auth.users) + public.customers ----
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, email, encrypted_password FROM auth.users WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
+                [norm],
+            )
             row = cursor.fetchone()
 
         if not row:
@@ -168,7 +248,7 @@ class SupabaseAuthService:
 
         auth_user_id, user_email, encrypted_password = row
 
-        # Verify password using pgcrypto crypt
+        # Verify the password against the Supabase Auth bcrypt hash (server-side).
         with connection.cursor() as cursor:
             cursor.execute("SELECT (%s = crypt(%s, %s));", [encrypted_password, password, encrypted_password])
             valid = cursor.fetchone()[0]
@@ -176,72 +256,30 @@ class SupabaseAuthService:
         if not valid:
             raise AuthenticationFailed("Invalid email or password.")
 
-        # Determine Role and Profile
-        # 1. Check if Employee (ADMIN, WAREHOUSE_MANAGER, DELIVERY_PARTNER)
-        employee = Employee.objects.filter(auth_user_id=auth_user_id).first()
-        if employee:
-            if not employee.is_active:
-                raise PermissionDenied("This employee account has been deactivated. Please contact the administrator.")
-            
-            role = employee.role
-            warehouse_id = employee.warehouse_id
-            tokens = cls.generate_token_pair(auth_user_id, user_email, role, warehouse_id)
-            return {
-                'user': {
-                    'id': str(auth_user_id),
-                    'employee_id': employee.employee_id,
-                    'email': employee.email,
-                    'full_name': employee.full_name,
-                    'phone': employee.phone,
-                    'role': role,
-                    'warehouse_id': warehouse_id,
-                    'is_active': employee.is_active,
-                },
-                'tokens': tokens
-            }
+        # Retrieve the matching customer profile (mapped by email).
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT customer_id, customer_name, email, phone FROM public.customers WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
+                [user_email],
+            )
+            cust = cursor.fetchone()
 
-        # 2. Check if Customer
-        customer = Customer.objects.filter(auth_user_id=auth_user_id).first()
-        if not customer:
-            # Check by email if auth_user_id was not linked previously
-            customer = Customer.objects.filter(email__iexact=user_email).first()
-            if customer and not customer.auth_user_id:
-                customer.auth_user_id = auth_user_id
-                customer.save(update_fields=['auth_user_id'])
-            elif not customer:
-                # Auto-create Customer profile if missing
-                now = datetime.now(timezone.utc)
-                customer = Customer.objects.create(
-                    customer_id=str(uuid.uuid4()),
-                    auth_user_id=auth_user_id,
-                    email=user_email,
-                    full_name=user_email.split('@')[0].capitalize(),
-                    registration_date=now.strftime('%Y-%m-%d'),
-                    is_active=True,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat()
-                )
+        if not cust:
+            raise AuthenticationFailed("No customer profile is associated with this account.")
 
-        if customer:
-            if not customer.is_active:
-                raise PermissionDenied("This customer account has been deactivated.")
-            
-            tokens = cls.generate_token_pair(auth_user_id, user_email, Role.CUSTOMER)
-            return {
-                'user': {
-                    'id': str(auth_user_id),
-                    'customer_id': customer.customer_id,
-                    'email': customer.email,
-                    'full_name': customer.full_name,
-                    'phone': customer.phone,
-                    'role': Role.CUSTOMER,
-                    'city': customer.city,
-                    'state': customer.state,
-                },
-                'tokens': tokens
-            }
-
-        raise AuthenticationFailed("No profile record found associated with this user.")
+        customer_id, customer_name, cust_email, phone = cust
+        tokens = cls.generate_token_pair(auth_user_id, cust_email, Role.CUSTOMER)
+        return {
+            'user': {
+                'id': str(auth_user_id),
+                'customer_id': customer_id,
+                'email': cust_email,
+                'full_name': customer_name,
+                'phone': phone,
+                'role': Role.CUSTOMER,
+            },
+            'tokens': tokens
+        }
 
     @classmethod
     def admin_create_employee(cls, admin_user, email, password, full_name, role, warehouse_id=None, phone=None):

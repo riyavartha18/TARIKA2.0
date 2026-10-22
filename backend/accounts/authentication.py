@@ -1,8 +1,8 @@
-import uuid
-from datetime import datetime, timezone
+from types import SimpleNamespace
 from rest_framework import authentication
 from rest_framework.exceptions import AuthenticationFailed
-from accounts.models import Employee, Customer, Role
+from django.db import connection
+from accounts.models import Role
 from accounts.services.supabase_auth import SupabaseAuthService
 
 
@@ -52,75 +52,88 @@ class SupabaseAuthentication(authentication.BaseAuthentication):
 
         raw_token = parts[1]
         payload = SupabaseAuthService.verify_token(raw_token)
-        
+
         auth_user_id = payload.get('sub')
         if not auth_user_id:
             raise AuthenticationFailed("Token payload missing subject ('sub').")
 
-        # 1. Check if the user is an Employee (ADMIN, WAREHOUSE_MANAGER, DELIVERY_PARTNER)
-        employee = Employee.objects.filter(auth_user_id=auth_user_id).first()
-        if employee:
-            if not employee.is_active:
-                raise AuthenticationFailed("This employee account has been deactivated.")
-            
-            user = AuthenticatedUser(
-                auth_user_id=auth_user_id,
-                email=employee.email,
-                role=employee.role,
-                profile=employee,
-                warehouse_id=employee.warehouse_id,
-                is_active=employee.is_active
-            )
-            request.role = user.role
-            request.warehouse_id = user.warehouse_id
-            return (user, raw_token)
-
-        # 2. Check if the user is a Customer
-        customer = Customer.objects.filter(auth_user_id=auth_user_id).first()
-        if not customer:
-            # Fallback lookup by email (e.g. pre-existing customer or Google OAuth)
-            email_claim = payload.get('email')
-            if email_claim:
-                customer = Customer.objects.filter(email__iexact=email_claim).first()
-                if customer and not customer.auth_user_id:
-                    customer.auth_user_id = auth_user_id
-                    customer.save(update_fields=['auth_user_id'])
-
-        # 3. Auto-provision Customer if logged in via Google OAuth or missing profile
-        if not customer:
-            email_claim = payload.get('email')
-            if email_claim:
-                user_meta = payload.get('user_metadata', {})
-                full_name = user_meta.get('full_name') or user_meta.get('name') or email_claim.split('@')[0].capitalize()
-                now = datetime.now(timezone.utc)
-                customer = Customer.objects.create(
-                    customer_id=str(uuid.uuid4()),
-                    auth_user_id=auth_user_id,
-                    email=email_claim,
-                    full_name=full_name,
-                    registration_date=now.strftime('%Y-%m-%d'),
-                    is_active=True,
-                    created_at=now.isoformat(),
-                    updated_at=now.isoformat()
+        # ---- Staff: the JWT subject is the numeric public.app_users.user_id ----
+        # The role is always re-read from the database here; the role claim inside
+        # the token is never trusted for authorization.
+        if str(auth_user_id).isdigit():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT email, role, is_active FROM public.app_users WHERE user_id = %s LIMIT 1;",
+                    [auth_user_id],
                 )
+                row = cursor.fetchone()
+            if row:
+                email, db_role, is_active = row
+                if not is_active:
+                    raise AuthenticationFailed("This account is inactive.")
+                role = SupabaseAuthService.STAFF_ROLE_MAP.get(str(db_role).strip().lower())
+                if not role:
+                    raise AuthenticationFailed("Unrecognized staff role.")
+                display_name = str(email or '').split('@')[0].replace('.', ' ').replace('_', ' ').title()
+                profile = SimpleNamespace(
+                    employee_id=str(auth_user_id),
+                    email=email,
+                    full_name=display_name,
+                    role=role,
+                    is_active=is_active,
+                )
+                user = AuthenticatedUser(
+                    auth_user_id=auth_user_id,
+                    email=email,
+                    role=role,
+                    profile=profile,
+                    warehouse_id=None,
+                    is_active=is_active,
+                )
+                request.role = user.role
+                request.warehouse_id = None
+                return (user, raw_token)
+
+        # ---- Customer: the JWT subject is the Supabase Auth (auth.users) UUID ----
+        email_claim = payload.get('email')
+        if not email_claim:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT email FROM auth.users WHERE id = %s LIMIT 1;", [auth_user_id])
+                r = cursor.fetchone()
+            email_claim = r[0] if r else None
+
+        customer = None
+        if email_claim:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT customer_id, customer_name, email, phone FROM public.customers WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
+                    [email_claim],
+                )
+                customer = cursor.fetchone()
 
         if customer:
-            if not customer.is_active:
-                raise AuthenticationFailed("This customer account has been deactivated.")
-
+            customer_id, customer_name, cust_email, phone = customer
+            profile = SimpleNamespace(
+                customer_id=customer_id,
+                full_name=customer_name,
+                name=customer_name,
+                email=cust_email,
+                phone=phone,
+                is_active=True,
+            )
             user = AuthenticatedUser(
                 auth_user_id=auth_user_id,
-                email=customer.email,
+                email=cust_email,
                 role=Role.CUSTOMER,
-                profile=customer,
+                profile=profile,
                 warehouse_id=None,
-                is_active=customer.is_active
+                is_active=True,
             )
             request.role = user.role
             request.warehouse_id = None
             return (user, raw_token)
 
-        raise AuthenticationFailed("No profile record found in IRAS for this authenticated user.")
+        raise AuthenticationFailed("No profile record found for this authenticated user.")
 
     def authenticate_header(self, request):
         return 'Bearer realm="api"'

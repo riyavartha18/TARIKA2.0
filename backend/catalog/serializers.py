@@ -109,10 +109,14 @@ class ReviewDetailSerializer(serializers.ModelSerializer):
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    category_id = serializers.CharField(source='category.category_id', read_only=True)
-    category_name = serializers.CharField(source='category.category_name', read_only=True)
-    manufacturer_id = serializers.CharField(source='manufacturer.manufacturer_id', read_only=True)
-    manufacturer_name = serializers.CharField(source='manufacturer.manufacturer_name', read_only=True, default=None)
+    # New `public.products` schema has no category/manufacturer FKs.
+    # Map main_category -> legacy response keys the UI already consumes.
+    category_id = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source='main_category', read_only=True)
+    sub_category = serializers.CharField(read_only=True)
+    link = serializers.CharField(read_only=True)
+    base_price = serializers.SerializerMethodField()
+    selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     rating_summary = serializers.SerializerMethodField()
@@ -125,45 +129,52 @@ class ProductListSerializer(serializers.ModelSerializer):
             'product_name',
             'category_id',
             'category_name',
-            'manufacturer_id',
-            'manufacturer_name',
-            'sku',
-            'description',
-            'gender',
-            'color',
-            'size',
-            'material',
+            'sub_category',
+            'link',
             'base_price',
             'selling_price',
-            'launch_date',
-            'is_active',
             'in_stock',
             'total_stock',
             'rating_summary',
             'image'
         ]
 
+    def get_category_id(self, obj):
+        name = (obj.main_category or '').strip().lower()
+        return name.replace(' ', '-') if name else None
+
+    def get_base_price(self, obj):
+        # Real `actual_price` TEXT column, parsed to float by the model property.
+        return obj.base_price
+
+    def get_selling_price(self, obj):
+        # Real `discount_price` column, exposed via the model property.
+        return obj.selling_price
+
     def get_total_stock(self, obj):
-        # If annotated by queryset service (total_stock_annotated)
+        # New schema carries availability directly on the product row
+        # (`available_quantity`); there is no separate inventory table.
         if hasattr(obj, 'total_stock_annotated') and obj.total_stock_annotated is not None:
             return int(obj.total_stock_annotated)
-        if hasattr(obj, '_prefetched_objects_cache') and 'inventory_items' in obj._prefetched_objects_cache:
-            items = obj._prefetched_objects_cache['inventory_items']
-            return sum(item.stock_quantity or 0 for item in items)
+        qty = getattr(obj, 'available_quantity', None)
+        if qty is None:
+            return 0
         try:
-            return sum(item.stock_quantity or 0 for item in obj.inventory_items.all())
-        except (Exception, AssertionError):
+            return int(qty)
+        except (TypeError, ValueError):
             return 0
 
     def get_in_stock(self, obj):
         return self.get_total_stock(obj) > 0
 
     def get_rating_summary(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'reviews' not in cache:
+            # New schema has no reviews source; return a neutral summary
+            # instead of issuing a per-product query.
+            return {'average_rating': None, 'review_count': 0}
         try:
-            if hasattr(obj, '_prefetched_objects_cache') and 'reviews' in obj._prefetched_objects_cache:
-                reviews = obj._prefetched_objects_cache['reviews']
-            else:
-                reviews = obj.reviews.all()
+            reviews = cache['reviews']
             ratings = [r.rating for r in reviews if getattr(r, 'rating', None) is not None]
             count = len(ratings)
             avg = round(sum(ratings) / count, 1) if count > 0 else None
@@ -172,14 +183,21 @@ class ProductListSerializer(serializers.ModelSerializer):
             return {'average_rating': None, 'review_count': 0}
 
     def get_image(self, obj):
-        cat_name = (obj.category.category_name if obj.category else '').strip().lower()
+        # Use the real `image` column; fall back to category artwork when empty.
+        if obj.image:
+            return obj.image
+        cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
-    category_id = serializers.CharField(source='category.category_id', read_only=True)
-    category_name = serializers.CharField(source='category.category_name', read_only=True)
-    category = CategorySerializer(read_only=True)
+    # New `public.products` schema mapping (see ProductListSerializer above).
+    category_id = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source='main_category', read_only=True)
+    sub_category = serializers.CharField(read_only=True)
+    link = serializers.CharField(read_only=True)
+    base_price = serializers.SerializerMethodField()
+    selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     inventory_breakdown = serializers.SerializerMethodField()
@@ -194,21 +212,10 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'product_name',
             'category_id',
             'category_name',
-            'category',
-            'manufacturer_id',
-            'sku',
-            'description',
-            'gender',
-            'color',
-            'size',
-            'material',
-            'cost_price',
+            'sub_category',
+            'link',
             'base_price',
             'selling_price',
-            'launch_date',
-            'is_active',
-            'created_at',
-            'updated_at',
             'in_stock',
             'total_stock',
             'inventory_breakdown',
@@ -217,36 +224,44 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'image'
         ]
 
+    def get_category_id(self, obj):
+        name = (obj.main_category or '').strip().lower()
+        return name.replace(' ', '-') if name else None
+
+    def get_base_price(self, obj):
+        return obj.base_price
+
+    def get_selling_price(self, obj):
+        return obj.selling_price
+
     def get_total_stock(self, obj):
+        # New schema carries availability on the product row (`available_quantity`).
         if hasattr(obj, 'total_stock_annotated') and obj.total_stock_annotated is not None:
             return int(obj.total_stock_annotated)
-        if hasattr(obj, '_prefetched_objects_cache') and 'inventory_items' in obj._prefetched_objects_cache:
-            items = obj._prefetched_objects_cache['inventory_items']
-            return sum(item.stock_quantity or 0 for item in items)
+        qty = getattr(obj, 'available_quantity', None)
+        if qty is None:
+            return 0
         try:
-            return sum(item.stock_quantity or 0 for item in obj.inventory_items.all())
-        except (Exception, AssertionError):
+            return int(qty)
+        except (TypeError, ValueError):
             return 0
 
     def get_in_stock(self, obj):
         return self.get_total_stock(obj) > 0
 
     def get_inventory_breakdown(self, obj):
-        if hasattr(obj, '_prefetched_objects_cache') and 'inventory_items' in obj._prefetched_objects_cache:
-            items = obj._prefetched_objects_cache['inventory_items']
-            return WarehouseStockSerializer(items, many=True).data
-        try:
-            items = obj.inventory_items.select_related('warehouse').all()
-            return WarehouseStockSerializer(items, many=True).data
-        except (Exception, AssertionError):
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'inventory_items' not in cache:
+            # New schema has no warehouse inventory table; skip the query.
             return []
+        return WarehouseStockSerializer(cache['inventory_items'], many=True).data
 
     def get_rating_summary(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'reviews' not in cache:
+            return {'average_rating': None, 'review_count': 0}
         try:
-            if hasattr(obj, '_prefetched_objects_cache') and 'reviews' in obj._prefetched_objects_cache:
-                reviews = obj._prefetched_objects_cache['reviews']
-            else:
-                reviews = obj.reviews.all()
+            reviews = cache['reviews']
             ratings = [r.rating for r in reviews if getattr(r, 'rating', None) is not None]
             review_count = len(ratings)
             average_rating = round(sum(ratings) / review_count, 1) if review_count > 0 else None
@@ -258,11 +273,11 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             return {'average_rating': None, 'review_count': 0}
 
     def get_reviews(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', None) or {}
+        if 'reviews' not in cache:
+            return []
         try:
-            if hasattr(obj, '_prefetched_objects_cache') and 'reviews' in obj._prefetched_objects_cache:
-                rev_list = list(obj._prefetched_objects_cache['reviews'])
-            else:
-                rev_list = list(obj.reviews.all())
+            rev_list = list(cache['reviews'])
             # Sort newest first
             rev_list.sort(key=lambda r: (r.review_date or '', r.review_id or ''), reverse=True)
             return ReviewDetailSerializer(rev_list[:50], many=True).data
@@ -270,7 +285,10 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             return []
 
     def get_image(self, obj):
-        cat_name = (obj.category.category_name if obj.category else '').strip().lower()
+        # Use the real `image` column; fall back to category artwork when empty.
+        if obj.image:
+            return obj.image
+        cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 
 

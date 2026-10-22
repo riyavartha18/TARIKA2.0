@@ -140,6 +140,13 @@ export default function ShopCategories() {
 
   const productsSectionRef = useRef(null);
 
+  // Incremental loading state (server-side pagination)
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Guards against stale responses when filters change rapidly.
+  const reqSeq = useRef(0);
+
   // Fetch all customer-facing categories, strictly excluding Kids Wear
   useEffect(() => {
     async function fetchCatList() {
@@ -163,42 +170,83 @@ export default function ShopCategories() {
     }
   }, [searchParams]);
 
-  // Fetch products when category or API filters change
+  // Build the server query from the currently active filters.
+  const buildProductParams = (pageNum) => {
+    const params = {
+      sort: selectedSort,
+      page_size: 40,
+      page: pageNum,
+    };
+    if (selectedCategory && selectedCategory !== 'ALL') {
+      params.category = selectedCategory;
+    }
+    if (initialSearch) {
+      params.search = initialSearch;
+    }
+    if (onlyInStock) {
+      params.in_stock = 'true';
+    }
+    if (maxPriceFilter) {
+      params.max_price = maxPriceFilter;
+    }
+    return params;
+  };
+
+  // Fetch the first page whenever the active filters change.
   useEffect(() => {
+    const seq = ++reqSeq.current;
     async function fetchCategoryProducts() {
       setLoadingProducts(true);
       try {
-        const params = {
-          sort: selectedSort,
-          page_size: 40,
-        };
-
-        if (selectedCategory && selectedCategory !== 'ALL') {
-          params.category = selectedCategory;
-        }
-        if (initialSearch) {
-          params.search = initialSearch;
-        }
-        if (onlyInStock) {
-          params.in_stock = 'true';
-        }
-        if (maxPriceFilter) {
-          params.max_price = maxPriceFilter;
-        }
-
-        const res = await getProducts(params);
+        const res = await getProducts(buildProductParams(1));
+        if (seq !== reqSeq.current) return; // a newer request already started
         if (res.success) {
           setRawProducts(res.products || []);
+          setPage(1);
+          setHasMore(Boolean(res.hasNext));
         }
       } catch (err) {
-        console.error('Error fetching category products', err);
+        if (seq === reqSeq.current) console.error('Error fetching category products', err);
       } finally {
-        setLoadingProducts(false);
+        if (seq === reqSeq.current) setLoadingProducts(false);
       }
     }
 
     fetchCategoryProducts();
   }, [selectedCategory, selectedSort, onlyInStock, maxPriceFilter, initialSearch]);
+
+  // Append the next page without duplicating already-loaded products.
+  const handleLoadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    const seq = reqSeq.current;
+    const nextPage = page + 1;
+    setLoadingMore(true);
+    try {
+      const res = await getProducts(buildProductParams(nextPage));
+      if (seq !== reqSeq.current) return; // filters changed mid-flight
+      if (res.success) {
+        const incoming = res.products || [];
+        setRawProducts((prev) => {
+          const seen = new Set(prev.map((p) => p.product_id || p.id));
+          const merged = [...prev];
+          incoming.forEach((p) => {
+            const id = p.product_id || p.id;
+            if (!seen.has(id)) {
+              seen.add(id);
+              merged.push(p);
+            }
+          });
+          return merged;
+        });
+        setPage(nextPage);
+        setHasMore(Boolean(res.hasNext));
+      }
+    } catch (err) {
+      if (seq === reqSeq.current) console.error('Error loading more products', err);
+    } finally {
+      if (seq === reqSeq.current) setLoadingMore(false);
+    }
+  };
 
   // Client-side filtering for sale, size, color and subcategory
   const filteredProducts = React.useMemo(() => {
@@ -930,17 +978,31 @@ export default function ShopCategories() {
                 ))}
               </div>
             ) : filteredProducts.length > 0 ? (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-                  gap: '1.5rem',
-                }}
-              >
-                {filteredProducts.map((prod) => (
-                  <ProductCard key={prod.product_id || prod.id} product={prod} />
-                ))}
-              </div>
+              <>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                    gap: '1.5rem',
+                  }}
+                >
+                  {filteredProducts.map((prod) => (
+                    <ProductCard key={prod.product_id || prod.id} product={prod} />
+                  ))}
+                </div>
+                {hasMore && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: '2rem' }}>
+                    <button
+                      type="button"
+                      className="tarika-btn-outline"
+                      onClick={handleLoadMore}
+                      disabled={loadingMore}
+                    >
+                      {loadingMore ? 'Loading…' : 'Load More Products'}
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <div
                 style={{

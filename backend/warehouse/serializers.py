@@ -7,10 +7,13 @@ import datetime
 
 
 class WarehouseProductSerializer(serializers.ModelSerializer):
-    category_id = serializers.CharField(source='category.category_id', read_only=True)
-    category_name = serializers.CharField(source='category.category_name', read_only=True)
-    manufacturer_id = serializers.CharField(source='manufacturer.manufacturer_id', read_only=True)
-    manufacturer_name = serializers.CharField(source='manufacturer.manufacturer_name', read_only=True, default=None)
+    # New `public.products` schema: no category/manufacturer FKs.
+    category_id = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source='main_category', read_only=True)
+    sub_category = serializers.CharField(source='sub_category', read_only=True)
+    link = serializers.CharField(source='link', read_only=True)
+    base_price = serializers.SerializerMethodField()
+    selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
@@ -22,22 +25,24 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
             'product_name',
             'category_id',
             'category_name',
-            'manufacturer_id',
-            'manufacturer_name',
-            'sku',
-            'description',
-            'gender',
-            'color',
-            'size',
-            'material',
+            'sub_category',
+            'link',
             'base_price',
             'selling_price',
-            'launch_date',
-            'is_active',
             'in_stock',
             'total_stock',
             'image'
         ]
+
+    def get_category_id(self, obj):
+        name = (obj.main_category or '').strip().lower()
+        return name.replace(' ', '-') if name else None
+
+    def get_base_price(self, obj):
+        return obj.base_price
+
+    def get_selling_price(self, obj):
+        return obj.selling_price
 
     def get_total_stock(self, obj):
         if hasattr(obj, 'total_stock_annotated') and obj.total_stock_annotated is not None:
@@ -54,7 +59,10 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
         return self.get_total_stock(obj) > 0
 
     def get_image(self, obj):
-        cat_name = (obj.category.category_name if obj.category else '').strip().lower()
+        # Use the real `image` column; fall back to category artwork when empty.
+        if obj.image:
+            return obj.image
+        cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 
 
@@ -90,16 +98,15 @@ class WarehouseCategoryGroupedSerializer(serializers.ModelSerializer):
 class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     """
     Full product detail serializer for Warehouse Manager GET endpoint.
-    Includes all editable fields, read-only metadata, and inventory-derived
-    stock figures. All availability/status logic is computed here — React
-    simply displays what Django returns.
+    Maps the new `public.products` columns to the legacy response keys the
+    React edit form already consumes. Stock/availability are computed here.
     """
-    category_id = serializers.CharField(source='category.category_id', read_only=True)
-    category_name = serializers.CharField(source='category.category_name', read_only=True)
-    manufacturer_id = serializers.CharField(source='manufacturer.manufacturer_id', read_only=True)
-    manufacturer_name = serializers.CharField(
-        source='manufacturer.manufacturer_name', read_only=True, default=None
-    )
+    category_id = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source='main_category', read_only=True)
+    sub_category = serializers.CharField(source='sub_category', read_only=True)
+    link = serializers.CharField(source='link', read_only=True)
+    base_price = serializers.SerializerMethodField()
+    selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     availability_label = serializers.SerializerMethodField()
@@ -110,31 +117,30 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
         fields = [
             # Identifiers / read-only metadata
             'product_id',
-            'sku',
             'category_id',
             'category_name',
-            'manufacturer_id',
-            'manufacturer_name',
-            'cost_price',
-            'created_at',
-            'updated_at',
-            'launch_date',
-            # Editable fields
+            'sub_category',
+            'link',
+            # Editable fields (mapped to real columns)
             'product_name',
-            'description',
-            'gender',
-            'color',
-            'size',
-            'material',
             'base_price',
             'selling_price',
-            'is_active',
             # Inventory / availability (computed by Django)
             'in_stock',
             'total_stock',
             'availability_label',
             'image',
         ]
+
+    def get_category_id(self, obj):
+        name = (obj.main_category or '').strip().lower()
+        return name.replace(' ', '-') if name else None
+
+    def get_base_price(self, obj):
+        return obj.base_price
+
+    def get_selling_price(self, obj):
+        return obj.selling_price
 
     def get_total_stock(self, obj):
         """Sum stock_quantity across all inventory rows for this product."""
@@ -163,7 +169,10 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
         return 'Out of Stock'
 
     def get_image(self, obj):
-        cat_name = (obj.category.category_name if obj.category else '').strip().lower()
+        # Use the real `image` column; fall back to category artwork when empty.
+        if obj.image:
+            return obj.image
+        cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 
 

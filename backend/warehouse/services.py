@@ -10,61 +10,59 @@ class WarehouseService:
     @staticmethod
     def get_grouped_category_products(warehouse_id=None):
         """
-        Fetch all active products in ONE query, then group by category in Python.
-        Annotates total stock quantity from the inventory table.
+        Fetch all products from the real `public.products` table in ONE query,
+        then group by main_category in Python.  New schema columns are mapped
+        to the legacy dict keys the React warehouse views already consume.
         Returns a list of plain dicts ready for direct JSON serialization.
         """
         from catalog.serializers import CATEGORY_IMAGE_MAPPING
+        from django.db import DatabaseError
 
-        # Query all active products with category, manufacturer & total inventory stock
-        products = (
-            Product.objects
-            .filter(Q(is_active=True) | Q(is_active__isnull=True))
-            .select_related('category', 'manufacturer')
-            .annotate(stock_qty=Coalesce(Sum('inventory_items__stock_quantity'), 0))
-            .order_by('category__category_name', 'product_name')
-        )
+        # Query all products, aggregating inventory stock when the table exists.
+        try:
+            products = list(
+                Product.objects
+                .annotate(stock_qty=Coalesce(Sum('inventory_items__stock_quantity'), 0))
+                .order_by('main_category', 'product_name')
+            )
+        except DatabaseError:
+            # New database may not expose the inventory table; fall back to
+            # zero stock so the grouped catalogue still renders.
+            products = list(Product.objects.order_by('main_category', 'product_name'))
+            for p in products:
+                p.stock_qty = 0
 
-        # Group in Python
+        # Group in Python by main_category
         cat_map = {}
         for p in products:
-            cat = p.category
-            if cat is None:
+            cat_name = (p.main_category or '').strip()
+            if not cat_name:
                 continue
-            cid = cat.category_id
+            cid = cat_name.lower().replace(' ', '-')
             if cid not in cat_map:
-                cat_name = cat.category_name or ''
                 cat_map[cid] = {
                     'category_id': cid,
                     'category_name': cat_name,
-                    'parent_category_id': cat.parent_category_id,
-                    'description': cat.description or '',
-                    'image': CATEGORY_IMAGE_MAPPING.get(cat_name.strip().lower()),
+                    'parent_category_id': None,
+                    'description': '',
+                    'image': CATEGORY_IMAGE_MAPPING.get(cat_name.lower()),
                     'product_count': 0,
                     'products': []
                 }
-            cat_name_lower = (p.category.category_name or '').strip().lower()
             total_stock_val = int(getattr(p, 'stock_qty', 0) or 0)
+            image_url = p.image or CATEGORY_IMAGE_MAPPING.get(cat_name.lower())
             cat_map[cid]['products'].append({
                 'product_id': p.product_id,
                 'product_name': p.product_name,
                 'category_id': cid,
-                'category_name': cat.category_name,
-                'manufacturer_id': p.manufacturer_id,
-                'manufacturer_name': p.manufacturer.manufacturer_name if p.manufacturer else None,
-                'sku': p.sku,
-                'description': p.description,
-                'gender': p.gender,
-                'color': p.color,
-                'size': p.size,
-                'material': p.material,
+                'category_name': cat_name,
+                'sub_category': p.sub_category,
+                'link': p.link,
                 'base_price': p.base_price,
                 'selling_price': p.selling_price,
-                'launch_date': p.launch_date,
-                'is_active': p.is_active,
                 'in_stock': total_stock_val > 0,
                 'total_stock': total_stock_val,
-                'image': CATEGORY_IMAGE_MAPPING.get(cat_name_lower),
+                'image': image_url,
             })
             cat_map[cid]['product_count'] += 1
 
@@ -73,15 +71,14 @@ class WarehouseService:
     @staticmethod
     def get_product_detail(product_id):
         """
-        Fetch a single product by product_id with category, manufacturer,
-        and prefetched inventory items so the serializer can compute
+        Fetch a single product by product_id from the real `public.products`
+        table, prefetching inventory items so the serializer can compute
         total_stock without extra queries.
 
         Returns the Product ORM instance or raises Product.DoesNotExist.
         """
         return (
             Product.objects
-            .select_related('category', 'manufacturer')
             .prefetch_related('inventory_items')
             .get(product_id=product_id)
         )

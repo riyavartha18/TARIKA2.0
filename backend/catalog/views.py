@@ -18,6 +18,7 @@ from .serializers import (
     ProductDetailSerializer,
     CategoryGroupedProductsSerializer,
     ReviewDetailSerializer,
+    CATEGORY_IMAGE_MAPPING,
 )
 
 
@@ -76,30 +77,32 @@ class CategoryListView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        customer_facing_categories = [
-            'Dresses',
-            'Tops',
-            'Bottom Wear',
-            'Jeans',
-            'Jackets',
-            'Shirts',
-            'Kurtis',
-            'Sarees',
-            'Ethnic Wear',
-            'Handbags',
-            'Footwear',
-            'Accessories',
-        ]
-        # Annotate each customer-facing category with count of active products
-        categories = (
-            Category.objects.filter(category_name__in=customer_facing_categories)
-            .annotate(
-                product_count=Count('products', filter=Q(products__is_active=True))
-            )
-            .order_by('category_name')
+        # New `public.products` schema has no separate `categories` table.
+        # Customer-facing categories are derived from the real `main_category`
+        # column so navigation and filtering use actual database values.
+        rows = (
+            Product.objects
+            .exclude(main_category__isnull=True)
+            .exclude(main_category='')
+            .values('main_category')
+            .annotate(product_count=Count('product_id'))
+            .order_by('main_category')
         )
-        serializer = CategorySerializer(categories, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = []
+        for row in rows:
+            name = (row['main_category'] or '').strip()
+            if not name:
+                continue
+            data.append({
+                'category_id': name,
+                'category_name': name,
+                'id': name,
+                'name': name,
+                'slug': name,
+                'image': CATEGORY_IMAGE_MAPPING.get(name.lower(), None),
+                'product_count': row['product_count'],
+            })
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class ProductListView(APIView):
@@ -121,6 +124,7 @@ class ProductListView(APIView):
         search = request.query_params.get('search')
         min_price = request.query_params.get('min_price')
         max_price = request.query_params.get('max_price')
+        in_stock = request.query_params.get('in_stock')
         sort = request.query_params.get('sort')
 
         queryset = CatalogService.filter_and_sort_products(
@@ -128,6 +132,7 @@ class ProductListView(APIView):
             search=search,
             min_price=min_price,
             max_price=max_price,
+            in_stock=in_stock,
             sort=sort
         )
 
@@ -156,10 +161,11 @@ class ProductDetailView(APIView):
     authentication_classes = []
 
     def get(self, request, product_id):
-        product = get_object_or_404(
-            Product.objects.select_related('category').prefetch_related('inventory_items__warehouse', 'reviews'),
-            product_id=product_id
-        )
+        # New `public.products` schema has no inventory/reviews tables, so the
+        # product is fetched plainly. The serializer still exposes the same
+        # response shape (total_stock / inventory_breakdown / rating_summary /
+        # reviews default to safe empty values when those tables are absent).
+        product = get_object_or_404(Product.objects.all(), product_id=product_id)
         serializer = ProductDetailSerializer(product)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { Sparkles, Flame, Tag, Check, SlidersHorizontal, ChevronRight } from 'lucide-react';
 import ProductCard from '../../components/customer/ProductCard';
@@ -33,6 +33,12 @@ export default function ProductListingPage({ type }) {
   const [selectedSort, setSelectedSort] = useState('newest');
   const [onlyInStock, setOnlyInStock] = useState(false);
   const [maxPrice, setMaxPrice] = useState('');
+
+  // Incremental loading (server-side pagination) for the general catalogue
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const reqSeq = useRef(0);
 
   // Titles and metadata
   const meta = {
@@ -75,71 +81,113 @@ export default function ProductListingPage({ type }) {
     loadCategories();
   }, []);
 
+  const mapSortParam = (s) =>
+    s === 'price_asc' ? 'price_low_high' : s === 'price_desc' ? 'price_high_low' : 'newest';
+
+  const buildGeneralParams = (pageNum) => {
+    const params = { page_size: 24, page: pageNum, sort: mapSortParam(selectedSort) };
+    if (selectedCategory && selectedCategory !== 'ALL') params.category = selectedCategory;
+    if (onlyInStock) params.in_stock = 'true';
+    if (maxPrice) params.max_price = maxPrice;
+    return params;
+  };
+
+  // Curated sections (new-in / trending / sale) return a limited list, so their
+  // extra filters are applied on the client exactly as before.
+  const applyClientFilters = (inputList) => {
+    let list = [...(inputList || [])];
+    if (selectedCategory && selectedCategory !== 'ALL') {
+      list = list.filter(
+        (p) =>
+          (p.category?.slug && p.category.slug.toLowerCase() === selectedCategory.toLowerCase()) ||
+          (p.category?.name && p.category.name.toLowerCase() === selectedCategory.toLowerCase()) ||
+          (p.category_name && p.category_name.toLowerCase() === selectedCategory.toLowerCase())
+      );
+    }
+    if (onlyInStock) {
+      list = list.filter((p) => p.total_stock > 0 || p.is_in_stock);
+    }
+    if (maxPrice) {
+      list = list.filter((p) => getProductPricing(p).currentPrice <= Number(maxPrice));
+    }
+    if (selectedSort === 'price_asc') {
+      list.sort((a, b) => getProductPricing(a).currentPrice - getProductPricing(b).currentPrice);
+    } else if (selectedSort === 'price_desc') {
+      list.sort((a, b) => getProductPricing(b).currentPrice - getProductPricing(a).currentPrice);
+    }
+    return list;
+  };
+
   useEffect(() => {
+    const seq = ++reqSeq.current;
+    let active = true;
     async function loadData() {
       setLoading(true);
       try {
-        let res;
-        if (sectionType === 'new-in') {
-          res = await getNewArrivals(24);
-        } else if (sectionType === 'trending') {
-          res = await getTrending(24);
-        } else if (sectionType === 'sale') {
-          res = await getSale(24);
+        if (sectionType === 'general') {
+          // Server-side filtering + pagination for the full catalogue.
+          const res = await getProducts(buildGeneralParams(1));
+          if (!active || seq !== reqSeq.current) return;
+          if (res.success) {
+            setProducts(res.products || []);
+            setPage(1);
+            setHasMore(Boolean(res.hasNext));
+          }
         } else {
-          res = await getProducts({ page_size: 24, sort: selectedSort });
-        }
-
-        if (res.success) {
-          let list = res.products || [];
-
-          // Client-side filtering if endpoint returns array
-          if (selectedCategory && selectedCategory !== 'ALL') {
-            list = list.filter(
-              (p) =>
-                (p.category?.slug && p.category.slug.toLowerCase() === selectedCategory.toLowerCase()) ||
-                (p.category?.name && p.category.name.toLowerCase() === selectedCategory.toLowerCase()) ||
-                (p.category_name && p.category_name.toLowerCase() === selectedCategory.toLowerCase())
-            );
+          let res;
+          if (sectionType === 'new-in') res = await getNewArrivals(24);
+          else if (sectionType === 'trending') res = await getTrending(24);
+          else res = await getSale(24);
+          if (!active || seq !== reqSeq.current) return;
+          if (res.success) {
+            setProducts(applyClientFilters(res.products || []));
+            setHasMore(false);
           }
-
-          if (onlyInStock) {
-            list = list.filter((p) => p.total_stock > 0 || p.is_in_stock);
-          }
-
-          if (maxPrice) {
-            list = list.filter((p) => {
-              const pr = getProductPricing(p).currentPrice;
-              return pr <= Number(maxPrice);
-            });
-          }
-
-          // Sort
-          if (selectedSort === 'price_asc') {
-            list.sort((a, b) => {
-              const pa = getProductPricing(a).currentPrice;
-              const pb = getProductPricing(b).currentPrice;
-              return pa - pb;
-            });
-          } else if (selectedSort === 'price_desc') {
-            list.sort((a, b) => {
-              const pa = getProductPricing(a).currentPrice;
-              const pb = getProductPricing(b).currentPrice;
-              return pb - pa;
-            });
-          }
-
-          setProducts(list);
         }
       } catch (err) {
-        console.error('Error loading products', err);
+        if (active && seq === reqSeq.current) console.error('Error loading products', err);
       } finally {
-        setLoading(false);
+        if (active && seq === reqSeq.current) setLoading(false);
       }
     }
 
     loadData();
+    return () => {
+      active = false;
+    };
   }, [sectionType, selectedCategory, selectedSort, onlyInStock, maxPrice]);
+
+  const handleLoadMore = async () => {
+    if (sectionType !== 'general' || loadingMore || !hasMore) return;
+    const seq = reqSeq.current;
+    const nextPage = page + 1;
+    setLoadingMore(true);
+    try {
+      const res = await getProducts(buildGeneralParams(nextPage));
+      if (seq !== reqSeq.current) return;
+      if (res.success) {
+        const incoming = res.products || [];
+        setProducts((prev) => {
+          const seen = new Set(prev.map((p) => p.product_id || p.id));
+          const merged = [...prev];
+          incoming.forEach((p) => {
+            const id = p.product_id || p.id;
+            if (!seen.has(id)) {
+              seen.add(id);
+              merged.push(p);
+            }
+          });
+          return merged;
+        });
+        setPage(nextPage);
+        setHasMore(Boolean(res.hasNext));
+      }
+    } catch (err) {
+      if (seq === reqSeq.current) console.error('Error loading more products', err);
+    } finally {
+      if (seq === reqSeq.current) setLoadingMore(false);
+    }
+  };
 
   return (
     <div style={{ paddingBottom: '4rem' }}>
@@ -306,17 +354,31 @@ export default function ProductListingPage({ type }) {
           ))}
         </div>
       ) : products.length > 0 ? (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
-            gap: '1.5rem',
-          }}
-        >
-          {products.map((prod) => (
-            <ProductCard key={prod.product_id || prod.id} product={prod} />
-          ))}
-        </div>
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
+              gap: '1.5rem',
+            }}
+          >
+            {products.map((prod) => (
+              <ProductCard key={prod.product_id || prod.id} product={prod} />
+            ))}
+          </div>
+          {sectionType === 'general' && hasMore && (
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: '2rem' }}>
+              <button
+                type="button"
+                className="tarika-btn-outline"
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+              >
+                {loadingMore ? 'Loading…' : 'Load More Products'}
+              </button>
+            </div>
+          )}
+        </>
       ) : (
         <div
           style={{

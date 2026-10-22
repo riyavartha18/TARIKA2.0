@@ -242,6 +242,7 @@ class CatalogViewsAPITests(SimpleTestCase):
             search='silk',
             min_price='500',
             max_price='2000',
+            in_stock=None,
             sort='price_low_high'
         )
 
