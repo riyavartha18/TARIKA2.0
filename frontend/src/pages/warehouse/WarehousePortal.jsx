@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import StockToBeOrdered from '../../features/stockToBeOrdered/StockToBeOrdered';
 import { getProductPricing } from '../../utils/pricing';
 import {
   getCategories,
   getProducts,
-  getGroupedProducts,
+  invalidateCategoriesCache,
   getWarehouseOrders,
   getWarehouseOrderDetail,
   getWarehouseDeliveries,
@@ -59,8 +59,6 @@ import {
   Info,
   AlertTriangle,
   ArrowLeft,
-  ToggleLeft,
-  ToggleRight,
 } from 'lucide-react';
 import '../../styles/tarika.css';
 import '../../styles/customer-portal.css';
@@ -98,15 +96,22 @@ const CATEGORY_HERO_META = {
 
 // Reusable Warehouse Product Card matching Customer ProductCard presentation
 function WarehouseProductCard({ product, onCardClick }) {
-  if (!product) return null;
   const [hovered, setHovered] = React.useState(false);
+  if (!product) return null;
 
   const productName = product.product_name || product.name || 'Artisanal Garment';
   const { basePrice, currentPrice, discountAmount, isOnSale } = getProductPricing(product);
 
-  const totalStock = product.total_stock !== undefined ? product.total_stock : (product.in_stock ? 10 : 0);
-  const isOutOfStock = totalStock <= 0;
-  const isLowStock = totalStock > 0 && totalStock <= 5;
+  // Live stock straight from the real `available_quantity` column.
+  // null/undefined  -> stock data unavailable (never shown as a fake 0/10)
+  // 0               -> legitimate numeric zero = genuinely out of stock
+  const rawStock = product.available_quantity !== undefined
+    ? product.available_quantity
+    : product.total_stock;
+  const isStockUnknown = rawStock === null || rawStock === undefined || !Number.isFinite(Number(rawStock));
+  const totalStock = isStockUnknown ? null : Number(rawStock);
+  const isOutOfStock = !isStockUnknown && totalStock <= 0;
+  const isLowStock = !isStockUnknown && totalStock > 0 && totalStock <= 5;
 
   const imageUrl =
     product.image ||
@@ -177,7 +182,11 @@ function WarehouseProductCard({ product, onCardClick }) {
 
         {/* Stock Status Badge */}
         <div style={{ position: 'absolute', top: '0.65rem', right: '0.65rem' }}>
-          {isOutOfStock ? (
+          {isStockUnknown ? (
+            <span style={{ fontSize: '0.7rem', fontWeight: 700, padding: '0.25rem 0.6rem', borderRadius: '9999px', backgroundColor: '#F4F4F5', color: '#52525B', border: '1px solid #E4E4E7' }}>
+              STOCK DATA N/A
+            </span>
+          ) : isOutOfStock ? (
             <span style={{ fontSize: '0.7rem', fontWeight: 700, padding: '0.25rem 0.6rem', borderRadius: '9999px', backgroundColor: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>
               OUT OF STOCK
             </span>
@@ -269,7 +278,7 @@ function WarehouseProductCard({ product, onCardClick }) {
             <code style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1F191B', background: '#FAF7F5', padding: '0.15rem 0.45rem', borderRadius: '4px', border: '1px solid #F0E2E0' }}>
               {product.sku || 'SKU-KAT'}
             </code>
-            <span>Stock: <strong style={{ color: isOutOfStock ? '#DC2626' : '#1F191B' }}>{totalStock} units</strong></span>
+            <span>Stock: <strong style={{ color: isOutOfStock ? '#DC2626' : '#1F191B' }}>{isStockUnknown ? 'Data unavailable' : `${totalStock} units`}</strong></span>
           </div>
 
         </div>
@@ -801,19 +810,32 @@ function OrderDetailModal({ orderId, onClose, onOrderUpdated }) {
    On save, sends PUT request; Django validates and persists; modal refreshes.
    availability_label / in_stock / total_stock all come from Django — not React.
    ========================================================================== */
-function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
+function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token }) {
   // Full product data fetched from Django (has stock, availability_label, etc.)
   const [product, setProduct] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [fetchError, setFetchError] = React.useState(null);
 
-  // Form state — mirrors editable Django fields
+  // Form state — mirrors the real public.products columns
   const [form, setForm] = React.useState(null);
 
   // Save state
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState(null);
   const [saveSuccess, setSaveSuccess] = React.useState(false);
+
+  // Build an editable form object from a Django product payload.
+  // null stock stays '' (unavailable) — never converted to an invented 0.
+  const buildFormFromProduct = (p) => ({
+    product_name: p.product_name || '',
+    main_category: p.main_category ?? p.category_name ?? '',
+    sub_category: p.sub_category || '',
+    image: p.image || '',
+    link: p.link || '',
+    discount_price: p.discount_price ?? p.selling_price ?? '',
+    actual_price: p.actual_price ?? p.base_price ?? '',
+    available_quantity: p.available_quantity ?? p.total_stock ?? '',
+  });
 
   // Fetch full product detail from Django on mount
   React.useEffect(() => {
@@ -827,35 +849,11 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
       if (res.success && res.product) {
         setProduct(res.product);
         // Initialise form with Django's values
-        setForm({
-          product_name: res.product.product_name || '',
-          description: res.product.description || '',
-          gender: res.product.gender || '',
-          color: res.product.color || '',
-          size: res.product.size || '',
-          material: res.product.material || '',
-          base_price: res.product.base_price ?? '',
-          selling_price: res.product.selling_price ?? '',
-          stock_quantity: res.product.total_stock ?? 0,
-          launch_date: res.product.launch_date || '',
-          is_active: res.product.is_active !== false,
-        });
+        setForm(buildFormFromProduct(res.product));
       } else {
         // Fallback: use card product data so modal isn't empty
         setProduct(cardProduct);
-        setForm({
-          product_name: cardProduct.product_name || '',
-          description: cardProduct.description || '',
-          gender: cardProduct.gender || '',
-          color: cardProduct.color || '',
-          size: cardProduct.size || '',
-          material: cardProduct.material || '',
-          base_price: cardProduct.base_price ?? '',
-          selling_price: cardProduct.selling_price ?? '',
-          stock_quantity: cardProduct.total_stock ?? 0,
-          launch_date: cardProduct.launch_date || '',
-          is_active: cardProduct.is_active !== false,
-        });
+        setForm(buildFormFromProduct(cardProduct));
         setFetchError(res.error || 'Could not load full product details. Showing cached data.');
       }
       setLoading(false);
@@ -876,46 +874,60 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
     setSaveSuccess(false);
   };
 
+  // Numeric field validation: finite, non-negative, empty allowed (null).
+  const parseNumericField = (rawValue, label, allowEmpty = true) => {
+    const str = String(rawValue ?? '').trim();
+    if (str === '') {
+      return { ok: allowEmpty, value: allowEmpty ? null : undefined, error: allowEmpty ? null : `${label} is required.` };
+    }
+    const num = Number(str);
+    if (!Number.isFinite(num)) {
+      return { ok: false, error: `${label} must be a valid number (numbers like NaN or Infinity are not accepted).` };
+    }
+    if (num < 0) {
+      return { ok: false, error: `${label} cannot be negative.` };
+    }
+    return { ok: true, value: num };
+  };
+
   const handleSave = async () => {
-    if (!product?.product_id) return;
+    if (!product?.product_id || saving) return;
+
+    const name = (form.product_name || '').trim();
+    if (!name) {
+      setSaveError('Product name is required.');
+      return;
+    }
+    const discount = parseNumericField(form.discount_price, 'Discount price');
+    if (!discount.ok) { setSaveError(discount.error); return; }
+    const stock = parseNumericField(form.available_quantity, 'Available stock');
+    if (!stock.ok) { setSaveError(stock.error); return; }
+
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(false);
 
+    // Payload mirrors the real public.products columns. `actual_price` is
+    // sent as text because the database column is TEXT.
     const payload = {
-      product_name: (form.product_name || '').trim(),
-      description: form.description || '',
-      gender: form.gender || '',
-      color: form.color || '',
-      size: form.size || '',
-      material: form.material || '',
-      base_price: form.base_price !== '' ? Number(form.base_price) : null,
-      selling_price: form.selling_price !== '' ? Number(form.selling_price) : null,
-      stock_quantity: form.stock_quantity !== '' ? Number(form.stock_quantity) : 0,
-      launch_date: form.launch_date || '',
-      is_active: Boolean(form.is_active),
+      product_name: name,
+      main_category: (form.main_category || '').trim(),
+      sub_category: (form.sub_category || '').trim(),
+      image: (form.image || '').trim(),
+      link: (form.link || '').trim(),
+      discount_price: discount.value,
+      actual_price: String(form.actual_price ?? ''),
+      available_quantity: stock.value,
     };
 
-    const res = await updateWarehouseProduct(product.product_id, payload);
+    const res = await updateWarehouseProduct(product.product_id, payload, token);
 
     if (res.success && res.product) {
-      // Update local state with fresh data from Django (includes updated stock)
+      // Show the values Django re-read from the database (not optimistic state)
       setProduct(res.product);
-      setForm({
-        product_name: res.product.product_name || '',
-        description: res.product.description || '',
-        gender: res.product.gender || '',
-        color: res.product.color || '',
-        size: res.product.size || '',
-        material: res.product.material || '',
-        base_price: res.product.base_price ?? '',
-        selling_price: res.product.selling_price ?? '',
-        stock_quantity: res.product.total_stock ?? 0,
-        launch_date: res.product.launch_date || '',
-        is_active: res.product.is_active !== false,
-      });
+      setForm(buildFormFromProduct(res.product));
       setSaveSuccess(true);
-      // Notify parent so the product list refreshes
+      // Notify parent so the product list and category counts refresh
       if (onSaveSuccess) onSaveSuccess(res.product);
     } else {
       setSaveError(res.error || 'Failed to save changes. Please try again.');
@@ -923,9 +935,14 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
     setSaving(false);
   };
 
-  // Availability data comes exclusively from Django
-  const availLabel = product?.availability_label || (product?.in_stock ? 'Available' : 'Out of Stock');
-  const totalStock = product?.total_stock ?? 0;
+  // Availability data comes exclusively from Django; a real 0 stays
+  // 'Out of Stock' while missing data is labelled separately.
+  const availLabel = product?.availability_label
+    || (product?.available_quantity != null || product?.total_stock != null
+      ? ((Number(product.available_quantity ?? product.total_stock) > 0) ? 'Available' : 'Out of Stock')
+      : 'Stock Data Unavailable');
+  const rawStockValue = product ? (product.available_quantity !== undefined ? product.available_quantity : product.total_stock) : null;
+  const totalStock = rawStockValue === null || rawStockValue === undefined ? null : Number(rawStockValue);
   const isAvailable = availLabel === 'Available';
 
   const imageUrl =
@@ -1068,7 +1085,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
                     {availLabel}
                   </span>
                   <span style={{ fontSize: '0.78rem', color: '#6B5E63' }}>
-                    {totalStock} units in inventory
+                    {totalStock === null ? 'Stock data unavailable' : `${totalStock} units available`}
                   </span>
                 </div>
               </div>
@@ -1089,10 +1106,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem 1.5rem' }}>
                 {[
-                  { label: 'Product ID', value: product.product_id },
-                  { label: 'Cost Price', value: product.cost_price != null ? `₹${Number(product.cost_price).toLocaleString('en-IN')}` : 'N/A' },
-                  { label: 'Created At', value: product.created_at || 'N/A' },
-                  { label: 'Last Updated', value: product.updated_at || 'N/A' },
+                  { label: 'Product ID (key)', value: product.product_id },
                 ].map(({ label, value }) => (
                   <div key={label}>
                     <p style={{ margin: '0 0 2px 0', fontSize: '0.7rem', fontWeight: 600, color: '#9E8F94', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</p>
@@ -1123,147 +1137,97 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess }) {
                   />
                 </div>
 
-                {/* Description */}
+                {/* Category Row (real main_category / sub_category columns) */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                  <div>
+                    <label style={labelStyle}>Main Category</label>
+                    <input
+                      id="edit-main-category"
+                      type="text"
+                      value={form.main_category}
+                      onChange={(e) => handleChange('main_category', e.target.value)}
+                      placeholder="e.g. women's clothing"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Subcategory</label>
+                    <input
+                      id="edit-sub-category"
+                      type="text"
+                      value={form.sub_category}
+                      onChange={(e) => handleChange('sub_category', e.target.value)}
+                      placeholder="e.g. Western Wear"
+                      style={inputStyle}
+                    />
+                  </div>
+                </div>
+
+                {/* Image URL */}
                 <div>
-                  <label style={labelStyle}>Description</label>
-                  <textarea
-                    id="edit-product-description"
-                    value={form.description}
-                    onChange={(e) => handleChange('description', e.target.value)}
-                    placeholder="Product description…"
-                    rows={3}
-                    style={{ ...inputStyle, resize: 'vertical', minHeight: '80px', lineHeight: 1.5 }}
+                  <label style={labelStyle}>Image URL</label>
+                  <input
+                    id="edit-image-url"
+                    type="url"
+                    value={form.image}
+                    onChange={(e) => handleChange('image', e.target.value)}
+                    placeholder="https://…"
+                    style={inputStyle}
                   />
                 </div>
 
-                {/* Price & Inventory Stock Row */}
+                {/* Product Link */}
+                <div>
+                  <label style={labelStyle}>Product Link</label>
+                  <input
+                    id="edit-product-link"
+                    type="url"
+                    value={form.link}
+                    onChange={(e) => handleChange('link', e.target.value)}
+                    placeholder="https://…"
+                    style={inputStyle}
+                  />
+                </div>
+
+                {/* Pricing & Stock Row (double precision numbers + TEXT price) */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
                   <div>
-                    <label style={labelStyle}>Base Price (₹)</label>
+                    <label style={labelStyle}>Discount Price (₹)</label>
                     <input
-                      id="edit-base-price"
+                      id="edit-discount-price"
                       type="number"
                       min="0"
-                      value={form.base_price}
-                      onChange={(e) => handleChange('base_price', e.target.value)}
+                      step="any"
+                      value={form.discount_price}
+                      onChange={(e) => handleChange('discount_price', e.target.value)}
                       placeholder="0"
                       style={inputStyle}
                     />
                   </div>
                   <div>
-                    <label style={labelStyle}>Selling Price (₹)</label>
+                    <label style={labelStyle}>Actual Price (text)</label>
                     <input
-                      id="edit-selling-price"
+                      id="edit-actual-price"
+                      type="text"
+                      value={form.actual_price}
+                      onChange={(e) => handleChange('actual_price', e.target.value)}
+                      placeholder="e.g. 1,099"
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Available Stock</label>
+                    <input
+                      id="edit-available-quantity"
                       type="number"
                       min="0"
-                      value={form.selling_price}
-                      onChange={(e) => handleChange('selling_price', e.target.value)}
-                      placeholder="0"
+                      step="any"
+                      value={form.available_quantity}
+                      onChange={(e) => handleChange('available_quantity', e.target.value)}
+                      placeholder="Unknown"
                       style={inputStyle}
                     />
                   </div>
-                  <div>
-                    <label style={labelStyle}>Stock Quantity</label>
-                    <input
-                      id="edit-stock-quantity"
-                      type="number"
-                      min="0"
-                      value={form.stock_quantity}
-                      onChange={(e) => handleChange('stock_quantity', e.target.value)}
-                      placeholder="0"
-                      style={inputStyle}
-                    />
-                  </div>
-                </div>
-
-                {/* Attributes Row */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
-                  <div>
-                    <label style={labelStyle}>Gender</label>
-                    <select
-                      id="edit-gender"
-                      value={form.gender}
-                      onChange={(e) => handleChange('gender', e.target.value)}
-                      style={inputStyle}
-                    >
-                      <option value="">Any</option>
-                      <option value="Men">Men</option>
-                      <option value="Women">Women</option>
-                      <option value="Unisex">Unisex</option>
-                      <option value="Kids">Kids</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Size</label>
-                    <input
-                      id="edit-size"
-                      type="text"
-                      value={form.size}
-                      onChange={(e) => handleChange('size', e.target.value)}
-                      placeholder="XS / S / M / L…"
-                      style={inputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Color</label>
-                    <input
-                      id="edit-color"
-                      type="text"
-                      value={form.color}
-                      onChange={(e) => handleChange('color', e.target.value)}
-                      placeholder="e.g. Black"
-                      style={inputStyle}
-                    />
-                  </div>
-                </div>
-
-                {/* Material & Launch Date Row */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                  <div>
-                    <label style={labelStyle}>Material</label>
-                    <input
-                      id="edit-material"
-                      type="text"
-                      value={form.material}
-                      onChange={(e) => handleChange('material', e.target.value)}
-                      placeholder="e.g. Cotton, Silk…"
-                      style={inputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Launch Date</label>
-                    <input
-                      id="edit-launch-date"
-                      type="text"
-                      value={form.launch_date}
-                      onChange={(e) => handleChange('launch_date', e.target.value)}
-                      placeholder="YYYY-MM-DD"
-                      style={inputStyle}
-                    />
-                  </div>
-                </div>
-
-                {/* Active Toggle */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.85rem 1rem', borderRadius: '12px', background: '#FAF7F5', border: '1px solid var(--tarika-border, #F0E2E0)' }}>
-                  <div>
-                    <p style={{ margin: 0, fontSize: '0.85rem', fontWeight: 700, color: '#1F191B' }}>Product Active</p>
-                    <p style={{ margin: 0, fontSize: '0.75rem', color: '#6B5E63' }}>
-                      {form.is_active ? 'Visible to customers' : 'Hidden from customers'}
-                    </p>
-                  </div>
-                  <button
-                    id="edit-is-active-toggle"
-                    type="button"
-                    onClick={() => handleChange('is_active', !form.is_active)}
-                    style={{
-                      background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                      color: form.is_active ? '#059669' : '#9E8F94',
-                      transition: 'color 0.2s ease',
-                    }}
-                    aria-label={form.is_active ? 'Deactivate product' : 'Activate product'}
-                  >
-                    {form.is_active ? <ToggleRight size={36} /> : <ToggleLeft size={36} />}
-                  </button>
                 </div>
               </div>
             </div>
@@ -1386,7 +1350,16 @@ export default function WarehousePortal() {
 
   // --- 1. Products & Category State ---
   const [dbCategories, setDbCategories] = useState([]);
-  const [groupedCategories, setGroupedCategories] = useState([]);
+  // Products now come from the existing server-side paginated catalogue API
+  // (same optimized hook the customer Shop page uses) instead of loading the
+  // entire product table on every visit.
+  const [rawProducts, setRawProducts] = useState([]);
+  const [productsTotalCount, setProductsTotalCount] = useState(0);
+  const [productsPage, setProductsPage] = useState(1);
+  const [productsHasMore, setProductsHasMore] = useState(false);
+  const [loadingMoreProducts, setLoadingMoreProducts] = useState(false);
+  // Guards against stale responses when filters change rapidly.
+  const productsReqSeq = useRef(0);
   const [productsLoading, setProductsLoading] = useState(true);
   const [productsError, setProductsError] = useState(null);
   const [selectedProductForEdit, setSelectedProductForEdit] = useState(null);
@@ -1395,6 +1368,7 @@ export default function WarehousePortal() {
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [activeSubcategory, setActiveSubcategory] = useState('All');
   const [productSearchQuery, setProductSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedSort, setSelectedSort] = useState('newest');
   const [onlySale, setOnlySale] = useState(false);
   const [onlyInStock, setOnlyInStock] = useState(false);
@@ -1449,10 +1423,8 @@ export default function WarehousePortal() {
   const [assignPickupError, setAssignPickupError] = useState(null);
 
 
-  // Load Initial Catalog Data
   useEffect(() => {
     document.title = 'Warehouse Operations — TARIKA';
-    fetchCatalog();
   }, []);
 
   // Fetch Data when Tab Changes or Filters/Pages Change
@@ -1476,128 +1448,199 @@ export default function WarehousePortal() {
     returnsReason
   ]);
 
-  // Catalog Fetch
-  const fetchCatalog = async () => {
-    setProductsLoading(true);
+  // Categories come from the cached module-level helper (single query,
+  // invalidated after product edits via invalidateCategoriesCache()).
+  const loadCategories = useCallback(async (force = false) => {
+    if (force) invalidateCategoriesCache();
+    const catRes = await getCategories();
+    if (catRes.success && catRes.categories) {
+      setDbCategories(catRes.categories);
+    }
+    return catRes;
+  }, []);
+
+  // Load Initial Category Data (module-level cache avoids duplicate requests
+  // across dashboard visits). Declared after loadCategories so the hook
+  // binding is initialized before its dependency array is evaluated.
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
+
+  // Debounce free-text search before hitting the server (searching runs with
+  // an icontains index-friendly WHERE clause, not over the whole catalogue).
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(productSearchQuery.trim()), 350);
+    return () => clearTimeout(t);
+  }, [productSearchQuery]);
+
+  // Real database subcategories for the selected main category (returned by
+  // the grouped categories query). When the active pill is a real
+  // `sub_category` value the server filters on it directly.
+  const selectedDbCategory = useMemo(() => {
+    if (selectedCategory === 'ALL') return null;
+    const sel = selectedCategory.toLowerCase();
+    return dbCategories.find(
+      (c) => (c.category_name || '').toLowerCase() === sel || (c.category_id || '').toLowerCase() === sel
+    ) || null;
+  }, [dbCategories, selectedCategory]);
+
+  const isRealSubcategory = Boolean(
+    selectedDbCategory &&
+    activeSubcategory !== 'All' &&
+    (selectedDbCategory.sub_categories || []).some((s) => s.sub_category === activeSubcategory)
+  );
+
+  // Build the server-side query (filter + search + sort + pagination) for the
+  // current filter selection — reuses the existing optimized catalogue API.
+  const buildWarehouseProductParams = (pageNum) => {
+    const params = {
+      sort: selectedSort,
+      page: pageNum,
+      page_size: 48,
+    };
+    if (selectedCategory !== 'ALL') params.category = selectedCategory;
+    if (isRealSubcategory) params.sub_category = activeSubcategory;
+    if (debouncedSearch) params.search = debouncedSearch;
+    if (onlyInStock) params.in_stock = 'true';
+    if (maxPriceFilter) params.max_price = maxPriceFilter;
+    return params;
+  };
+
+  // Fetch one page of products, discarding stale responses when filters
+  // changed while the request was in flight.
+  const fetchProducts = useCallback(async (pageNum = 1) => {
+    const seq = ++productsReqSeq.current;
+    if (pageNum === 1) setProductsLoading(true);
     setProductsError(null);
     try {
-      const [catRes, groupedRes] = await Promise.all([
-        getCategories(),
-        getGroupedProducts()
-      ]);
-
-      if (catRes.success && catRes.categories) {
-        setDbCategories(catRes.categories);
-      }
-      if (groupedRes.success && groupedRes.categories) {
-        setGroupedCategories(groupedRes.categories);
-      } else if (!catRes.success) {
-        setProductsError(groupedRes.error || catRes.error || 'Failed to load database catalog products.');
+      const res = await getProducts(buildWarehouseProductParams(pageNum));
+      if (seq !== productsReqSeq.current) return; // a newer request already started
+      if (res.success) {
+        setRawProducts((prev) => {
+          if (pageNum === 1) return res.products || [];
+          const seen = new Set(prev.map((p) => p.product_id || p.id));
+          const merged = [...prev];
+          (res.products || []).forEach((p) => {
+            const id = p.product_id || p.id;
+            if (!seen.has(id)) {
+              seen.add(id);
+              merged.push(p);
+            }
+          });
+          return merged;
+        });
+        setProductsTotalCount(res.count || 0);
+        setProductsPage(pageNum);
+        setProductsHasMore(Boolean(res.hasNext));
+      } else {
+        setProductsError(res.error || 'Failed to load database catalog products.');
       }
     } catch (err) {
-      setProductsError('Network error loading catalog.');
+      if (seq === productsReqSeq.current) setProductsError('Network error loading catalog.');
     } finally {
-      setProductsLoading(false);
+      if (seq === productsReqSeq.current) {
+        setProductsLoading(false);
+        setLoadingMoreProducts(false);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort, onlyInStock, maxPriceFilter]);
+
+  // Re-fetch page one whenever the active server-side filters change.
+  useEffect(() => {
+    fetchProducts(1);
+  }, [fetchProducts]);
+
+  // Incremental loading: append the next page without duplicating products.
+  const handleLoadMoreProducts = async () => {
+    if (loadingMoreProducts || !productsHasMore) return;
+    const seq = productsReqSeq.current;
+    const nextPage = productsPage + 1;
+    setLoadingMoreProducts(true);
+    try {
+      const res = await getProducts(buildWarehouseProductParams(nextPage));
+      if (seq !== productsReqSeq.current) return; // filters changed mid-flight
+      if (res.success) {
+        setRawProducts((prev) => {
+          const seen = new Set(prev.map((p) => p.product_id || p.id));
+          const merged = [...prev];
+          (res.products || []).forEach((p) => {
+            const id = p.product_id || p.id;
+            if (!seen.has(id)) {
+              seen.add(id);
+              merged.push(p);
+            }
+          });
+          return merged;
+        });
+        setProductsPage(nextPage);
+        setProductsHasMore(Boolean(res.hasNext));
+      }
+    } catch (err) {
+      // keep current list; the button stays available for retry
+    } finally {
+      if (seq === productsReqSeq.current) setLoadingMoreProducts(false);
     }
   };
 
-  // Products filtering matching Customer ShopCategories
+  // Manual "Refresh Catalog" — refetches categories (cache invalidated) and
+  // reloads page one of the currently filtered product query.
+  const fetchCatalog = async () => {
+    await loadCategories(true);
+    fetchProducts(1);
+  };
+
+  // Keep the existing category-section presentation, but group only the
+  // currently loaded page results instead of the whole catalogue.
   const filteredCategories = useMemo(() => {
-    return groupedCategories
-      .filter((cat) => {
-        if (selectedCategory === 'ALL') return true;
-        const catName = (cat.category_name || '').toLowerCase();
-        const catId = (cat.category_id || '').toLowerCase();
-        const sel = selectedCategory.toLowerCase();
-        return catName === sel || catId === sel;
-      })
-      .map((cat) => {
-        let list = [...(cat.products || [])];
+    let list = [...rawProducts];
 
-        // Search query filter
-        if (productSearchQuery.trim()) {
-          const q = productSearchQuery.toLowerCase().trim();
-          list = list.filter((p) =>
-            (p.product_name || p.name || '').toLowerCase().includes(q) ||
-            (p.sku || '').toString().toLowerCase().includes(q) ||
-            (p.material || '').toLowerCase().includes(q) ||
-            (p.color || '').toLowerCase().includes(q) ||
-            (p.manufacturer_name || '').toLowerCase().includes(q) ||
-            (p.description || '').toLowerCase().includes(q)
-          );
-        }
+    // Client-side filters whose columns are not part of the real schema
+    // (kept exactly as before: sale comparison, size and color attributes)
+    if (onlySale) {
+      list = list.filter((p) => {
+        const base = Number(p.base_price || 0);
+        const sale = Number(p.selling_price || p.sale_price || base);
+        return p.is_on_sale || (sale > 0 && sale < base);
+      });
+    }
+    if (selectedSize !== 'All') {
+      list = list.filter((p) => (p.size || '').toLowerCase() === selectedSize.toLowerCase());
+    }
+    if (selectedColor !== 'All') {
+      list = list.filter((p) => (p.color || '').toLowerCase().includes(selectedColor.toLowerCase()));
+    }
 
-        // Sale filter
-        if (onlySale) {
-          list = list.filter((p) => {
-            const base = Number(p.base_price || 0);
-            const sale = Number(p.selling_price || p.sale_price || base);
-            return p.is_on_sale || sale < base;
-          });
-        }
-
-        // In stock filter
-        if (onlyInStock) {
-          list = list.filter((p) => (p.total_stock !== undefined ? p.total_stock > 0 : p.in_stock));
-        }
-
-        // Max price filter
-        if (maxPriceFilter) {
-          const maxP = Number(maxPriceFilter);
-          list = list.filter((p) => Number(p.selling_price || p.base_price || 0) <= maxP);
-        }
-
-        // Size filter
-        if (selectedSize !== 'All') {
-          list = list.filter((p) => (p.size || '').toLowerCase() === selectedSize.toLowerCase());
-        }
-
-        // Color filter
-        if (selectedColor !== 'All') {
-          list = list.filter((p) => (p.color || '').toLowerCase().includes(selectedColor.toLowerCase()));
-        }
-
-        // Subcategory keyword filter
-        if (activeSubcategory && !activeSubcategory.startsWith('All')) {
-          const keyword = activeSubcategory
-            .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
-            .trim()
-            .toLowerCase();
-          if (keyword) {
-            const subList = list.filter((p) => {
-              const name = (p.product_name || p.name || '').toLowerCase();
-              const desc = (p.description || '').toLowerCase();
-              return name.includes(keyword) || desc.includes(keyword);
-            });
-            if (subList.length > 0) list = subList;
-          }
-        }
-
-        // Sort products
-        list.sort((a, b) => {
-          const priceA = Number(a.selling_price || a.base_price || 0);
-          const priceB = Number(b.selling_price || b.base_price || 0);
-          if (selectedSort === 'price_low_high') return priceA - priceB;
-          if (selectedSort === 'price_high_low') return priceB - priceA;
-          if (selectedSort === 'name') return (a.product_name || '').localeCompare(b.product_name || '');
-          return (b.product_id || 0) - (a.product_id || 0);
+    // Legacy keyword filter only for preset pills that are not backed by a
+    // real `sub_category` value (real values are filtered server-side).
+    if (!isRealSubcategory && activeSubcategory && !activeSubcategory.startsWith('All')) {
+      const keyword = activeSubcategory
+        .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
+        .trim()
+        .toLowerCase();
+      if (keyword) {
+        const subList = list.filter((p) => {
+          const name = (p.product_name || p.name || '').toLowerCase();
+          return name.includes(keyword);
         });
+        if (subList.length > 0) list = subList;
+      }
+    }
 
-        return { ...cat, products: list };
-      })
-      .filter((cat) => cat.products && cat.products.length > 0);
-  }, [
-    groupedCategories,
-    selectedCategory,
-    productSearchQuery,
-    onlySale,
-    onlyInStock,
-    maxPriceFilter,
-    selectedSize,
-    selectedColor,
-    activeSubcategory,
-    selectedSort
-  ]);
+    const map = {};
+    list.forEach((p) => {
+      const catName = p.category_name || 'General Catalog';
+      if (!map[catName]) {
+        map[catName] = {
+          category_id: p.category_id || catName.toLowerCase().replace(/\s+/g, '-'),
+          category_name: catName,
+          products: [],
+        };
+      }
+      map[catName].products.push(p);
+    });
+    return Object.values(map).sort((a, b) => a.category_name.localeCompare(b.category_name));
+  }, [rawProducts, onlySale, selectedSize, selectedColor, activeSubcategory, isRealSubcategory]);
 
   const totalFilteredProducts = useMemo(() => {
     return filteredCategories.reduce((acc, cat) => acc + cat.products.length, 0);
@@ -2171,7 +2214,7 @@ export default function WarehousePortal() {
                     </span>
                   </div>
                   <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: 0 }}>
-                    Products fetched from existing database grouped category-wise matching customer presentation. Showing {totalFilteredProducts} items across {filteredCategories.length} categories.
+                    Products fetched from existing database grouped category-wise matching customer presentation. Showing {totalFilteredProducts.toLocaleString()} of {productsTotalCount.toLocaleString()} matched items across {filteredCategories.length} categories.
                   </p>
                 </div>
 
@@ -2205,8 +2248,14 @@ export default function WarehousePortal() {
                     {selectedCategory === 'ALL' ? 'ALL DEPARTMENTS' : selectedCategory}
                   </span>
 
-                  {/* Subcategories for selected category */}
-                  {selectedCategory !== 'ALL' && (CATEGORY_SUBCATEGORIES[selectedCategory] || [`All ${selectedCategory}`, `Classic ${selectedCategory}`, `Casual ${selectedCategory}`, `Formal ${selectedCategory}`, `Atelier ${selectedCategory}`]).map((sub, index) => {
+                  {/* Subcategories for selected category — real `sub_category`
+                      values from the database when available (filtered
+                      server-side), falling back to the existing presets */}
+                  {selectedCategory !== 'ALL' && (
+                    selectedDbCategory?.sub_categories?.length
+                      ? ['All ' + selectedCategory, ...selectedDbCategory.sub_categories.map((s) => s.sub_category)]
+                      : (CATEGORY_SUBCATEGORIES[selectedCategory] || [`All ${selectedCategory}`, `Classic ${selectedCategory}`, `Casual ${selectedCategory}`, `Formal ${selectedCategory}`, `Atelier ${selectedCategory}`])
+                  ).map((sub, index) => {
                     const isActive = activeSubcategory === sub || (index === 0 && activeSubcategory === 'All');
                     return (
                       <button
@@ -2563,7 +2612,7 @@ export default function WarehousePortal() {
                     }}
                   >
                     <span style={{ fontSize: '0.86rem', color: '#6B5E63', fontWeight: 600 }}>
-                      {totalFilteredProducts} Database Products Found
+                      {totalFilteredProducts.toLocaleString()} Loaded Products ({productsTotalCount.toLocaleString()} Matched in Database)
                     </span>
                     {hasActiveFilters && (
                       <button
@@ -2683,6 +2732,26 @@ export default function WarehousePortal() {
                           </div>
                         </section>
                       ))}
+                    </div>
+                  )}
+
+                  {/* Incremental loading: fetch next page of the filtered catalogue */}
+                  {!productsLoading && !productsError && filteredCategories.length > 0 && productsHasMore && (
+                    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="tarika-btn-outline"
+                        onClick={handleLoadMoreProducts}
+                        disabled={loadingMoreProducts}
+                        style={{ padding: '0.7rem 1.6rem', fontSize: '0.85rem' }}
+                      >
+                        <RefreshCw size={15} className={loadingMoreProducts ? 'animate-spin' : ''} color="#D8727E" />
+                        <span>
+                          {loadingMoreProducts
+                            ? 'Loading More…'
+                            : `Load More Products (Showing ${totalFilteredProducts.toLocaleString()} of ${productsTotalCount.toLocaleString()})`}
+                        </span>
+                      </button>
                     </div>
                   )}
 
@@ -3359,7 +3428,7 @@ export default function WarehousePortal() {
                                         boxShadow: '0 2px 6px rgba(5, 150, 105, 0.2)',
                                       }}
                                     >
-                                      <CheckCircle size={13} />
+                                      <CheckCircle2 size={13} />
                                       <span>{actionState === 'receiving' ? 'Confirming...' : 'Confirm Received'}</span>
                                     </button>
                                   );
@@ -3488,9 +3557,9 @@ export default function WarehousePortal() {
                     <div style={{ padding: '0.5rem', borderRadius: '10px', background: '#FBF1F0', color: '#D8727E' }}><Package size={20} /></div>
                   </div>
                   <h3 style={{ fontSize: '1.85rem', fontWeight: 800, color: '#1F191B', margin: '0 0 0.25rem' }}>
-                    {groupedCategories.reduce((acc, cat) => acc + (cat.product_count || 0), 0)}
+                    {productsTotalCount.toLocaleString()}
                   </h3>
-                  <p style={{ margin: 0, fontSize: '0.78rem', color: '#059669', fontWeight: 600 }}>Categorized across {groupedCategories.length} Categories</p>
+                  <p style={{ margin: 0, fontSize: '0.78rem', color: '#059669', fontWeight: 600 }}>Categorized across {dbCategories.length} Categories</p>
                 </div>
 
                 <div onClick={() => setActiveTab('orders')} style={{ background: '#FFFFFF', padding: '1.5rem', borderRadius: '16px', border: '1px solid #F0E2E0', cursor: 'pointer', transition: 'all 0.25s ease' }}>
@@ -3537,9 +3606,20 @@ export default function WarehousePortal() {
       {selectedProductForEdit && (
         <ProductEditModal
           product={selectedProductForEdit}
+          token={token}
           onClose={() => setSelectedProductForEdit(null)}
-          onSaveSuccess={() => {
-            fetchCatalog();
+          onSaveSuccess={(updatedProduct) => {
+            // Merge the database-confirmed values into the loaded page so the
+            // new details and stock appear immediately, while search, filters
+            // and pagination position are preserved (no full reload).
+            setRawProducts((prev) => prev.map((p) => (
+              (p.product_id || p.id) === (updatedProduct.product_id || updatedProduct.id)
+                ? { ...p, ...updatedProduct }
+                : p
+            )));
+            // Category names/counts may have changed — invalidate the cache.
+            invalidateCategoriesCache();
+            loadCategories();
           }}
         />
       )}

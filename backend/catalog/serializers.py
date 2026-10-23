@@ -119,6 +119,9 @@ class ProductListSerializer(serializers.ModelSerializer):
     selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
+    # Raw nullable stock value straight from `available_quantity` — lets the
+    # Warehouse UI tell a real 0 apart from missing/unavailable stock data.
+    available_quantity = serializers.FloatField(read_only=True)
     rating_summary = serializers.SerializerMethodField()
     image = serializers.SerializerMethodField()
 
@@ -135,6 +138,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             'selling_price',
             'in_stock',
             'total_stock',
+            'available_quantity',
             'rating_summary',
             'image'
         ]

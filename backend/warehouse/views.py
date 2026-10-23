@@ -6,6 +6,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.pagination import PageNumberPagination
 
 from accounts.permissions import IsAuthenticatedUser, IsWarehouseManager
+from accounts.authentication import SupabaseAuthentication
 from .services import WarehouseService
 from .serializers import (
     WarehouseCategoryGroupedSerializer,
@@ -61,18 +62,34 @@ class WarehouseGroupedProductsView(APIView):
 
 class WarehouseProductDetailView(APIView):
     """
-    GET  /api/warehouse/products/<product_id>/
-        Fetch full product details including inventory-derived stock figures.
-        availability_label ('Available' / 'Out of Stock') is computed by
-        Django — React must display this value directly.
+    GET  /api/warehouse/products/<product_key>/
+        Fetch full product details from the live `public.products` row.
+        availability_label ('Available' / 'Out of Stock' / 'Stock Data
+        Unavailable') is computed by Django — React must display this value
+        directly.
 
-    PUT  /api/warehouse/products/<product_id>/
+    PUT  /api/warehouse/products/<product_key>/
+        Requires an authenticated WAREHOUSE_MANAGER account (Enforced by Django
+        permission classes, never by hiding the button in React).
         Validate and persist editable product fields.
-        Returns the updated product (with refreshed stock data) on success.
+        Returns the updated product (re-read from the database) on success.
         Returns validation errors on failure.
     """
+    # GET stays public (matches the read-only catalogue endpoints);
+    # the Bearer token is only authenticated for PUT so the permission
+    # check has a trusted request.user without changing GET behaviour.
     permission_classes = [AllowAny]
     authentication_classes = []
+
+    def get_authenticators(self):
+        if self.request.method.lower() == 'put':
+            return [SupabaseAuthentication()]
+        return super().get_authenticators()
+
+    def get_permissions(self):
+        if self.request.method.lower() == 'put':
+            return [IsAuthenticatedUser(), IsWarehouseManager()]
+        return super().get_permissions()
 
     def get(self, request, product_id):
         try:

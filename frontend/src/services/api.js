@@ -151,23 +151,42 @@ export async function getMe(token) {
    CATALOG API HELPERS (Part 2A)
    ========================================================================== */
 
+// Lightweight category cache: the category list is derived from products and
+// only needs refreshing after mutations (e.g. a warehouse product edit).
+let categoriesCache = null; // { promise }
+
 /**
- * Fetch all categories with product counts.
+ * Fetch all categories with product counts (cached across the app session;
+ * call invalidateCategoriesCache() after any product mutation).
  */
 export async function getCategories() {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/catalog/categories/`);
-    const data = await response.json();
-    if (!response.ok) {
-      return { success: false, error: data.detail || 'Failed to fetch categories' };
-    }
-    return {
-      success: true,
-      categories: Array.isArray(data) ? data : (data.categories || [])
-    };
-  } catch (err) {
-    return { success: false, error: 'Network error fetching categories' };
+  if (!categoriesCache) {
+    categoriesCache = (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/catalog/categories/`);
+        const data = await response.json();
+        if (!response.ok) {
+          return { success: false, error: data.detail || 'Failed to fetch categories' };
+        }
+        return {
+          success: true,
+          categories: Array.isArray(data) ? data : (data.categories || [])
+        };
+      } catch (err) {
+        return { success: false, error: 'Network error fetching categories' };
+      }
+    })();
+    // Do not keep failed lookups cached — next call should retry.
+    categoriesCache.then((res) => {
+      if (res && res.success === false) categoriesCache = null;
+    });
   }
+  return categoriesCache;
+}
+
+/** Clears the category cache so the next getCategories() refetches. */
+export function invalidateCategoriesCache() {
+  categoriesCache = null;
 }
 
 /**
@@ -177,6 +196,7 @@ export async function getProducts(params = {}) {
   try {
     const query = new URLSearchParams();
     if (params.category) query.append('category', params.category);
+    if (params.sub_category) query.append('sub_category', params.sub_category);
     if (params.search) query.append('search', params.search);
     if (params.min_price) query.append('min_price', params.min_price);
     if (params.max_price) query.append('max_price', params.max_price);
@@ -205,61 +225,6 @@ export async function getProducts(params = {}) {
     };
   } catch (err) {
     return { success: false, error: 'Network error fetching products' };
-  }
-}
-
-/**
- * Fetch products grouped according to their actual database categories.
- */
-export async function getGroupedProducts() {
-  try {
-    let response = await fetch(`${API_BASE_URL}/api/warehouse/products/grouped/`);
-    if (!response.ok) {
-      response = await fetch(`${API_BASE_URL}/api/catalog/grouped-products/`);
-    }
-
-    if (response.ok) {
-      const data = await response.json();
-      const categoriesList = Array.isArray(data) ? data : (data.categories || []);
-      if (categoriesList.length > 0) {
-        return {
-          success: true,
-          categories: categoriesList,
-          count: Array.isArray(data) ? data.length : (data.count || categoriesList.length)
-        };
-      }
-    }
-
-    // Fallback: Fetch products from Django catalog API & group by category
-    const prodsRes = await getProducts({ page_size: 500 });
-    if (prodsRes.success && prodsRes.products.length > 0) {
-      const groupedMap = {};
-      prodsRes.products.forEach((prod) => {
-        const catName = prod.category_name || 'General Catalog';
-        const catId = prod.category_id || catName.toLowerCase().replace(/\s+/g, '-');
-        if (!groupedMap[catId]) {
-          groupedMap[catId] = {
-            category_id: catId,
-            category_name: catName,
-            description: `Database products in ${catName}`,
-            product_count: 0,
-            products: []
-          };
-        }
-        groupedMap[catId].products.push(prod);
-        groupedMap[catId].product_count += 1;
-      });
-      const categoriesList = Object.values(groupedMap);
-      return {
-        success: true,
-        categories: categoriesList,
-        count: categoriesList.length
-      };
-    }
-
-    return { success: false, error: 'Failed to fetch database products' };
-  } catch (err) {
-    return { success: false, error: 'Network error fetching grouped products' };
   }
 }
 
@@ -466,17 +431,29 @@ export async function getWarehouseProductDetail(productId) {
 
 /**
  * Update a product via the Warehouse Manager endpoint.
- * Sends validated form fields to Django; Django validates and persists.
- * Returns the updated product on success, or validation errors on failure.
+ * Sends validated form fields to Django; Django authenticates the Bearer
+ * token, enforces the warehouse_manager role, validates and persists.
+ * Returns the updated product (re-read from the database) on success.
  */
-export async function updateWarehouseProduct(productId, payload) {
+export async function updateWarehouseProduct(productId, payload, token = null) {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/warehouse/products/${productId}/`, {
+    const authToken = token || localStorage.getItem('iras_token');
+    const headers = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/warehouse/products/${encodeURIComponent(productId)}/`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
     const data = await response.json();
+    if (response.status === 401 || response.status === 403) {
+      return {
+        success: false,
+        error: data.detail || 'You are not authorised to edit products. Please sign in as a Warehouse Manager.',
+        status: response.status,
+      };
+    }
     if (!response.ok) {
       // Django returns { errors: { field: [...] } } on 400
       const errors = data.errors || {};

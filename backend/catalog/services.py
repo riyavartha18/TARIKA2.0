@@ -32,6 +32,7 @@ class CatalogService:
         cls,
         queryset=None,
         category=None,
+        sub_category=None,
         search=None,
         min_price=None,
         max_price=None,
@@ -64,7 +65,16 @@ class CatalogService:
                     Q(sub_category__icontains=category_str)
                 )
 
-        # 2. Text search across real schema text columns
+        # 2. Sub-category filter on the real `sub_category` column
+        if sub_category:
+            sub_str = str(sub_category).strip()
+            if sub_str:
+                queryset = queryset.filter(
+                    Q(sub_category__iexact=sub_str) |
+                    Q(sub_category__icontains=sub_str)
+                )
+
+        # 3. Text search across real schema text columns
         if search:
             search_str = str(search).strip()
             search_query = (
@@ -74,22 +84,22 @@ class CatalogService:
             )
             queryset = queryset.filter(search_query)
 
-        # 3. Min price filter (discount_price is the real discounted price)
+        # 4. Min price filter (discount_price is the real discounted price)
         min_p = cls._parse_price_filter(min_price)
         if min_p is not None:
             queryset = queryset.filter(discount_price__gte=min_p)
 
-        # 4. Max price filter
+        # 5. Max price filter
         max_p = cls._parse_price_filter(max_price)
         if max_p is not None:
             queryset = queryset.filter(discount_price__lte=max_p)
 
-        # 5. In-stock filter uses the real `available_quantity` column
+        # 6. In-stock filter uses the real `available_quantity` column
         #    (the new schema has no separate inventory table).
         if in_stock is not None and str(in_stock).strip().lower() in ('true', '1', 'yes'):
             queryset = queryset.filter(available_quantity__gt=0)
 
-        # 6. Sorting (real schema has no launch_date / created_at columns,
+        # 7. Sorting (real schema has no launch_date / created_at columns,
         #    so 'newest' falls back to a stable product_key order)
         sort_option = (sort or 'newest').lower().strip()
         if sort_option == 'price_low_high':

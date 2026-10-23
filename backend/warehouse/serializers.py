@@ -1,21 +1,23 @@
 from django.db.models import Q
 from rest_framework import serializers
-from catalog.models import Category, Product, Inventory, Manufacturer, OrderItem
+from catalog.models import Category, Product, Manufacturer, OrderItem
 from catalog.serializers import CATEGORY_IMAGE_MAPPING, ManufacturerSerializer
 from .models import Order, Delivery, Return, Payment
 import datetime
+import math
 
 
 class WarehouseProductSerializer(serializers.ModelSerializer):
     # New `public.products` schema: no category/manufacturer FKs.
     category_id = serializers.SerializerMethodField()
     category_name = serializers.CharField(source='main_category', read_only=True)
-    sub_category = serializers.CharField(source='sub_category', read_only=True)
-    link = serializers.CharField(source='link', read_only=True)
+    sub_category = serializers.CharField(read_only=True)
+    link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
+    available_quantity = serializers.FloatField(read_only=True)
     image = serializers.SerializerMethodField()
 
     class Meta:
@@ -31,6 +33,7 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
             'selling_price',
             'in_stock',
             'total_stock',
+            'available_quantity',
             'image'
         ]
 
@@ -45,18 +48,12 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
         return obj.selling_price
 
     def get_total_stock(self, obj):
-        if hasattr(obj, 'total_stock_annotated') and obj.total_stock_annotated is not None:
-            return int(obj.total_stock_annotated)
-        if hasattr(obj, '_prefetched_objects_cache') and 'inventory_items' in obj._prefetched_objects_cache:
-            items = obj._prefetched_objects_cache['inventory_items']
-            return sum(item.stock_quantity or 0 for item in items)
-        try:
-            return sum(item.stock_quantity or 0 for item in obj.inventory_items.all())
-        except (Exception, AssertionError):
-            return 0
+        # Real stock column on the product row; None means stock data is
+        # unavailable and must NOT be shown as a fabricated zero.
+        return obj.available_quantity
 
     def get_in_stock(self, obj):
-        return self.get_total_stock(obj) > 0
+        return (obj.available_quantity or 0) > 0
 
     def get_image(self, obj):
         # Use the real `image` column; fall back to category artwork when empty.
@@ -98,15 +95,20 @@ class WarehouseCategoryGroupedSerializer(serializers.ModelSerializer):
 class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     """
     Full product detail serializer for Warehouse Manager GET endpoint.
-    Maps the new `public.products` columns to the legacy response keys the
-    React edit form already consumes. Stock/availability are computed here.
+    Exposes the real `public.products` columns (plus the legacy keys the React
+    edit form consumes). Stock/availability are computed from the live
+    `available_quantity` value returned by Supabase.
     """
     category_id = serializers.SerializerMethodField()
     category_name = serializers.CharField(source='main_category', read_only=True)
-    sub_category = serializers.CharField(source='sub_category', read_only=True)
-    link = serializers.CharField(source='link', read_only=True)
+    main_category = serializers.CharField(read_only=True)
+    sub_category = serializers.CharField(read_only=True)
+    link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    discount_price = serializers.FloatField(read_only=True)
+    # Real `actual_price` column is TEXT — exposed verbatim for the edit form.
+    actual_price = serializers.CharField(source='actual_price_text', read_only=True)
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     availability_label = serializers.SerializerMethodField()
@@ -119,12 +121,16 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
             'product_id',
             'category_id',
             'category_name',
+            'main_category',
             'sub_category',
             'link',
             # Editable fields (mapped to real columns)
             'product_name',
             'base_price',
             'selling_price',
+            'discount_price',
+            'actual_price',
+            'available_quantity',
             # Inventory / availability (computed by Django)
             'in_stock',
             'total_stock',
@@ -143,56 +149,57 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
         return obj.selling_price
 
     def get_total_stock(self, obj):
-        """Sum stock_quantity across all inventory rows for this product."""
-        if hasattr(obj, 'total_stock_annotated') and obj.total_stock_annotated is not None:
-            return int(obj.total_stock_annotated)
-        if hasattr(obj, '_prefetched_objects_cache') and 'inventory_items' in obj._prefetched_objects_cache:
-            items = obj._prefetched_objects_cache['inventory_items']
-            return sum(item.stock_quantity or 0 for item in items)
-        try:
-            return sum(item.stock_quantity or 0 for item in obj.inventory_items.all())
-        except (Exception, AssertionError):
-            return 0
+        """Live stock straight from the product's `available_quantity` column."""
+        return obj.available_quantity
 
     def get_in_stock(self, obj):
-        """Django determines availability: total_stock > 0 means in-stock."""
-        return self.get_total_stock(obj) > 0
+        """Django determines availability: available_quantity > 0 means in-stock."""
+        return (obj.available_quantity or 0) > 0
 
     def get_availability_label(self, obj):
         """
         Authoritative availability label computed by Django.
-        React must display this value directly — no client-side logic.
+        A real numeric 0 ('Out of Stock') is distinguished from missing data
+        ('Stock Data Unavailable'). React must display this value directly.
         """
-        total = self.get_total_stock(obj)
-        if total > 0:
+        qty = obj.available_quantity
+        if qty is None:
+            return 'Stock Data Unavailable'
+        if qty > 0:
             return 'Available'
         return 'Out of Stock'
 
     def get_image(self, obj):
-        # Use the real `image` column; fall back to category artwork when empty.
-        if obj.image:
-            return obj.image
-        cat_name = (obj.main_category or '').strip().lower()
-        return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
+        # Detail/edit view: return the RAW `image` column so the edit form
+        # never persists a decorative category fallback into the database.
+        return obj.image
 
 
 class WarehouseProductUpdateSerializer(serializers.Serializer):
     """
-    Write serializer for PUT /api/warehouse/products/<id>/.
-    Validates all editable product fields — all business rules are enforced
-    here in Django, not in React.
+    Write serializer for PUT /api/warehouse/products/<product_key>/.
+    Validates exactly the editable columns of the real `public.products`
+    schema — all business rules are enforced here in Django, not in React.
+    `discount_price` and `available_quantity` are double precision numbers;
+    `actual_price` is TEXT in the database and stays text here.
     """
-    product_name = serializers.CharField(max_length=255)
-    description = serializers.CharField(allow_blank=True, required=False, default='')
-    gender = serializers.CharField(max_length=50, allow_blank=True, required=False, default='')
-    color = serializers.CharField(max_length=100, allow_blank=True, required=False, default='')
-    size = serializers.CharField(max_length=50, allow_blank=True, required=False, default='')
-    material = serializers.CharField(max_length=100, allow_blank=True, required=False, default='')
-    base_price = serializers.IntegerField(required=False, allow_null=True)
-    selling_price = serializers.IntegerField(required=False, allow_null=True)
-    stock_quantity = serializers.IntegerField(required=False, allow_null=True)
-    launch_date = serializers.CharField(max_length=100, allow_blank=True, required=False, default='')
-    is_active = serializers.BooleanField(required=False, default=True)
+    product_name = serializers.CharField(max_length=1000)
+    main_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    sub_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    image = serializers.CharField(max_length=2000, allow_blank=True, required=False, allow_null=True)
+    link = serializers.CharField(max_length=2000, allow_blank=True, required=False, allow_null=True)
+    discount_price = serializers.FloatField(required=False, allow_null=True)
+    actual_price = serializers.CharField(max_length=255, allow_blank=True, required=False, allow_null=True)
+    available_quantity = serializers.FloatField(required=False, allow_null=True)
+
+    @staticmethod
+    def _clean_number(value, field_label):
+        """Reject NaN/Infinity and non-finite numeric input outright."""
+        if value is None:
+            return None
+        if not math.isfinite(value):
+            raise serializers.ValidationError(f'{field_label} must be a finite number.')
+        return value
 
     def validate_product_name(self, value):
         """Product name must be a non-empty, non-whitespace string."""
@@ -203,32 +210,25 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError('Product name must be at least 2 characters.')
         return stripped
 
-    def validate_base_price(self, value):
-        """Base price must be a non-negative integer if provided."""
+    def validate_main_category(self, value):
+        return (value or '').strip() or None
+
+    def validate_sub_category(self, value):
+        return (value or '').strip() or None
+
+    def validate_discount_price(self, value):
+        """Discount price must be a finite, non-negative number if provided."""
+        value = self._clean_number(value, 'Discount price')
         if value is not None and value < 0:
-            raise serializers.ValidationError('Base price cannot be negative.')
+            raise serializers.ValidationError('Discount price cannot be negative.')
         return value
 
-    def validate_selling_price(self, value):
-        """Selling price must be a non-negative integer if provided."""
+    def validate_available_quantity(self, value):
+        """Available stock must be a finite, non-negative number if provided."""
+        value = self._clean_number(value, 'Available quantity')
         if value is not None and value < 0:
-            raise serializers.ValidationError('Selling price cannot be negative.')
+            raise serializers.ValidationError('Available quantity cannot be negative.')
         return value
-
-    def validate_stock_quantity(self, value):
-        """Stock quantity must be a non-negative integer if provided."""
-        if value is not None and value < 0:
-            raise serializers.ValidationError('Stock quantity cannot be negative.')
-        return value
-
-    def validate(self, data):
-        """Cross-field validation."""
-        base = data.get('base_price')
-        selling = data.get('selling_price')
-        if base is not None and selling is not None and selling > base * 2:
-            # Soft warning — allow but flag; strict constraint can be added here
-            pass
-        return data
 
 
 class WarehouseOrderSerializer(serializers.ModelSerializer):

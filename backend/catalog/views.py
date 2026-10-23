@@ -80,28 +80,39 @@ class CategoryListView(APIView):
         # New `public.products` schema has no separate `categories` table.
         # Customer-facing categories are derived from the real `main_category`
         # column so navigation and filtering use actual database values.
+        # One grouped query returns main_category + sub_category counts together
+        # (avoids a second per-category query for subcategory navigation).
         rows = (
             Product.objects
             .exclude(main_category__isnull=True)
             .exclude(main_category='')
-            .values('main_category')
+            .values('main_category', 'sub_category')
             .annotate(product_count=Count('product_id'))
             .order_by('main_category')
         )
-        data = []
+        cat_map = {}
         for row in rows:
             name = (row['main_category'] or '').strip()
             if not name:
                 continue
-            data.append({
+            entry = cat_map.setdefault(name, {
                 'category_id': name,
                 'category_name': name,
                 'id': name,
                 'name': name,
                 'slug': name,
                 'image': CATEGORY_IMAGE_MAPPING.get(name.lower(), None),
-                'product_count': row['product_count'],
+                'product_count': 0,
+                'sub_categories': [],
             })
+            entry['product_count'] += row['product_count']
+            sub_name = (row['sub_category'] or '').strip()
+            if sub_name and sub_name.lower() != name.lower():
+                entry['sub_categories'].append({
+                    'sub_category': sub_name,
+                    'product_count': row['product_count'],
+                })
+        data = sorted(cat_map.values(), key=lambda c: c['category_name'])
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -121,6 +132,7 @@ class ProductListView(APIView):
 
     def get(self, request):
         category = request.query_params.get('category')
+        sub_category = request.query_params.get('sub_category')
         search = request.query_params.get('search')
         min_price = request.query_params.get('min_price')
         max_price = request.query_params.get('max_price')
@@ -129,6 +141,7 @@ class ProductListView(APIView):
 
         queryset = CatalogService.filter_and_sort_products(
             category=category,
+            sub_category=sub_category,
             search=search,
             min_price=min_price,
             max_price=max_price,

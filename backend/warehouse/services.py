@@ -1,36 +1,34 @@
 from django.db.models import Count, Q, Sum, Case, When, Value, IntegerField
-from django.db.models.functions import Coalesce
-from catalog.models import Category, Product, Inventory
+from catalog.models import Category, Product
 from .models import Order, Delivery, Return, Payment
 import datetime
 
 
 
 class WarehouseService:
+    # Columns the warehouse product views actually render — selecting just these
+    # keeps the grouped-endpoint rows narrow (image/link/text columns are large).
+    GROUPED_PRODUCT_FIELDS = [
+        'product_id', 'product_name', 'main_category', 'sub_category',
+        'link', 'discount_price', 'actual_price_text', 'available_quantity', 'image',
+    ]
+
     @staticmethod
     def get_grouped_category_products(warehouse_id=None):
         """
         Fetch all products from the real `public.products` table in ONE query,
-        then group by main_category in Python.  New schema columns are mapped
-        to the legacy dict keys the React warehouse views already consume.
-        Returns a list of plain dicts ready for direct JSON serialization.
+        then group by main_category in Python.  Stock is read directly from the
+        real `available_quantity` column (there is no inventory table in this
+        schema).  Returns a list of plain dicts ready for direct JSON
+        serialization.
         """
         from catalog.serializers import CATEGORY_IMAGE_MAPPING
-        from django.db import DatabaseError
 
-        # Query all products, aggregating inventory stock when the table exists.
-        try:
-            products = list(
-                Product.objects
-                .annotate(stock_qty=Coalesce(Sum('inventory_items__stock_quantity'), 0))
-                .order_by('main_category', 'product_name')
-            )
-        except DatabaseError:
-            # New database may not expose the inventory table; fall back to
-            # zero stock so the grouped catalogue still renders.
-            products = list(Product.objects.order_by('main_category', 'product_name'))
-            for p in products:
-                p.stock_qty = 0
+        products = (
+            Product.objects
+            .only(*WarehouseService.GROUPED_PRODUCT_FIELDS)
+            .order_by('main_category', 'product_name')
+        )
 
         # Group in Python by main_category
         cat_map = {}
@@ -49,7 +47,8 @@ class WarehouseService:
                     'product_count': 0,
                     'products': []
                 }
-            total_stock_val = int(getattr(p, 'stock_qty', 0) or 0)
+            # Real DB stock: keep None as None (missing data) — never invent it.
+            total_stock_val = p.available_quantity if p.available_quantity is not None else None
             image_url = p.image or CATEGORY_IMAGE_MAPPING.get(cat_name.lower())
             cat_map[cid]['products'].append({
                 'product_id': p.product_id,
@@ -60,91 +59,67 @@ class WarehouseService:
                 'link': p.link,
                 'base_price': p.base_price,
                 'selling_price': p.selling_price,
-                'in_stock': total_stock_val > 0,
+                'in_stock': (total_stock_val or 0) > 0,
                 'total_stock': total_stock_val,
+                'available_quantity': total_stock_val,
                 'image': image_url,
             })
             cat_map[cid]['product_count'] += 1
 
         return sorted(cat_map.values(), key=lambda c: c['category_name'])
 
+    # Serializer key -> real Product model field name, for the PUT endpoint.
+    # (update_fields must receive these FIELD names, not db_column names.)
+    UPDATE_FIELD_MAP = {
+        'product_name': 'product_name',            # -> products.name
+        'main_category': 'main_category',          # -> products.main_category
+        'sub_category': 'sub_category',            # -> products.sub_category
+        'image': 'image',                          # -> products.image
+        'link': 'link',                            # -> products.link
+        'discount_price': 'discount_price',        # double precision
+        'actual_price': 'actual_price_text',       # TEXT column, kept as text
+        'available_quantity': 'available_quantity',  # double precision
+    }
+
     @staticmethod
     def get_product_detail(product_id):
         """
-        Fetch a single product by product_id from the real `public.products`
-        table, prefetching inventory items so the serializer can compute
-        total_stock without extra queries.
+        Fetch a single product by product_key from the real `public.products`
+        table.  Stock lives directly on the product row (`available_quantity`),
+        so no related queries are needed.
 
         Returns the Product ORM instance or raises Product.DoesNotExist.
         """
-        return (
-            Product.objects
-            .prefetch_related('inventory_items')
-            .get(product_id=product_id)
-        )
+        return Product.objects.get(product_id=product_id)
 
     @staticmethod
     def update_product(product_id, validated_data):
         """
-        Apply validated_data to the product identified by product_id and
-        persist it to the database.  All business-rule validation is expected
-        to have been done by the serializer before calling this method.
+        Apply validated_data to the product identified by product_key and
+        persist it to the real `public.products` table.  All business-rule
+        validation is expected to have been done by the serializer before
+        calling this method.
 
-        Returns the updated Product instance (with inventory prefetched so the
-        response serializer can compute in_stock / total_stock immediately).
+        Returns the freshly re-read Product instance so callers respond with
+        the values actually saved in the database (not optimistic state).
 
         Raises Product.DoesNotExist if no product matches product_id.
         """
-        product = (
-            Product.objects
-            .select_related('category', 'manufacturer')
-            .get(product_id=product_id)
-        )
+        product = Product.objects.get(product_id=product_id)
 
-        # Apply each validated field
-        updatable_fields = [
-            'product_name', 'description', 'gender', 'color',
-            'size', 'material', 'base_price', 'selling_price',
-            'launch_date', 'is_active',
-        ]
-        for field in updatable_fields:
-            if field in validated_data:
-                value = validated_data[field]
-                # Normalise empty strings to None for optional text fields
-                if value == '' and field in ('description', 'gender', 'color', 'size', 'material', 'launch_date'):
-                    value = None
-                setattr(product, field, value)
+        updated_fields = []
+        for data_key, model_attr in WarehouseService.UPDATE_FIELD_MAP.items():
+            if data_key in validated_data:
+                setattr(product, model_attr, validated_data[data_key])
+                updated_fields.append(model_attr)
 
-        # Stamp updated_at with current UTC timestamp string
-        product.updated_at = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+        if updated_fields:
+            # update_fields takes model FIELD names (Django maps them to the
+            # db_column values like 'name' / 'actual_price' itself).
+            product.save(update_fields=updated_fields)
 
-        product.save()
-
-        # Update stock quantity in inventory table if provided
-        if 'stock_quantity' in validated_data and validated_data['stock_quantity'] is not None:
-            new_stock = validated_data['stock_quantity']
-            inventory_items = Inventory.objects.filter(product_id=product_id)
-            if inventory_items.exists():
-                first_item = inventory_items.first()
-                first_item.stock_quantity = new_stock
-                first_item.last_restock_date = datetime.datetime.utcnow().strftime('%Y-%m-%d')
-                first_item.save()
-            else:
-                import uuid
-                Inventory.objects.create(
-                    inventory_id=str(uuid.uuid4()),
-                    product_id=product_id,
-                    stock_quantity=new_stock,
-                    last_restock_date=datetime.datetime.utcnow().strftime('%Y-%m-%d')
-                )
-
-        # Re-fetch with inventory so caller can serialise stock fields
-        return (
-            Product.objects
-            .select_related('category', 'manufacturer')
-            .prefetch_related('inventory_items')
-            .get(product_id=product_id)
-        )
+        # Re-read the row so the response reflects persisted database values.
+        return Product.objects.get(product_id=product_id)
 
     @staticmethod
     def get_orders(search=None, status=None, warehouse_id=None):
