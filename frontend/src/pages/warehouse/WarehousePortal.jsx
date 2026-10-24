@@ -1496,13 +1496,22 @@ export default function WarehousePortal() {
     const params = {
       sort: selectedSort,
       page: pageNum,
-      page_size: 48,
+      page_size: 20,
     };
     if (selectedCategory !== 'ALL') params.category = selectedCategory;
     if (isRealSubcategory) params.sub_category = activeSubcategory;
+    else if (activeSubcategory && !activeSubcategory.startsWith('All')) {
+      const keyword = activeSubcategory
+        .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
+        .trim();
+      if (keyword) params.subcategory_search = keyword;
+    }
     if (debouncedSearch) params.search = debouncedSearch;
     if (onlyInStock) params.in_stock = 'true';
     if (maxPriceFilter) params.max_price = maxPriceFilter;
+    if (onlySale) params.on_sale = 'true';
+    if (selectedSize !== 'All') params.size = selectedSize;
+    if (selectedColor !== 'All') params.color = selectedColor;
     return params;
   };
 
@@ -1536,7 +1545,10 @@ export default function WarehousePortal() {
         setProductsError(res.error || 'Failed to load database catalog products.');
       }
     } catch (err) {
-      if (seq === productsReqSeq.current) setProductsError('Network error loading catalog.');
+      if (seq === productsReqSeq.current) {
+        console.error('Error loading warehouse catalog', err);
+        setProductsError('Network error loading catalog.');
+      }
     } finally {
       if (seq === productsReqSeq.current) {
         setProductsLoading(false);
@@ -1544,7 +1556,8 @@ export default function WarehousePortal() {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort, onlyInStock, maxPriceFilter]);
+  }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort,
+    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor]);
 
   // Re-fetch page one whenever the active server-side filters change.
   useEffect(() => {
@@ -1557,6 +1570,7 @@ export default function WarehousePortal() {
     const seq = productsReqSeq.current;
     const nextPage = productsPage + 1;
     setLoadingMoreProducts(true);
+    setProductsError(null);
     try {
       const res = await getProducts(buildWarehouseProductParams(nextPage));
       if (seq !== productsReqSeq.current) return; // filters changed mid-flight
@@ -1575,9 +1589,14 @@ export default function WarehousePortal() {
         });
         setProductsPage(nextPage);
         setProductsHasMore(Boolean(res.hasNext));
+      } else {
+        setProductsError(res.error || 'Failed to load more catalog products.');
       }
     } catch (err) {
-      // keep current list; the button stays available for retry
+      if (seq === productsReqSeq.current) {
+        console.error('Error loading more warehouse products', err);
+        setProductsError('Network error loading more catalog products.');
+      }
     } finally {
       if (seq === productsReqSeq.current) setLoadingMoreProducts(false);
     }
@@ -1590,45 +1609,11 @@ export default function WarehousePortal() {
     fetchProducts(1);
   };
 
-  // Keep the existing category-section presentation, but group only the
-  // currently loaded page results instead of the whole catalogue.
+  // Keep the category-section presentation while grouping only the current
+  // server-filtered page results.
   const filteredCategories = useMemo(() => {
-    let list = [...rawProducts];
-
-    // Client-side filters whose columns are not part of the real schema
-    // (kept exactly as before: sale comparison, size and color attributes)
-    if (onlySale) {
-      list = list.filter((p) => {
-        const base = Number(p.base_price || 0);
-        const sale = Number(p.selling_price || p.sale_price || base);
-        return p.is_on_sale || (sale > 0 && sale < base);
-      });
-    }
-    if (selectedSize !== 'All') {
-      list = list.filter((p) => (p.size || '').toLowerCase() === selectedSize.toLowerCase());
-    }
-    if (selectedColor !== 'All') {
-      list = list.filter((p) => (p.color || '').toLowerCase().includes(selectedColor.toLowerCase()));
-    }
-
-    // Legacy keyword filter only for preset pills that are not backed by a
-    // real `sub_category` value (real values are filtered server-side).
-    if (!isRealSubcategory && activeSubcategory && !activeSubcategory.startsWith('All')) {
-      const keyword = activeSubcategory
-        .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
-        .trim()
-        .toLowerCase();
-      if (keyword) {
-        const subList = list.filter((p) => {
-          const name = (p.product_name || p.name || '').toLowerCase();
-          return name.includes(keyword);
-        });
-        if (subList.length > 0) list = subList;
-      }
-    }
-
     const map = {};
-    list.forEach((p) => {
+    rawProducts.forEach((p) => {
       const catName = p.category_name || 'General Catalog';
       if (!map[catName]) {
         map[catName] = {
@@ -1640,7 +1625,7 @@ export default function WarehousePortal() {
       map[catName].products.push(p);
     });
     return Object.values(map).sort((a, b) => a.category_name.localeCompare(b.category_name));
-  }, [rawProducts, onlySale, selectedSize, selectedColor, activeSubcategory, isRealSubcategory]);
+  }, [rawProducts]);
 
   const totalFilteredProducts = useMemo(() => {
     return filteredCategories.reduce((acc, cat) => acc + cat.products.length, 0);
@@ -3608,18 +3593,13 @@ export default function WarehousePortal() {
           product={selectedProductForEdit}
           token={token}
           onClose={() => setSelectedProductForEdit(null)}
-          onSaveSuccess={(updatedProduct) => {
-            // Merge the database-confirmed values into the loaded page so the
-            // new details and stock appear immediately, while search, filters
-            // and pagination position are preserved (no full reload).
-            setRawProducts((prev) => prev.map((p) => (
-              (p.product_id || p.id) === (updatedProduct.product_id || updatedProduct.id)
-                ? { ...p, ...updatedProduct }
-                : p
-            )));
+          onSaveSuccess={() => {
+            // The edit can change filter membership, category grouping, sort
+            // position, and page counts, so refresh the current query from page 1.
             // Category names/counts may have changed — invalidate the cache.
             invalidateCategoriesCache();
             loadCategories();
+            fetchProducts(1);
           }}
         />
       )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ChevronRight,
@@ -12,7 +12,6 @@ import {
   RotateCcw
 } from 'lucide-react';
 import ProductCard from '../../components/customer/ProductCard';
-import { getProductPricing } from '../../utils/pricing';
 import { getCategories, getProducts } from '../../services/api';
 
 // Creative Presentation metadata matching the attached reference image
@@ -128,6 +127,7 @@ export default function ShopCategories() {
   const [selectedCategory, setSelectedCategory] = useState(initialCategory);
   const [rawProducts, setRawProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
+  const [productsError, setProductsError] = useState(null);
   const [activeSubcategory, setActiveSubcategory] = useState('All');
 
   // Filters
@@ -168,13 +168,13 @@ export default function ShopCategories() {
       setSelectedCategory(urlCategory);
       setActiveSubcategory('All');
     }
-  }, [searchParams]);
+  }, [searchParams, selectedCategory]);
 
   // Build the server query from the currently active filters.
-  const buildProductParams = (pageNum) => {
+  const buildProductParams = useCallback((pageNum) => {
     const params = {
       sort: selectedSort,
-      page_size: 40,
+      page_size: 20,
       page: pageNum,
     };
     if (selectedCategory && selectedCategory !== 'ALL') {
@@ -189,14 +189,36 @@ export default function ShopCategories() {
     if (maxPriceFilter) {
       params.max_price = maxPriceFilter;
     }
+    if (onlySale) params.on_sale = 'true';
+    if (selectedSize !== 'All') params.size = selectedSize;
+    if (selectedColor !== 'All') params.color = selectedColor;
+    if (activeSubcategory && !activeSubcategory.startsWith('All')) {
+      const selectedDbCategory = categories.find(
+        (category) => (category.category_name || category.name || '').toLowerCase() === selectedCategory.toLowerCase()
+      );
+      const isRealSubcategory = (selectedDbCategory?.sub_categories || []).some(
+        (subcategory) => subcategory.sub_category === activeSubcategory
+      );
+      if (isRealSubcategory) {
+        params.sub_category = activeSubcategory;
+      } else {
+        const keyword = activeSubcategory
+          .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
+          .trim();
+        if (keyword) params.subcategory_search = keyword;
+      }
+    }
     return params;
-  };
+  }, [selectedCategory, initialSearch, onlyInStock, maxPriceFilter, onlySale,
+    selectedSize, selectedColor, activeSubcategory, categories, selectedSort]);
 
   // Fetch the first page whenever the active filters change.
   useEffect(() => {
     const seq = ++reqSeq.current;
     async function fetchCategoryProducts() {
       setLoadingProducts(true);
+      setLoadingMore(false);
+      setProductsError(null);
       try {
         const res = await getProducts(buildProductParams(1));
         if (seq !== reqSeq.current) return; // a newer request already started
@@ -204,16 +226,23 @@ export default function ShopCategories() {
           setRawProducts(res.products || []);
           setPage(1);
           setHasMore(Boolean(res.hasNext));
+        } else {
+          setRawProducts([]);
+          setHasMore(false);
+          setProductsError(res.error || 'Failed to load products.');
         }
       } catch (err) {
-        if (seq === reqSeq.current) console.error('Error fetching category products', err);
+        if (seq === reqSeq.current) {
+          console.error('Error fetching category products', err);
+          setProductsError('Unable to load products. Please try again.');
+        }
       } finally {
         if (seq === reqSeq.current) setLoadingProducts(false);
       }
     }
 
     fetchCategoryProducts();
-  }, [selectedCategory, selectedSort, onlyInStock, maxPriceFilter, initialSearch]);
+  }, [buildProductParams]);
 
   // Append the next page without duplicating already-loaded products.
   const handleLoadMore = async () => {
@@ -221,6 +250,7 @@ export default function ShopCategories() {
     const seq = reqSeq.current;
     const nextPage = page + 1;
     setLoadingMore(true);
+    setProductsError(null);
     try {
       const res = await getProducts(buildProductParams(nextPage));
       if (seq !== reqSeq.current) return; // filters changed mid-flight
@@ -240,59 +270,20 @@ export default function ShopCategories() {
         });
         setPage(nextPage);
         setHasMore(Boolean(res.hasNext));
+      } else {
+        setProductsError(res.error || 'Failed to load more products.');
       }
     } catch (err) {
-      if (seq === reqSeq.current) console.error('Error loading more products', err);
+      if (seq === reqSeq.current) {
+        console.error('Error loading more products', err);
+        setProductsError('Unable to load more products. Please try again.');
+      }
     } finally {
       if (seq === reqSeq.current) setLoadingMore(false);
     }
   };
 
-  // Client-side filtering for sale, size, color and subcategory
-  const filteredProducts = React.useMemo(() => {
-    let list = [...rawProducts];
-
-    // Sale filter
-    if (onlySale) {
-      list = list.filter((p) => {
-        return getProductPricing(p).isOnSale;
-      });
-    }
-
-    // Size filter
-    if (selectedSize !== 'All') {
-      list = list.filter(
-        (p) => (p.size || '').toLowerCase() === selectedSize.toLowerCase()
-      );
-    }
-
-    // Color filter
-    if (selectedColor !== 'All') {
-      list = list.filter((p) =>
-        (p.color || '').toLowerCase().includes(selectedColor.toLowerCase())
-      );
-    }
-
-    // Subcategory keyword filter if active and not 'All'
-    if (activeSubcategory && !activeSubcategory.startsWith('All')) {
-      const keyword = activeSubcategory
-        .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
-        .trim()
-        .toLowerCase();
-      if (keyword) {
-        const subFiltered = list.filter((p) => {
-          const name = (p.product_name || p.name || '').toLowerCase();
-          const desc = (p.description || '').toLowerCase();
-          return name.includes(keyword) || desc.includes(keyword);
-        });
-        if (subFiltered.length > 0) {
-          list = subFiltered;
-        }
-      }
-    }
-
-    return list;
-  }, [rawProducts, onlySale, selectedSize, selectedColor, activeSubcategory]);
+  const filteredProducts = rawProducts;
 
   const handleCategorySelect = (categoryName, smoothScroll = true) => {
     setSelectedCategory(categoryName);
@@ -955,6 +946,12 @@ export default function ShopCategories() {
                 </button>
               )}
             </div>
+
+            {productsError && (
+              <div className="tarika-auth-alert" role="alert" style={{ marginBottom: '1rem' }}>
+                {productsError}
+              </div>
+            )}
 
             {/* Products Grid */}
             {loadingProducts ? (

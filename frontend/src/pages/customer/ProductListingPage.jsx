@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
-import { Sparkles, Flame, Tag, Check, SlidersHorizontal, ChevronRight } from 'lucide-react';
+import { Sparkles, Flame, Tag, Check } from 'lucide-react';
 import ProductCard from '../../components/customer/ProductCard';
-import { getProductPricing } from '../../utils/pricing';
 import {
   getNewArrivals,
   getTrending,
@@ -11,9 +10,12 @@ import {
   getCategories,
 } from '../../services/api';
 
+const mapSortParam = (sort) =>
+  sort === 'price_asc' ? 'price_low_high' : sort === 'price_desc' ? 'price_high_low' : 'newest';
+
 export default function ProductListingPage({ type }) {
   const location = useLocation();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
   // Determine section type: 'new-in', 'trending', 'sale', or 'general'
   let sectionType = type;
@@ -27,9 +29,11 @@ export default function ProductListingPage({ type }) {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [productsError, setProductsError] = useState(null);
 
   // Active filters
   const [selectedCategory, setSelectedCategory] = useState(searchParams.get('category') || 'ALL');
+  const initialSearch = searchParams.get('search') || '';
   const [selectedSort, setSelectedSort] = useState('newest');
   const [onlyInStock, setOnlyInStock] = useState(false);
   const [maxPrice, setMaxPrice] = useState('');
@@ -81,71 +85,46 @@ export default function ProductListingPage({ type }) {
     loadCategories();
   }, []);
 
-  const mapSortParam = (s) =>
-    s === 'price_asc' ? 'price_low_high' : s === 'price_desc' ? 'price_high_low' : 'newest';
-
-  const buildGeneralParams = (pageNum) => {
-    const params = { page_size: 24, page: pageNum, sort: mapSortParam(selectedSort) };
+  const fetchProductPage = useCallback((pageNum) => {
+    const params = {
+      page_size: 20,
+      page: pageNum,
+      sort: mapSortParam(selectedSort),
+    };
     if (selectedCategory && selectedCategory !== 'ALL') params.category = selectedCategory;
+    if (initialSearch) params.search = initialSearch;
     if (onlyInStock) params.in_stock = 'true';
     if (maxPrice) params.max_price = maxPrice;
-    return params;
-  };
-
-  // Curated sections (new-in / trending / sale) return a limited list, so their
-  // extra filters are applied on the client exactly as before.
-  const applyClientFilters = (inputList) => {
-    let list = [...(inputList || [])];
-    if (selectedCategory && selectedCategory !== 'ALL') {
-      list = list.filter(
-        (p) =>
-          (p.category?.slug && p.category.slug.toLowerCase() === selectedCategory.toLowerCase()) ||
-          (p.category?.name && p.category.name.toLowerCase() === selectedCategory.toLowerCase()) ||
-          (p.category_name && p.category_name.toLowerCase() === selectedCategory.toLowerCase())
-      );
-    }
-    if (onlyInStock) {
-      list = list.filter((p) => p.total_stock > 0 || p.is_in_stock);
-    }
-    if (maxPrice) {
-      list = list.filter((p) => getProductPricing(p).currentPrice <= Number(maxPrice));
-    }
-    if (selectedSort === 'price_asc') {
-      list.sort((a, b) => getProductPricing(a).currentPrice - getProductPricing(b).currentPrice);
-    } else if (selectedSort === 'price_desc') {
-      list.sort((a, b) => getProductPricing(b).currentPrice - getProductPricing(a).currentPrice);
-    }
-    return list;
-  };
+    if (sectionType === 'new-in') return getNewArrivals(20, params);
+    if (sectionType === 'trending') return getTrending(20, params);
+    if (sectionType === 'sale') return getSale(20, params);
+    return getProducts(params);
+  }, [selectedCategory, initialSearch, onlyInStock, maxPrice, selectedSort, sectionType]);
 
   useEffect(() => {
     const seq = ++reqSeq.current;
     let active = true;
     async function loadData() {
       setLoading(true);
+      setLoadingMore(false);
+      setProductsError(null);
       try {
-        if (sectionType === 'general') {
-          // Server-side filtering + pagination for the full catalogue.
-          const res = await getProducts(buildGeneralParams(1));
-          if (!active || seq !== reqSeq.current) return;
-          if (res.success) {
-            setProducts(res.products || []);
-            setPage(1);
-            setHasMore(Boolean(res.hasNext));
-          }
+        const res = await fetchProductPage(1);
+        if (!active || seq !== reqSeq.current) return;
+        if (res.success) {
+          setProducts(res.products || []);
+          setPage(1);
+          setHasMore(Boolean(res.hasNext));
         } else {
-          let res;
-          if (sectionType === 'new-in') res = await getNewArrivals(24);
-          else if (sectionType === 'trending') res = await getTrending(24);
-          else res = await getSale(24);
-          if (!active || seq !== reqSeq.current) return;
-          if (res.success) {
-            setProducts(applyClientFilters(res.products || []));
-            setHasMore(false);
-          }
+          setProducts([]);
+          setHasMore(false);
+          setProductsError(res.error || 'Failed to load products.');
         }
       } catch (err) {
-        if (active && seq === reqSeq.current) console.error('Error loading products', err);
+        if (active && seq === reqSeq.current) {
+          console.error('Error loading products', err);
+          setProductsError('Unable to load products. Please try again.');
+        }
       } finally {
         if (active && seq === reqSeq.current) setLoading(false);
       }
@@ -155,15 +134,16 @@ export default function ProductListingPage({ type }) {
     return () => {
       active = false;
     };
-  }, [sectionType, selectedCategory, selectedSort, onlyInStock, maxPrice]);
+  }, [fetchProductPage]);
 
   const handleLoadMore = async () => {
-    if (sectionType !== 'general' || loadingMore || !hasMore) return;
+    if (loadingMore || !hasMore) return;
     const seq = reqSeq.current;
     const nextPage = page + 1;
     setLoadingMore(true);
+    setProductsError(null);
     try {
-      const res = await getProducts(buildGeneralParams(nextPage));
+      const res = await fetchProductPage(nextPage);
       if (seq !== reqSeq.current) return;
       if (res.success) {
         const incoming = res.products || [];
@@ -181,9 +161,14 @@ export default function ProductListingPage({ type }) {
         });
         setPage(nextPage);
         setHasMore(Boolean(res.hasNext));
+      } else {
+        setProductsError(res.error || 'Failed to load more products.');
       }
     } catch (err) {
-      if (seq === reqSeq.current) console.error('Error loading more products', err);
+      if (seq === reqSeq.current) {
+        console.error('Error loading more products', err);
+        setProductsError('Unable to load more products. Please try again.');
+      }
     } finally {
       if (seq === reqSeq.current) setLoadingMore(false);
     }
@@ -333,6 +318,11 @@ export default function ProductListingPage({ type }) {
       </div>
 
       {/* Grid */}
+      {productsError && products.length > 0 && (
+        <div className="tarika-auth-alert" role="alert" style={{ marginBottom: '1rem' }}>
+          {productsError}
+        </div>
+      )}
       {loading ? (
         <div
           style={{
@@ -353,6 +343,8 @@ export default function ProductListingPage({ type }) {
             />
           ))}
         </div>
+      ) : productsError ? (
+        <div className="tarika-auth-alert" role="alert">{productsError}</div>
       ) : products.length > 0 ? (
         <>
           <div
@@ -366,7 +358,7 @@ export default function ProductListingPage({ type }) {
               <ProductCard key={prod.product_id || prod.id} product={prod} />
             ))}
           </div>
-          {sectionType === 'general' && hasMore && (
+          {hasMore && (
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: '2rem' }}>
               <button
                 type="button"

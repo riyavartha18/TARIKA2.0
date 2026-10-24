@@ -208,6 +208,7 @@ class CatalogViewsAPITests(SimpleTestCase):
         mock_qs.count.return_value = 25
         mock_qs.__len__.return_value = 25
         mock_qs.__getitem__.side_effect = lambda s: [mock_product] * min(12, max(0, (s.stop or 25) - (s.start or 0)))
+        mock_qs.only.return_value = mock_qs
         mock_filter.return_value = mock_qs
 
         request = self.factory.get('/api/catalog/products/?page=1&page_size=12')
@@ -225,6 +226,22 @@ class CatalogViewsAPITests(SimpleTestCase):
         self.assertEqual(response.data['current_page'], 1)
 
     @patch('catalog.services.CatalogService.filter_and_sort_products')
+    def test_products_endpoint_caps_page_size_at_twenty(self, mock_filter):
+        mock_qs = MagicMock()
+        mock_qs.count.return_value = 45
+        mock_qs.__len__.return_value = 45
+        mock_qs.__getitem__.side_effect = lambda s: []
+        mock_qs.only.return_value = mock_qs
+        mock_filter.return_value = mock_qs
+
+        request = self.factory.get('/api/catalog/products/?page=1&page_size=100')
+        response = ProductListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['page_size'], 20)
+        self.assertLessEqual(len(response.data['results']), 20)
+
+    @patch('catalog.services.CatalogService.filter_and_sort_products')
     def test_products_endpoint_filtering_parameters_passed(self, mock_filter):
         mock_qs = MagicMock()
         mock_qs.count.return_value = 0
@@ -239,11 +256,16 @@ class CatalogViewsAPITests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         mock_filter.assert_called_once_with(
             category='Dresses',
+            sub_category=None,
             search='silk',
             min_price='500',
             max_price='2000',
             in_stock=None,
-            sort='price_low_high'
+            sort='price_low_high',
+            on_sale=None,
+            size=None,
+            color=None,
+            subcategory_search=None,
         )
 
     @patch('catalog.views.get_object_or_404')

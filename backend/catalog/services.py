@@ -1,10 +1,24 @@
+import re
+
 from django.db import DatabaseError
-from django.db.models import Q, Sum, F, OuterRef, Subquery, IntegerField
+from django.db.models import Q, Sum, F, OuterRef, Subquery, IntegerField, FloatField
 from django.db.models.functions import Coalesce
 from .models import Product, OrderItem
 
 
 class CatalogService:
+    PRODUCT_LIST_FIELDS = (
+        'product_id',
+        'product_name',
+        'main_category',
+        'sub_category',
+        'link',
+        'discount_price',
+        'actual_price_text',
+        'available_quantity',
+        'image',
+    )
+
     @staticmethod
     def get_annotated_products_queryset():
         """
@@ -37,7 +51,11 @@ class CatalogService:
         min_price=None,
         max_price=None,
         in_stock=None,
-        sort=None
+        sort=None,
+        on_sale=None,
+        size=None,
+        color=None,
+        subcategory_search=None,
     ):
         if queryset is None:
             queryset = cls.get_annotated_products_queryset()
@@ -78,43 +96,105 @@ class CatalogService:
         if search:
             search_str = str(search).strip()
             search_query = (
+                Q(product_id__icontains=search_str) |
                 Q(product_name__icontains=search_str) |
                 Q(main_category__icontains=search_str) |
                 Q(sub_category__icontains=search_str)
             )
             queryset = queryset.filter(search_query)
 
-        # 4. Min price filter (discount_price is the real discounted price)
+        if subcategory_search:
+            keyword = str(subcategory_search).strip()
+            if keyword:
+                queryset = queryset.filter(
+                    Q(product_name__icontains=keyword) |
+                    Q(sub_category__icontains=keyword)
+                )
+
+        if size:
+            # Size is not a column in the current Supabase products schema.
+            # Match it as a whole token in the product name rather than
+            # filtering a page of products in the client.
+            size_token = str(size).strip()
+            if size_token:
+                queryset = queryset.filter(
+                    product_name__iregex=rf'(^|[^[:alnum:]]){re.escape(size_token)}([^[:alnum:]]|$)'
+                )
+
+        if color:
+            color_term = str(color).strip()
+            if color_term:
+                queryset = queryset.filter(
+                    Q(product_name__icontains=color_term) |
+                    Q(main_category__icontains=color_term) |
+                    Q(sub_category__icontains=color_term)
+                )
+
         min_p = cls._parse_price_filter(min_price)
+        max_p = cls._parse_price_filter(max_price)
+        sort_option = str(sort or '').lower().strip()
+        needs_base_price = (
+            min_p is not None or max_p is not None or
+            (on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes')) or
+            sort_option in ('price_low_high', 'price_high_low')
+        )
+        if needs_base_price:
+            from django.db.models.expressions import RawSQL
+            queryset = queryset.annotate(
+                parsed_base_price=RawSQL(
+                    "NULLIF(regexp_replace(products.actual_price, '[^0-9.]', '', 'g'), '')::float8",
+                    [],
+                    output_field=FloatField(),
+                )
+            )
+
+        # 4. Min price filter uses the effective displayed price: discount
+        # price when present, otherwise the parsed actual_price text column.
         if min_p is not None:
-            queryset = queryset.filter(discount_price__gte=min_p)
+            queryset = queryset.filter(
+                Q(discount_price__gte=min_p) |
+                Q(discount_price__isnull=True, parsed_base_price__gte=min_p)
+            )
 
         # 5. Max price filter
-        max_p = cls._parse_price_filter(max_price)
         if max_p is not None:
-            queryset = queryset.filter(discount_price__lte=max_p)
+            queryset = queryset.filter(
+                Q(discount_price__lte=max_p) |
+                Q(discount_price__isnull=True, parsed_base_price__lte=max_p)
+            )
 
         # 6. In-stock filter uses the real `available_quantity` column
         #    (the new schema has no separate inventory table).
         if in_stock is not None and str(in_stock).strip().lower() in ('true', '1', 'yes'):
             queryset = queryset.filter(available_quantity__gt=0)
 
+        if on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes'):
+            queryset = queryset.filter(parsed_base_price__gt=F('discount_price'))
+
         # 7. Sorting (real schema has no launch_date / created_at columns,
         #    so 'newest' falls back to a stable product_key order)
-        sort_option = (sort or 'newest').lower().strip()
-        if sort_option == 'price_low_high':
-            queryset = queryset.order_by('discount_price', 'product_name', 'product_id')
-        elif sort_option == 'price_high_low':
-            queryset = queryset.order_by('-discount_price', 'product_name', 'product_id')
-        elif sort_option == 'name':
-            queryset = queryset.order_by('product_name', 'product_id')
-        else:
-            queryset = queryset.order_by('product_id')
+        if sort is not None:
+            if sort_option == 'price_low_high':
+                queryset = queryset.order_by(
+                    Coalesce(F('discount_price'), F('parsed_base_price')),
+                    'product_name',
+                    'product_id',
+                )
+            elif sort_option == 'price_high_low':
+                queryset = queryset.order_by(
+                    Coalesce(F('discount_price'), F('parsed_base_price')).desc(),
+                    'product_name',
+                    'product_id',
+                )
+            elif sort_option == 'name':
+                queryset = queryset.order_by('product_name', 'product_id')
+            elif sort_option == 'newest':
+                queryset = queryset.order_by('product_id')
 
         return queryset
 
     @classmethod
-    def get_new_arrivals(cls, limit=12):
+    def get_new_arrivals(cls, limit=None):
         """
         Returns latest products. The new schema has no launch/created date
         column, so ordering is by product_key (stable catalogue order).
@@ -123,7 +203,7 @@ class CatalogService:
         return qs[:limit] if limit else qs
 
     @classmethod
-    def get_trending(cls, limit=12):
+    def get_trending(cls, limit=None):
         """
         Returns trending products based on aggregated order sales volume,
         preserving the original sales-volume logic using the real orders
@@ -144,9 +224,10 @@ class CatalogService:
                 )
             ).order_by('-sales_volume', 'product_id')
 
-            # Evaluate inside the try block so a missing source table is
-            # detected here rather than during serialization in the view.
-            return list(qs[:limit]) if limit else list(qs)
+            # When a limited list is requested, evaluate here so a missing
+            # source table can fall back immediately. Paginated callers catch
+            # database errors while evaluating the queryset.
+            return list(qs[:limit]) if limit else qs
         except DatabaseError:
             # The legacy order_items source table may not exist in the new
             # database. Fall back to the stable catalogue order so the
@@ -154,7 +235,7 @@ class CatalogService:
             return cls.get_new_arrivals(limit=limit)
 
     @classmethod
-    def get_sale_products(cls, limit=12):
+    def get_sale_products(cls, limit=None):
         """
         Returns products currently on sale.
         Primary criterion (unchanged logic): base_price > selling_price,

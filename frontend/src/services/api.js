@@ -192,18 +192,32 @@ export function invalidateCategoriesCache() {
 /**
  * Fetch products list with optional filters, search, sorting and pagination.
  */
+function appendProductFilters(query, params = {}) {
+  [
+    'category',
+    'sub_category',
+    'subcategory_search',
+    'search',
+    'min_price',
+    'max_price',
+    'in_stock',
+    'on_sale',
+    'size',
+    'color',
+    'sort',
+    'page',
+  ].forEach((key) => {
+    if (params[key] !== undefined && params[key] !== '') query.append(key, params[key]);
+  });
+  if (params.page_size) {
+    query.append('page_size', Math.min(Number(params.page_size) || 20, 20));
+  }
+}
+
 export async function getProducts(params = {}) {
   try {
     const query = new URLSearchParams();
-    if (params.category) query.append('category', params.category);
-    if (params.sub_category) query.append('sub_category', params.sub_category);
-    if (params.search) query.append('search', params.search);
-    if (params.min_price) query.append('min_price', params.min_price);
-    if (params.max_price) query.append('max_price', params.max_price);
-    if (params.in_stock !== undefined && params.in_stock !== '') query.append('in_stock', params.in_stock);
-    if (params.sort) query.append('sort', params.sort);
-    if (params.page) query.append('page', params.page);
-    if (params.page_size) query.append('page_size', params.page_size);
+    appendProductFilters(query, params);
 
     const qs = query.toString();
     const url = `${API_BASE_URL}/api/catalog/products/${qs ? '?' + qs : ''}`;
@@ -225,6 +239,31 @@ export async function getProducts(params = {}) {
     };
   } catch (err) {
     return { success: false, error: 'Network error fetching products' };
+  }
+}
+
+async function getCuratedProducts(endpoint, limit, params) {
+  const query = new URLSearchParams();
+  if (params) appendProductFilters(query, params);
+  else query.append('limit', Math.min(Number(limit) || 20, 20));
+  const qs = query.toString();
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/catalog/${endpoint}/${qs ? '?' + qs : ''}`);
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.detail || `Failed to fetch ${endpoint}` };
+    }
+    return {
+      success: true,
+      products: data.results || [],
+      count: data.count || 0,
+      totalPages: data.total_pages || 1,
+      currentPage: data.current_page || 1,
+      hasNext: Boolean(data.next),
+      hasPrevious: Boolean(data.previous),
+    };
+  } catch {
+    return { success: false, error: `Network error fetching ${endpoint}` };
   }
 }
 
@@ -614,49 +653,22 @@ export async function getProductRecommendations(productId) {
 /**
  * Fetch New Arrivals.
  */
-export async function getNewArrivals(limit = 10) {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/catalog/new-arrivals/?limit=${limit}`);
-    const data = await response.json();
-    if (!response.ok) {
-      return { success: false, error: data.detail || 'Failed to fetch new arrivals' };
-    }
-    return { success: true, products: data.results || [] };
-  } catch (err) {
-    return { success: false, error: 'Network error fetching new arrivals' };
-  }
+export async function getNewArrivals(limit = 10, params = null) {
+  return getCuratedProducts('new-arrivals', limit, params);
 }
 
 /**
  * Fetch Trending Products.
  */
-export async function getTrending(limit = 10) {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/catalog/trending/?limit=${limit}`);
-    const data = await response.json();
-    if (!response.ok) {
-      return { success: false, error: data.detail || 'Failed to fetch trending products' };
-    }
-    return { success: true, products: data.results || [] };
-  } catch (err) {
-    return { success: false, error: 'Network error fetching trending products' };
-  }
+export async function getTrending(limit = 10, params = null) {
+  return getCuratedProducts('trending', limit, params);
 }
 
 /**
  * Fetch Sale / Discounted Products.
  */
-export async function getSale(limit = 10) {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/catalog/sale/?limit=${limit}`);
-    const data = await response.json();
-    if (!response.ok) {
-      return { success: false, error: data.detail || 'Failed to fetch sale products' };
-    }
-    return { success: true, products: data.results || [] };
-  } catch (err) {
-    return { success: false, error: 'Network error fetching sale products' };
-  }
+export async function getSale(limit = 10, params = null) {
+  return getCuratedProducts('sale', limit, params);
 }
 
 /* ==========================================================================

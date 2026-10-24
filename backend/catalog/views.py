@@ -1,6 +1,7 @@
 import math
 import uuid
 from datetime import datetime
+from django.db import DatabaseError
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -50,9 +51,9 @@ from .services import CatalogService
 
 
 class StandardCatalogPagination(PageNumberPagination):
-    page_size = 12
+    page_size = 20
     page_size_query_param = 'page_size'
-    max_page_size = 100
+    max_page_size = 20
 
     def get_paginated_response(self, data):
         total_pages = math.ceil(self.page.paginator.count / self.get_page_size(self.request))
@@ -120,11 +121,11 @@ class ProductListView(APIView):
     """
     GET /api/catalog/products/
     Returns paginated list of active products with support for:
-      - category: filter by category_id (UUID) or category_name
-      - search: text search across product_name, description, color, material, sku
-      - min_price: filter selling_price >= min_price
-      - max_price: filter selling_price <= max_price
+      - category / sub_category and text search over product name/category columns
+      - min_price / max_price, stock, sale, size, and color filters
       - sort: newest, price_low_high, price_high_low, name
+    Responses contain at most 20 products; filtering and ordering happen before
+    the database page slice.
     Publicly accessible.
     """
     permission_classes = [AllowAny]
@@ -137,6 +138,10 @@ class ProductListView(APIView):
         min_price = request.query_params.get('min_price')
         max_price = request.query_params.get('max_price')
         in_stock = request.query_params.get('in_stock')
+        on_sale = request.query_params.get('on_sale')
+        size = request.query_params.get('size')
+        color = request.query_params.get('color')
+        subcategory_search = request.query_params.get('subcategory_search')
         sort = request.query_params.get('sort')
 
         queryset = CatalogService.filter_and_sort_products(
@@ -146,9 +151,14 @@ class ProductListView(APIView):
             min_price=min_price,
             max_price=max_price,
             in_stock=in_stock,
-            sort=sort
+            sort=sort or 'newest',
+            on_sale=on_sale,
+            size=size,
+            color=color,
+            subcategory_search=subcategory_search,
         )
 
+        queryset = queryset.only(*CatalogService.PRODUCT_LIST_FIELDS)
         paginator = StandardCatalogPagination()
         page = paginator.paginate_queryset(queryset, request)
         if page is not None:
@@ -187,75 +197,83 @@ class NewArrivalsView(APIView):
     """
     GET /api/catalog/new-arrivals/
     Returns the newest launched / added products.
-    Accepts optional ?limit= query parameter (default 12).
+    Supports standard page/page_size pagination (20 items maximum); retains a
+    capped ?limit= response for existing homepage callers.
     Publicly accessible.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
-        limit = request.query_params.get('limit', 12)
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 12
-
-        products = CatalogService.get_new_arrivals(limit=limit)
-        serializer = ProductListSerializer(products, many=True)
-        return Response({
-            'count': len(serializer.data),
-            'results': serializer.data
-        }, status=status.HTTP_200_OK)
+        return _paginated_curated_products(request, CatalogService.get_new_arrivals())
 
 
 class TrendingView(APIView):
     """
     GET /api/catalog/trending/
     Returns trending products based on total sales volume in order_items.
-    Accepts optional ?limit= query parameter (default 12).
+    Supports standard page/page_size pagination (20 items maximum); retains a
+    capped ?limit= response for existing homepage callers.
     Publicly accessible.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
-        limit = request.query_params.get('limit', 12)
         try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 12
-
-        products = CatalogService.get_trending(limit=limit)
-        serializer = ProductListSerializer(products, many=True)
-        return Response({
-            'count': len(serializer.data),
-            'results': serializer.data
-        }, status=status.HTTP_200_OK)
+            queryset = CatalogService.get_trending()
+            return _paginated_curated_products(request, queryset)
+        except DatabaseError:
+            return _paginated_curated_products(request, CatalogService.get_new_arrivals())
 
 
 class SaleView(APIView):
     """
     GET /api/catalog/sale/
     Returns products on sale or promotional clearance.
-    Accepts optional ?limit= query parameter (default 12).
+    Supports standard page/page_size pagination (20 items maximum); retains a
+    capped ?limit= response for existing homepage callers.
     Publicly accessible.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
-        limit = request.query_params.get('limit', 12)
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 12
+        return _paginated_curated_products(request, CatalogService.get_sale_products())
 
-        products = CatalogService.get_sale_products(limit=limit)
+
+def _paginated_curated_products(request, queryset):
+    filters = {
+        key: request.query_params.get(key)
+        for key in (
+            'category', 'sub_category', 'search', 'min_price', 'max_price',
+            'in_stock', 'on_sale', 'size', 'color', 'subcategory_search'
+        )
+    }
+    sort = request.query_params.get('sort')
+    queryset = CatalogService.filter_and_sort_products(
+        queryset=queryset,
+        **filters,
+        sort=sort if sort and sort != 'newest' else None,
+    ).only(*CatalogService.PRODUCT_LIST_FIELDS)
+
+    legacy_limit = request.query_params.get('limit')
+    if legacy_limit is not None and 'page' not in request.query_params and 'page_size' not in request.query_params:
+        try:
+            limit = min(max(int(legacy_limit), 0), 20)
+        except (TypeError, ValueError):
+            limit = 20
+        products = list(queryset[:limit])
         serializer = ProductListSerializer(products, many=True)
         return Response({
             'count': len(serializer.data),
-            'results': serializer.data
+            'results': serializer.data,
         }, status=status.HTTP_200_OK)
+
+    paginator = StandardCatalogPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    serializer = ProductListSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
 
 
 class ProductReviewsView(APIView):
@@ -382,4 +400,3 @@ class ProductReviewsView(APIView):
                 'review_count': review_count,
             }
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-
