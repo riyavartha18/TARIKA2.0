@@ -12,12 +12,15 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
-from dotenv import load_dotenv
+from urllib.parse import unquote, urlsplit
 
-load_dotenv()
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -91,16 +94,44 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 
 # Database
-# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+# Set DATABASE_URL to the connection string supplied by Neon.
+database_url = os.getenv('DATABASE_URL', '').strip()
+if not database_url:
+    raise ImproperlyConfigured(
+        'DATABASE_URL is required. Set it in backend/.env using the connection '
+        'string from the Neon dashboard.'
+    )
+
+try:
+    parsed_database_url = urlsplit(database_url)
+    database_host = parsed_database_url.hostname
+    database_port = parsed_database_url.port or 5432
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'DATABASE_URL must be a valid PostgreSQL connection URL.'
+    ) from exc
+
+if (
+    parsed_database_url.scheme not in {'postgres', 'postgresql'}
+    or not database_host
+    or not parsed_database_url.path.strip('/')
+):
+    raise ImproperlyConfigured(
+        'DATABASE_URL must be a valid PostgreSQL connection URL with a host '
+        'and database name.'
+    )
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-        'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
+        'NAME': unquote(parsed_database_url.path.lstrip('/')),
+        'USER': unquote(parsed_database_url.username or ''),
+        'PASSWORD': unquote(parsed_database_url.password or ''),
+        'HOST': database_host,
+        'PORT': database_port,
+        'OPTIONS': {
+            'sslmode': 'require',
+        },
     }
 }
 
