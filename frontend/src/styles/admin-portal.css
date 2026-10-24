@@ -851,3 +851,160 @@
     display: none;
   }
 }
+
+/* ==========================================================================
+   DEMAND FORECASTING — PRODUCT DEMAND CARDS
+   Compact, at-a-glance cards for a non-technical warehouse manager.
+   Reuses the existing TARIKA palette (pink #B8505E, cream #FAF7F5, ink
+   #1F191B) and the High/Medium/Low demand colours used across the app.
+   ========================================================================== */
+.df-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.df-card {
+  background-color: #FFFFFF;
+  border: 1px solid rgba(216, 114, 126, 0.18);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 4px 20px rgba(31, 25, 27, 0.04);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.df-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 30px rgba(184, 80, 94, 0.1);
+}
+
+.df-card-media {
+  position: relative;
+  height: 190px;
+  background-color: #FAF7F5;
+}
+
+.df-card-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.df-card-img-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9E8F94;
+  background: repeating-linear-gradient(45deg, #FAF7F5, #FAF7F5 12px, #F5EFF0 12px, #F5EFF0 24px);
+}
+
+.df-card-badge {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.3rem 0.7rem;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  box-shadow: 0 2px 8px rgba(31, 25, 27, 0.12);
+  letter-spacing: 0.02em;
+}
+
+.df-card-body {
+  padding: 1.05rem 1.15rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1;
+}
+
+.df-card-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.02rem;
+  font-weight: 700;
+  color: #1F191B;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.df-card-cat {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #9E8F94;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.df-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+
+.df-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.28rem 0.55rem;
+  border-radius: 8px;
+  background-color: #FAF7F5;
+  border: 1px solid rgba(216, 114, 126, 0.16);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #6B5E63;
+}
+
+.df-stock {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  padding: 0.5rem 0.7rem;
+  border-radius: 9px;
+  background-color: #FBFAF9;
+  border: 1px dashed rgba(216, 114, 126, 0.28);
+}
+
+.df-action {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.7rem;
+  background-color: #FDF7F8;
+  border-radius: 8px;
+}
+
+.df-action-label {
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #B8505E;
+}
+
+.df-action-text {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #1F191B;
+  line-height: 1.35;
+}
+
+.df-why {
+  margin-top: auto;
+  font-size: 0.74rem;
+  color: #6B5E63;
+  line-height: 1.45;
+  background-color: #FAF7F5;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+}
+

@@ -1,153 +1,259 @@
 """
 forecasting.py
 --------------
-Orchestrates product-wise next-month demand forecasting using:
-  warehouse_data  → fetches historical DW records + current_stock from dim_product
-  feature_builder → builds regression features (no future data leakage)
-  regression      → OLS Multiple Linear Regression
+Stock to Be Ordered — demand-driven replenishment.
 
-Flow:
-  1. Detect latest historical month dynamically
-  2. Calculate next forecast month
-  3. Fetch all historical records from DW (one efficient query)
-  4. Fetch all catalog products with current_stock from dim_product
-  5. For each product:
-       a. Build training dataset (X, Y)
-       b. If insufficient data → use avg or fallback
-       c. Else → fit OLS, predict next-month demand
-  6. Compute need_to_order = max(0, predicted_demand - current_stock)
-  7. Return clean, minimal API payload
+Synchronised with the Demand Prediction module: it reuses the SAME trained ID3
+decision tree and the SAME live Supabase tables (public.fact_product_analysis +
+public.dim_product, joined on product_key) so the demand tier shown here always
+matches the Demand Forecasting dashboard. When the demand model is rebuilt
+(its data fingerprint changes) the stock view reflects it automatically.
 
-Performance notes:
-  - All DB queries are bulk (no N+1 queries)
-  - Regression runs once per product, not per request for same month
-  - Fallback: products with insufficient data use their last known demand
+Replenishment calculation (unchanged):
+
+    predicted_demand = round(units_sold)                 # demand actually observed
+    current_stock    = dim_product.available_quantity    # real stock on hand
+    need_to_order    = max(0, predicted_demand - current_stock)
+    demand_tier      = ID3 model prediction (High / Medium / Low)
+
+Restock priority is derived only from those same values (no invented
+thresholds):
+
+    Low Priority : need_to_order == 0  (stock already covers predicted demand)
+    Urgent       : need_to_order  > 0 AND (demand_tier == High OR current_stock <= 0)
+    Soon         : every other product that still needs stock
+
+`available_quantity` is stock only and never treated as demand. Missing values
+default to zero, so zero stock / zero demand are handled safely.
+
+Summary cards are aggregated from the same filtered query (one scan), so the
+numbers always reflect the live data.
+
+The query runs server-side and is paginated, so a ~90k product catalog stays
+interactive (only one page of rows is transferred per request).
 """
+from django.db import connection
 
-from stock_to_be_ordered.services.warehouse_data import (
-    get_latest_historical_month,
-    get_next_forecast_month,
-    get_historical_demand_records,
-    group_records_by_product,
-    get_all_active_catalog_products,
+from demand_prediction.engine import (
+    DecisionTreeEngine,
+    get_trained_model,
+    tree_to_sql_case,
 )
-from stock_to_be_ordered.services.feature_builder import (
-    build_training_dataset,
-    build_prediction_features,
-    MIN_HISTORY_MONTHS,
-)
-from stock_to_be_ordered.services.regression import run_regression
+
+# Columns the warehouse UI can sort on -> outer-query expressions (constants,
+# never user input).
+_SORTABLE = {
+    'product_name': 'c.product_name',
+    'category_name': 'c.category_name',
+    'sub_category': 'c.sub_category',
+    'current_stock': 'c.current_stock',
+    'predicted_demand': 'c.predicted_demand',
+    'need_to_order': 'c.need_to_order',
+    'units_sold': 'c.units_sold',
+}
+_TIER_ORDER = "CASE c.demand_tier WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END"
+_PRIORITY_ORDER = "CASE c.priority WHEN 'Urgent' THEN 0 WHEN 'Soon' THEN 1 ELSE 2 END"
+
+PRIORITY_LABELS = ('Urgent', 'Soon', 'Low Priority')
 
 
-def run_stock_forecast():
+def _priority_expression():
+    """SQL that classifies restock priority from already-computed columns."""
+    return """
+        CASE
+            WHEN c.need_to_order = 0 THEN 'Low Priority'
+            WHEN c.demand_tier = 'High' OR c.current_stock <= 0 THEN 'Urgent'
+            ELSE 'Soon'
+        END
     """
-    Full end-to-end pipeline for Stock to Be Ordered.
 
-    Returns a dict:
-    {
-        'success': bool,
-        'error': str | None,
-        'forecast_month': '2026-10',        ← YYYY-MM for the UI header
-        'forecast_month_label': 'October 2026',
-        'products': [
-            {
-                'product_key': int,         ← SKU-level key (unique per color/size)
-                'product_id': str,
-                'product_name': str,
-                'color': str,               ← from operational products table
-                'size': str,                ← from operational products table
-                'current_stock': int,       ← from dim_product.current_stock
-                'predicted_demand': int,    ← OLS regression result
-                'need_to_order': int,       ← max(0, predicted - current)
-            },
-            ...
-        ]
-    }
+
+def _build_reason(priority, demand_tier, need_to_order, current_stock, predicted_demand):
+    """Plain-language, data-anchored explanation for a single product."""
+    stock_txt = 'out of stock' if current_stock <= 0 else f'{current_stock} in stock'
+    if need_to_order <= 0:
+        return (
+            f'Current stock ({current_stock}) already covers predicted demand '
+            f'({predicted_demand}) — no reorder needed.'
+        )
+    if priority == 'Urgent':
+        if current_stock <= 0:
+            return (
+                f'{demand_tier} demand and out of stock — order {need_to_order} units now '
+                f'(predicted demand {predicted_demand}).'
+            )
+        return (
+            f'High demand with limited stock ({stock_txt}, predicted {predicted_demand}) — '
+            f'reorder {need_to_order} units soon.'
+        )
+    # Soon
+    return (
+        f'{demand_tier} demand exceeds current stock ({stock_txt}) — '
+        f'plan to reorder {need_to_order} units.'
+    )
+
+
+def run_stock_forecast(page=1, page_size=25, search='', tier='ALL',
+                        category='ALL', sort='need_to_order', sort_dir='desc'):
+    """Return one paginated page of demand-driven replenishment rows + totals."""
+    model, _fingerprint, _rebuilt = get_trained_model()
+    if not model.get('success'):
+        return {'success': False, 'error': model.get('error', 'Demand model unavailable.')}
+
+    tier_case_sql, tier_params = tree_to_sql_case(model['decision_tree'])
+
+    where_clauses, where_params = [], []
+    if search:
+        where_clauses.append(
+            "(LOWER(COALESCE(d.name, '')) LIKE %s "
+            "OR LOWER(COALESCE(d.main_category, '')) LIKE %s "
+            "OR LOWER(COALESCE(d.sub_category, '')) LIKE %s)"
+        )
+        like = f'%{search.lower()}%'
+        where_params += [like, like, like]
+    if category and category.upper() != 'ALL':
+        where_clauses.append('d.main_category = %s')
+        where_params.append(category)
+    where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
+
+    # Classified base query: demand tier (from the shared ID3 tree) plus the
+    # reorder columns, all computed in SQL so no per-product rows ship to Python.
+    base = f"""
+        SELECT
+            f.product_key,
+            COALESCE(d.name, CONCAT('Product #', f.product_key)) AS product_name,
+            COALESCE(d.main_category, 'Uncategorised') AS category_name,
+            COALESCE(d.sub_category, '') AS sub_category,
+            COALESCE(d.image, '') AS image,
+            COALESCE(f.units_sold, 0)::float AS units_sold,
+            COALESCE(d.available_quantity, 0)::int AS current_stock,
+            ROUND(COALESCE(f.units_sold, 0))::int AS predicted_demand,
+            GREATEST(0, ROUND(COALESCE(f.units_sold, 0))
+                        - COALESCE(d.available_quantity, 0))::int AS need_to_order,
+            {tier_case_sql} AS demand_tier
+        FROM fact_product_analysis f
+        JOIN dim_product d ON f.product_key = d.product_key
+        {where_sql}
     """
-    # 1. Determine the latest available month in the DW
-    latest = get_latest_historical_month()
-    if not latest:
-        return {
-            'success': False,
-            'error': 'No historical data found in fact_demand table.',
-        }
+    params = tier_params + where_params
 
-    # 2. Compute next (forecast) month
-    next_month = get_next_forecast_month(latest)
-    forecast_label = f"{next_month['month_name']} {next_month['year']}"
+    # Wrap the base so priority can reference the finished demand/stock columns
+    # (keeps the tree CASE — and therefore its bound parameters — to one copy).
+    enriched = f"SELECT c.*, {_priority_expression()} AS priority FROM ({base}) c"
 
-    # 3. Fetch all historical DW records in ONE bulk query
-    all_records = get_historical_demand_records()
-    if not all_records:
-        return {
-            'success': False,
-            'error': 'No records returned from fact_demand.',
-        }
+    tier = (tier or 'ALL').upper()
+    if tier not in ('HIGH', 'MEDIUM', 'LOW'):
+        tier = 'ALL'
 
-    product_record_map = group_records_by_product(all_records)
+    sort_dir = 'ASC' if str(sort_dir).lower() == 'asc' else 'DESC'
+    if sort == 'demand_tier':
+        order_clause = (
+            f"{_TIER_ORDER} {'ASC' if sort_dir == 'DESC' else 'DESC'}, c.need_to_order DESC"
+        )
+    elif sort == 'priority':
+        order_clause = (
+            f"{_PRIORITY_ORDER} {'ASC' if sort_dir == 'DESC' else 'DESC'}, c.need_to_order DESC"
+        )
+    else:
+        order_expr = _SORTABLE.get(sort, 'c.need_to_order')
+        order_clause = f"{order_expr} {sort_dir}, c.product_name ASC"
 
-    # 4. Fetch all catalog products with current_stock (ONE bulk query)
-    catalog_products = get_all_active_catalog_products()
+    with connection.cursor() as cursor:
+        # One aggregate scan drives every summary card (tier + priority splits,
+        # needs-replenishment, urgent, high-demand, low/zero stock, total need).
+        cursor.execute(
+            f"""
+            SELECT demand_tier, priority,
+                COUNT(*)::int AS cnt,
+                COALESCE(SUM(need_to_order), 0)::int AS need_sum,
+                COUNT(*) FILTER (WHERE need_to_order > 0)::int AS needs_repl,
+                COUNT(*) FILTER (WHERE current_stock <= 0)::int AS zero_stock,
+                COUNT(*) FILTER (WHERE current_stock <= 0 OR need_to_order > 0)::int AS low_or_zero
+            FROM ({enriched}) q
+            GROUP BY demand_tier, priority
+            """,
+            params,
+        )
+        tier_counts = {label: 0 for label in DecisionTreeEngine.CLASS_ORDER}
+        priority_counts = {label: 0 for label in PRIORITY_LABELS}
+        total_products = 0
+        total_need = 0
+        needs_replenishment = 0
+        zero_stock = 0
+        low_or_zero_stock = 0
+        for tier_label, prio, cnt, need_sum, n_repl, n_zero, n_lzero in cursor.fetchall():
+            tier_counts[tier_label] = tier_counts.get(tier_label, 0) + int(cnt)
+            priority_counts[prio] = priority_counts.get(prio, 0) + int(cnt)
+            total_products += int(cnt)
+            total_need += int(need_sum)
+            needs_replenishment += int(n_repl)
+            zero_stock += int(n_zero)
+            low_or_zero_stock += int(n_lzero)
 
-    # 5. Forecast each product
-    products_out = []
+        if tier != 'ALL':
+            page_where = "WHERE c.demand_tier = %s"
+            page_params = [tier.title()]  # High / Medium / Low
+            filtered_total = tier_counts.get(tier.title(), 0)
+        else:
+            page_where = ""
+            page_params = []
+            filtered_total = total_products
 
-    for product in catalog_products:
-        p_key = product['product_key']
-        p_id = str(product['product_id']) if product['product_id'] else str(p_key)
-        p_name = product['product_name'] or f'Product #{p_key}'
-        current_stock = product['current_stock']
+        page_size = min(max(int(page_size), 1), 100)
+        page = max(int(page), 1)
+        offset = (page - 1) * page_size
+        cursor.execute(
+            f"SELECT * FROM ({enriched}) c {page_where} ORDER BY {order_clause} LIMIT %s OFFSET %s",
+            params + page_params + [page_size, offset],
+        )
+        columns = [col[0] for col in cursor.description]
+        rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
 
-        sorted_records = product_record_map.get(p_key, [])
-        n_months = len(sorted_records)
-
-        predicted_demand = None
-
-        if n_months >= MIN_HISTORY_MONTHS:
-            # Build training dataset
-            X_matrix, Y_vector = build_training_dataset(sorted_records)
-
-            if len(X_matrix) >= 2:
-                # Build prediction feature vector from the latest available month
-                x_predict = build_prediction_features(sorted_records)
-                if x_predict is not None:
-                    try:
-                        result = run_regression(X_matrix, Y_vector, x_predict)
-                        if result['predicted_demand'] is not None:
-                            predicted_demand = result['predicted_demand']
-                    except Exception:
-                        pass
-
-        # Fallback: use last known demand if regression failed or insufficient data
-        if predicted_demand is None:
-            if sorted_records:
-                # Use average of last 3 months (or fewer) as a simple fallback
-                tail = sorted_records[-3:]
-                predicted_demand = max(0, round(
-                    sum(r['units_sold'] for r in tail) / len(tail)
-                ))
-            else:
-                predicted_demand = 0
-
-        # 6. Compute need_to_order
-        need_to_order = max(0, predicted_demand - current_stock)
-
-        products_out.append({
-            'product_key':      p_key,
-            'product_id':       p_id,
-            'product_name':     p_name,
-            'category_name':    product.get('category_name', ''),
-            'color':            product.get('color', ''),
-            'size':             product.get('size', ''),
-            'current_stock':    current_stock,
+    products = []
+    for r in rows:
+        current_stock = int(r['current_stock'] or 0)
+        predicted_demand = int(r['predicted_demand'] or 0)
+        need_to_order = int(r['need_to_order'] or 0)
+        priority = r['priority']
+        products.append({
+            'product_key': r['product_key'],
+            'product_id': str(r['product_key']),
+            'product_name': r['product_name'],
+            'category_name': r['category_name'],
+            'sub_category': r['sub_category'],
+            'image': r['image'] or '',
+            'units_sold': float(r['units_sold'] or 0),
+            'current_stock': current_stock,
             'predicted_demand': predicted_demand,
-            'need_to_order':    need_to_order,
+            'need_to_order': need_to_order,
+            'demand_tier': r['demand_tier'],
+            'priority': priority,
+            'reason': _build_reason(
+                priority, r['demand_tier'], need_to_order, current_stock, predicted_demand
+            ),
         })
 
     return {
         'success': True,
         'error': None,
-        'forecast_month': next_month['period_str'],       # e.g. "2026-10"
-        'forecast_month_label': forecast_label,           # e.g. "October 2026"
-        'products': products_out,
+        'forecast_month': None,
+        'forecast_month_label': 'Live demand snapshot',
+        'products': products,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total_filtered': filtered_total,
+            'total_pages': (filtered_total + page_size - 1) // page_size if page_size else 1,
+        },
+        'summary': {
+            'total_products': total_products,
+            'tier_counts': tier_counts,
+            'priority_counts': priority_counts,
+            'needs_replenishment': needs_replenishment,
+            'urgent': priority_counts.get('Urgent', 0),
+            'high_demand': tier_counts.get('High', 0),
+            'zero_stock': zero_stock,
+            'low_or_zero_stock': low_or_zero_stock,
+            'total_need_to_order': total_need,
+        },
     }

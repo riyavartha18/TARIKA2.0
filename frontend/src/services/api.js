@@ -1315,6 +1315,8 @@ export async function getAdminCustomerDetail(token, customerId) {
 
 /**
  * Fetch Demand Prediction analytics & Decision Tree results.
+ * Returns the ID3 model explanation + demand-class distribution only
+ * (no per-product rows -- those come from getDemandPredictionProducts).
  */
 export async function getDemandPredictionAnalytics(token, params = {}) {
   try {
@@ -1322,9 +1324,7 @@ export async function getDemandPredictionAnalytics(token, params = {}) {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const query = new URLSearchParams();
-    if (params.search) query.append('search', params.search);
-    if (params.demand_level && params.demand_level !== 'ALL') query.append('demand_level', params.demand_level);
-    if (params.category && params.category !== 'ALL') query.append('category', params.category);
+    if (params.refresh) query.append('refresh', '1');
 
     const qs = query.toString();
     const url = `${API_BASE_URL}/api/demand-prediction/analytics/${qs ? '?' + qs : ''}`;
@@ -1341,34 +1341,54 @@ export async function getDemandPredictionAnalytics(token, params = {}) {
 }
 
 /**
- * Fetch Revenue Forecasting analytics (Admin Analysis feature).
- * Consumes the existing predicted-sales output and returns expected revenue
- * (expected_revenue = predicted_sales x selling_price) calculated in Django.
- *
- * @param {string} token  - Bearer token (Admin only)
- * @param {Object} params - Optional filters: { search, category, demand_level }
+ * Fetch one page of per-product demand predictions (server-side filter/sort/page).
+ * @param {string} token
+ * @param {Object} params - { page, page_size, search, demand_level, category, sort, dir }
  */
-export async function getRevenueForecast(token, params = {}) {
+export async function getDemandPredictionProducts(token, params = {}) {
   try {
     const headers = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const query = new URLSearchParams();
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
     if (params.search) query.append('search', params.search);
-    if (params.category && params.category !== 'ALL') query.append('category', params.category);
     if (params.demand_level && params.demand_level !== 'ALL') query.append('demand_level', params.demand_level);
+    if (params.category && params.category !== 'ALL') query.append('category', params.category);
+    if (params.sort) query.append('sort', params.sort);
+    if (params.dir) query.append('dir', params.dir);
 
     const qs = query.toString();
-    const url = `${API_BASE_URL}/api/revenue-forecasting/${qs ? '?' + qs : ''}`;
+    const url = `${API_BASE_URL}/api/demand-prediction/products/${qs ? '?' + qs : ''}`;
     const response = await fetch(url, { headers });
     const data = await response.json();
 
     if (!response.ok) {
-      return { success: false, error: data.error || data.detail || 'Failed to fetch revenue forecast.' };
+      return { success: false, error: data.error || data.detail || 'Failed to fetch demand predictions.' };
     }
     return { success: true, ...data };
   } catch (err) {
-    return { success: false, error: 'Network error fetching revenue forecast.' };
+    return { success: false, error: 'Network error fetching demand predictions.' };
+  }
+}
+
+/**
+ * Fetch the distinct product categories for the demand forecasting filter.
+ */
+export async function getDemandPredictionCategories(token) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const url = `${API_BASE_URL}/api/demand-prediction/categories/`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to fetch categories.' };
+    }
+    return { success: true, categories: data.categories || [] };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching categories.' };
   }
 }
 
@@ -1377,11 +1397,11 @@ export async function getRevenueForecast(token, params = {}) {
    ========================================================================== */
 
 /**
- * Fetch next-month Stock to Be Ordered forecast via OLS regression pipeline.
- * Access: Warehouse Manager only.
+ * Fetch demand-driven Stock to Be Ordered rows (server-side paged).
+ * Access: Warehouse Manager only. Synchronised with the Demand Prediction model.
  *
  * @param {string} token  - Bearer token
- * @param {Object} params - Optional filters: { search, category, status }
+ * @param {Object} params - { page, page_size, search, demand_tier, category, sort, dir }
  */
 export async function getStockToBeOrdered(token, params = {}) {
   try {
@@ -1389,9 +1409,13 @@ export async function getStockToBeOrdered(token, params = {}) {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const query = new URLSearchParams();
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
     if (params.search) query.append('search', params.search);
+    if (params.demand_tier && params.demand_tier !== 'ALL') query.append('demand_tier', params.demand_tier);
     if (params.category && params.category !== 'ALL') query.append('category', params.category);
-    if (params.status && params.status !== 'ALL') query.append('status', params.status);
+    if (params.sort) query.append('sort', params.sort);
+    if (params.dir) query.append('dir', params.dir);
 
     const qs = query.toString();
     const url = `${API_BASE_URL}/api/stock-to-be-ordered/${qs ? '?' + qs : ''}`;
@@ -1407,6 +1431,24 @@ export async function getStockToBeOrdered(token, params = {}) {
     return { success: true, ...data };
   } catch (err) {
     return { success: false, error: 'Network error fetching stock forecast.' };
+  }
+}
+
+/**
+ * Fetch distinct product categories for the Stock to Be Ordered filter.
+ */
+export async function getStockCategories(token) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/categories/`, { headers });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to fetch categories.' };
+    }
+    return { success: true, categories: data.categories || [] };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching stock categories.' };
   }
 }
 

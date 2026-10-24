@@ -58,7 +58,6 @@ INSTALLED_APPS = [
     'delivery.apps.DeliveryConfig',
     'demand_prediction.apps.DemandPredictionConfig',
     'stock_to_be_ordered.apps.StockToBeOrderedConfig',
-    'revenue_forecasting.apps.RevenueForecastingConfig',
     'recommendations.apps.RecommendationsConfig',
 ]
 
@@ -129,6 +128,10 @@ DATABASES = {
         'PASSWORD': unquote(parsed_database_url.password or ''),
         'HOST': database_host,
         'PORT': database_port,
+        # Reuse DB connections across requests to avoid the ~1.3s remote
+        # (Neon/Supabase) TLS handshake on every forecasting/dashboard call.
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', 60)),
+        'CONN_HEALTH_CHECKS': True,
         'OPTIONS': {
             'sslmode': 'require',
         },

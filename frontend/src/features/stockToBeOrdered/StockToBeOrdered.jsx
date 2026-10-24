@@ -1,277 +1,306 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getStockToBeOrdered } from '../../services/api';
 import './StockToBeOrdered.css';
 
 /* ─────────────────────────────────────────────
-   Skeleton row for loading state
+   Skeleton card for loading state
 ───────────────────────────────────────────── */
-function SkeletonRows({ count = 8 }) {
+function SkeletonCards({ count = 8 }) {
   return (
     <>
       {Array.from({ length: count }).map((_, i) => (
-        <tr key={i} className="stbo-skeleton-tr">
-          <td className="stbo-td stbo-td-rank"><span className="stbo-skel stbo-skel-sm" /></td>
-          <td className="stbo-td stbo-td-name"><span className="stbo-skel stbo-skel-lg" /></td>
-          <td className="stbo-td stbo-td-variant"><span className="stbo-skel stbo-skel-sm" /></td>
-          <td className="stbo-td stbo-td-variant"><span className="stbo-skel stbo-skel-sm" /></td>
-          <td className="stbo-td stbo-td-num"><span className="stbo-skel stbo-skel-sm" /></td>
-          <td className="stbo-td stbo-td-num"><span className="stbo-skel stbo-skel-sm" /></td>
-          <td className="stbo-td stbo-td-num"><span className="stbo-skel stbo-skel-sm" /></td>
-        </tr>
+        <div key={i} className="stbo-pcard stbo-pcard-skeleton">
+          <div className="stbo-skel stbo-skel-img" />
+          <div className="stbo-pcard-body">
+            <div className="stbo-skel stbo-skel-lg" />
+            <div className="stbo-skel stbo-skel-sm" />
+            <div className="stbo-skel stbo-skel-md" />
+          </div>
+        </div>
       ))}
     </>
   );
 }
 
-/* ─────────────────────────────────────────────
-   Sortable column header
-───────────────────────────────────────────── */
-function SortableTh({ label, sortKey, current, dir, onSort }) {
-  const isActive = current === sortKey;
+/* Demand + priority indicators — readable labels, not colour alone. */
+const TIER_META = {
+  High: { label: 'High demand', bg: '#ECFDF5', fg: '#059669', border: '#A7F3D0' },
+  Medium: { label: 'Medium demand', bg: '#FFFBEB', fg: '#D97706', border: '#FDE68A' },
+  Low: { label: 'Low demand', bg: '#FEF2F2', fg: '#DC2626', border: '#FCA5A5' },
+};
+
+const PRIORITY_META = {
+  Urgent: { label: 'Urgent', icon: '🔴', bg: '#FEF2F2', fg: '#DC2626', border: '#FCA5A5', accent: '#DC2626' },
+  Soon: { label: 'Soon', icon: '🟠', bg: '#FFFBEB', fg: '#D97706', border: '#FDE68A', accent: '#D97706' },
+  'Low Priority': { label: 'Low priority', icon: '🟢', bg: '#ECFDF5', fg: '#059669', border: '#A7F3D0', accent: '#059669' },
+};
+
+function Pill({ bg, fg, border, children }) {
   return (
-    <th
-      className={`stbo-th stbo-th-sortable${isActive ? ' stbo-th-active' : ''}`}
-      onClick={() => onSort(sortKey)}
-    >
-      {label}
-      {isActive && <span className="stbo-sort-arrow">{dir === 'asc' ? ' ↑' : ' ↓'}</span>}
-    </th>
+    <span className="stbo-pill" style={{ backgroundColor: bg, color: fg, borderColor: border }}>
+      {children}
+    </span>
   );
 }
 
 /* ─────────────────────────────────────────────
-   Main component — auto-loads on mount
+   Summary card (counts from live data)
 ───────────────────────────────────────────── */
-const ITEMS_PER_PAGE = 25;
+function SummaryCard({ icon, label, value, sub, accent }) {
+  return (
+    <div className="stbo-summary-card" style={{ borderTop: `3px solid ${accent}` }}>
+      <div className="stbo-summary-icon" style={{ backgroundColor: `${accent}1A`, color: accent }}>{icon}</div>
+      <div>
+        <div className="stbo-summary-value" style={{ color: accent }}>{value.toLocaleString('en-IN')}</div>
+        <div className="stbo-summary-label">{label}</div>
+        {sub && <div className="stbo-summary-sub">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Main component — server-paged, loads on mount
+───────────────────────────────────────────── */
+const PAGE_SIZE = 12;
+
+const SORT_OPTIONS = [
+  { value: 'priority', label: 'Restock priority' },
+  { value: 'need_to_order', label: 'Recommended order qty' },
+  { value: 'predicted_demand', label: 'Predicted demand' },
+  { value: 'current_stock', label: 'Current stock' },
+  { value: 'product_name', label: 'Product name' },
+];
 
 export default function StockToBeOrdered({ token }) {
-  const [data, setData] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [pagination, setPagination] = useState({ page: 1, page_size: PAGE_SIZE, total_filtered: 0, total_pages: 1 });
+  const [summary, setSummary] = useState({});
+  const [forecastLabel, setForecastLabel] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Search
   const [search, setSearch] = useState('');
-
-  // Sort
-  const [sortKey, setSortKey] = useState('need_to_order');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [tierFilter, setTierFilter] = useState('ALL');
+  const [sortKey, setSortKey] = useState('priority');
   const [sortDir, setSortDir] = useState('desc');
+  const [page, setPage] = useState(1);
 
-  // Pagination
-  const [currentPage, setCurrentPage] = useState(1);
-
-  /* ── Auto-load on mount ────────────────────── */
+  const searchTimer = useRef(null);
   useEffect(() => {
-    let cancelled = false;
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 350);
+    return () => clearTimeout(searchTimer.current);
+  }, [search]);
 
-    async function load() {
-      setLoading(true);
-      setError(null);
+  // Reset to first page whenever a filter/sort changes.
+  useEffect(() => { setPage(1); }, [tierFilter, sortKey, sortDir]);
 
-      const result = await getStockToBeOrdered(token);
-
-      if (cancelled) return;
-
-      setLoading(false);
-      if (!result.success) {
-        setError(result.error || 'Failed to load forecast.');
-      } else {
-        setData(result);
-      }
-    }
-
-    load();
-    return () => { cancelled = true; };
-  }, [token]); // Only re-run if token changes (i.e. login)
-
-  /* ── Filtered + sorted product list ─────────── */
-  const filtered = useMemo(() => {
-    if (!data?.products) return [];
-    let rows = [...data.products];
-
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      rows = rows.filter(p => (p.product_name || '').toLowerCase().includes(q));
-    }
-
-    rows.sort((a, b) => {
-      let aVal = a[sortKey] ?? 0;
-      let bVal = b[sortKey] ?? 0;
-      if (typeof aVal === 'string') aVal = aVal.toLowerCase();
-      if (typeof bVal === 'string') bVal = bVal.toLowerCase();
-      return sortDir === 'asc' ? (aVal > bVal ? 1 : -1) : (aVal < bVal ? 1 : -1);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const result = await getStockToBeOrdered(token, {
+      page,
+      page_size: PAGE_SIZE,
+      search: debouncedSearch,
+      demand_tier: tierFilter,
+      sort: sortKey,
+      dir: sortDir,
     });
-
-    return rows;
-  }, [data, search, sortKey, sortDir]);
-
-  /* ── Pagination ────────────────────────────── */
-  const totalPages = Math.max(1, Math.ceil(filtered.length / ITEMS_PER_PAGE));
-  const paged = filtered.slice(
-    (currentPage - 1) * ITEMS_PER_PAGE,
-    currentPage * ITEMS_PER_PAGE,
-  );
-
-  /* ── Sort toggle ───────────────────────────── */
-  const toggleSort = (key) => {
-    if (sortKey === key) {
-      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    if (result.success) {
+      setRows(result.products || []);
+      setPagination(result.pagination || pagination);
+      setSummary(result.summary || {});
+      setForecastLabel(result.forecast_month_label || '');
     } else {
-      setSortKey(key);
-      setSortDir('desc');
+      setError(result.error || 'Failed to load forecast.');
     }
-    setCurrentPage(1);
-  };
+    setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, page, debouncedSearch, tierFilter, sortKey, sortDir]);
 
-  /* ── Search handler ────────────────────────── */
-  const handleSearchChange = (e) => {
-    setSearch(e.target.value);
-    setCurrentPage(1);
-  };
+  useEffect(() => { load(); }, [load]);
 
-  /* ─────────────────────────────────────────────
-     RENDER
-  ───────────────────────────────────────────── */
+  const totals = summary.tier_counts || {};
+  const needsReplenishment = summary.needs_replenishment ?? 0;
+  const urgent = summary.urgent ?? 0;
+  const highDemand = summary.high_demand ?? (totals.High || 0);
+  const lowOrZero = summary.low_or_zero_stock ?? 0;
+  const zeroStock = summary.zero_stock ?? 0;
+
   return (
     <div className="stbo-wrapper">
 
       {/* ── Page Header ──────────────────────────── */}
       <div className="stbo-page-header">
         <div className="stbo-page-header-left">
-          <div className="stbo-header-icon-wrap">
-            <span className="stbo-header-icon">📦</span>
-          </div>
+          <div className="stbo-header-icon-wrap"><span className="stbo-header-icon">📦</span></div>
           <div>
             <h2 className="stbo-title">Stock to Be Ordered</h2>
-            {data && !loading && (
-              <p className="stbo-subtitle">
-                Forecast for:{' '}
-                <strong className="stbo-forecast-month">{data.forecast_month_label}</strong>
-              </p>
-            )}
-            {loading && <p className="stbo-subtitle">Loading forecast…</p>}
+            <p className="stbo-subtitle">
+              Demand-driven replenishment, synchronised with Demand Forecasting
+              {forecastLabel && <> · <strong className="stbo-forecast-month">{forecastLabel}</strong></>}
+            </p>
           </div>
         </div>
-
-        {/* Right-side controls: Search */}
         <div className="stbo-header-right">
-          {data && !loading && (
-            <div className="stbo-search-wrap">
-              <span className="stbo-search-icon">🔍</span>
-              <input
-                id="stbo-search"
-                type="text"
-                placeholder="Search product…"
-                value={search}
-                onChange={handleSearchChange}
-                className="stbo-search-input"
-              />
-            </div>
-          )}
+          <div className="stbo-search-wrap">
+            <span className="stbo-search-icon">🔍</span>
+            <input
+              id="stbo-search"
+              type="text"
+              placeholder="Search product or category…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="stbo-search-input"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ── Summary Cards ────────────────────────── */}
+      <div className="stbo-summary-grid">
+        <SummaryCard icon="🛒" accent="#B8505E"
+          label="Needs Replenishment" value={needsReplenishment}
+          sub={`${summary.total_need_to_order ? summary.total_need_to_order.toLocaleString('en-IN') : 0} units to order in total`} />
+        <SummaryCard icon="🔴" accent="#DC2626"
+          label="Urgent Restocking" value={urgent}
+          sub="High demand or out of stock" />
+        <SummaryCard icon="📈" accent="#059669"
+          label="High-Demand Products" value={highDemand}
+          sub={`of ${summary.total_products ? summary.total_products.toLocaleString('en-IN') : 0} catalog items`} />
+        <SummaryCard icon="📦" accent="#D97706"
+          label="Low or Zero Stock" value={lowOrZero}
+          sub={`${zeroStock.toLocaleString('en-IN')} completely out of stock`} />
+      </div>
+
+      {/* ── Controls: tier filter + sort ─────────── */}
+      <div className="stbo-controls">
+        <div className="stbo-tier-pills">
+          {['ALL', 'High', 'Medium', 'Low'].map((lvl) => (
+            <button
+              key={lvl}
+              onClick={() => setTierFilter(lvl)}
+              className={`stbo-tier-pill${tierFilter === lvl ? ' stbo-tier-pill-active' : ''}`}
+            >
+              {lvl === 'ALL' ? 'All demand' : `${lvl} demand`}
+            </button>
+          ))}
+        </div>
+
+        <div className="stbo-sort-controls">
+          <label className="stbo-sort-label" htmlFor="stbo-sort">Sort by</label>
+          <select
+            id="stbo-sort"
+            className="stbo-sort-select"
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value)}
+          >
+            {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <button className="stbo-dir-btn" onClick={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}>
+            {sortDir === 'asc' ? 'Ascending ↑' : 'Descending ↓'}
+          </button>
         </div>
       </div>
 
       {/* ── Error ──────────────────────────────── */}
       {error && (
         <div className="stbo-error">
-          <span>⚠️</span>
-          <span>{error}</span>
+          <span>⚠️</span><span>{error}</span>
         </div>
       )}
 
-      {/* ── Table ──────────────────────────────── */}
-      <div className="stbo-table-card">
-        <div className="stbo-table-wrap">
-          <table className="stbo-table">
-            <thead>
-              <tr>
-                <th className="stbo-th stbo-th-rank">#</th>
-                <SortableTh label="Product" sortKey="product_name" current={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortableTh label="Color" sortKey="color" current={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortableTh label="Size" sortKey="size" current={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortableTh label="Current Stock" sortKey="current_stock" current={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortableTh label="Predicted Demand" sortKey="predicted_demand" current={sortKey} dir={sortDir} onSort={toggleSort} />
-                <SortableTh label="Need to Order" sortKey="need_to_order" current={sortKey} dir={sortDir} onSort={toggleSort} />
-              </tr>
-            </thead>
-            <tbody>
-              {loading && <SkeletonRows count={10} />}
+      {/* ── Product Cards ──────────────────────── */}
+      {!error && (
+        <div className="stbo-cards-grid">
+          {loading && <SkeletonCards count={8} />}
 
-              {!loading && paged.map((p, idx) => {
-                const rowNum = (currentPage - 1) * ITEMS_PER_PAGE + idx + 1;
-                const needsOrder = p.need_to_order > 0;
-                return (
-                  <tr key={p.product_key ?? p.product_id} className={`stbo-row${needsOrder ? ' stbo-row-urgent' : ''}`}>
-                    <td className="stbo-td stbo-td-rank">{rowNum}</td>
-                    <td className="stbo-td stbo-td-name">{p.product_name}</td>
-                    <td className="stbo-td stbo-td-variant">{p.color || '—'}</td>
-                    <td className="stbo-td stbo-td-variant">{p.size || '—'}</td>
-                    <td className="stbo-td stbo-td-num">
-                      <span className="stbo-stock-num">{p.current_stock}</span>
-                    </td>
-                    <td className="stbo-td stbo-td-num">
-                      <span className="stbo-demand-num">{p.predicted_demand}</span>
-                    </td>
-                    <td className="stbo-td stbo-td-num">
-                      {needsOrder ? (
-                        <span className="stbo-order-badge stbo-order-needed">{p.need_to_order}</span>
-                      ) : (
-                        <span className="stbo-order-badge stbo-order-ok">0</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+          {!loading && rows.map((p) => {
+            const tier = TIER_META[p.demand_tier] || TIER_META.Medium;
+            const prio = PRIORITY_META[p.priority] || PRIORITY_META['Low Priority'];
+            const orderNeeded = p.need_to_order > 0;
+            return (
+              <div key={p.product_key ?? p.product_id} className="stbo-pcard" style={{ borderTop: `3px solid ${prio.accent}` }}>
+                <div className="stbo-pcard-media">
+                  {p.image ? (
+                    <img
+                      src={p.image}
+                      alt={p.product_name}
+                      loading="lazy"
+                      className="stbo-pcard-img"
+                      onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                    />
+                  ) : (
+                    <div className="stbo-pcard-img stbo-pcard-img-ph">🖼️</div>
+                  )}
+                  <div className="stbo-pcard-badges">
+                    <Pill bg={tier.bg} fg={tier.fg} border={tier.border}>{tier.label}</Pill>
+                    <Pill bg={prio.bg} fg={prio.fg} border={prio.border}>{prio.icon} {prio.label}</Pill>
+                  </div>
+                </div>
 
-              {!loading && !error && data && filtered.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="stbo-empty-row">
-                    {search ? 'No products match your search.' : 'No forecast data available.'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                <div className="stbo-pcard-body">
+                  <div className="stbo-pcard-name" title={p.product_name}>{p.product_name}</div>
+                  <div className="stbo-pcard-cat">{p.category_name}{p.sub_category ? ` · ${p.sub_category}` : ''}</div>
 
-        {/* ── Footer: count + pagination ─────────── */}
-        {!loading && data && filtered.length > 0 && (
-          <div className="stbo-table-footer">
-            <span className="stbo-footer-count">
-              {filtered.length} product{filtered.length !== 1 ? 's' : ''}
-              {search && ` matching "${search}"`}
-            </span>
-
-            {totalPages > 1 && (
-              <div className="stbo-pagination">
-                <button
-                  className="stbo-page-btn"
-                  onClick={() => setCurrentPage(1)}
-                  disabled={currentPage === 1}
-                >«</button>
-                <button
-                  className="stbo-page-btn"
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                >‹</button>
-                <span className="stbo-page-info">
-                  {currentPage} / {totalPages}
-                </span>
-                <button
-                  className="stbo-page-btn"
-                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages}
-                >›</button>
-                <button
-                  className="stbo-page-btn"
-                  onClick={() => setCurrentPage(totalPages)}
-                  disabled={currentPage === totalPages}
-                >»</button>
+                  <div className="stbo-stats">
+                    <div className="stbo-stat">
+                      <span className="stbo-stat-label">Current stock</span>
+                      <span className="stbo-stat-value" style={{ color: p.current_stock <= 0 ? '#DC2626' : '#1F191B' }}>
+                        {p.current_stock.toLocaleString('en-IN')} units
+                      </span>
+                    </div>
+                    <div className="stbo-stat">
+                      <span className="stbo-stat-label">Predicted demand</span>
+                      <span className="stbo-stat-value">{p.predicted_demand.toLocaleString('en-IN')} units</span>
+                    </div>
+                    <div className="stbo-stat stbo-stat-order">
+                      <span className="stbo-stat-label">Recommended order</span>
+                      <span className={`stbo-order-badge ${orderNeeded ? 'stbo-order-needed' : 'stbo-order-ok'}`}>
+                        {orderNeeded ? `${p.need_to_order.toLocaleString('en-IN')} units` : 'None'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
-            )}
-          </div>
-        )}
-      </div>
+            );
+          })}
 
+          {!loading && !error && rows.length === 0 && (
+            <div className="stbo-empty">
+              {search || tierFilter !== 'ALL'
+                ? 'No products match your search or filters.'
+                : 'No forecast data available.'}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Footer: count + pagination (server-driven) ─────────── */}
+      {!loading && pagination.total_filtered > 0 && (
+        <div className="stbo-table-footer">
+          <span className="stbo-footer-count">
+            Showing {rows.length} of {pagination.total_filtered.toLocaleString('en-IN')} products
+            {debouncedSearch && ` matching "${debouncedSearch}"`}
+            {tierFilter !== 'ALL' && ` · ${tierFilter} demand only`}
+          </span>
+
+          {pagination.total_pages > 1 && (
+            <div className="stbo-pagination">
+              <button className="stbo-page-btn" onClick={() => setPage(1)} disabled={pagination.page <= 1}>«</button>
+              <button className="stbo-page-btn" onClick={() => setPage((v) => Math.max(1, v - 1))} disabled={pagination.page <= 1}>‹</button>
+              <span className="stbo-page-info">{pagination.page} / {pagination.total_pages}</span>
+              <button className="stbo-page-btn" onClick={() => setPage((v) => Math.min(pagination.total_pages, v + 1))} disabled={pagination.page >= pagination.total_pages}>›</button>
+              <button className="stbo-page-btn" onClick={() => setPage(pagination.total_pages)} disabled={pagination.page >= pagination.total_pages}>»</button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

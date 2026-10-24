@@ -43,13 +43,6 @@ urlpatterns = [
         )
     ),
     path(
-        'api/revenue-forecasting/',
-        include(
-            ('revenue_forecasting.urls', 'revenue_forecasting'),
-            namespace='revenue_forecasting'
-        )
-    ),
-    path(
         'api/recommendations/',
         include(
             ('recommendations.urls', 'recommendations'),
