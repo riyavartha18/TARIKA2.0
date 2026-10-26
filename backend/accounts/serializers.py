@@ -7,10 +7,7 @@ class CustomerRegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, required=True, min_length=6)
     full_name = serializers.CharField(required=True, max_length=255)
-    phone = serializers.IntegerField(required=False, allow_null=True)
-    city = serializers.CharField(required=False, allow_blank=True, max_length=100)
-    state = serializers.CharField(required=False, allow_blank=True, max_length=100)
-    country = serializers.CharField(required=False, allow_blank=True, max_length=100, default='India')
+    gender = serializers.CharField(required=False, allow_blank=True, max_length=50)
 
     def validate(self, attrs):
         # Strict security rule: Any incoming 'role' parameter is purged/disallowed.
@@ -18,21 +15,11 @@ class CustomerRegisterSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated_data):
-        email = validated_data['email']
-        password = validated_data['password']
-        full_name = validated_data['full_name']
-        phone = validated_data.get('phone')
-        extra_fields = {
-            'city': validated_data.get('city'),
-            'state': validated_data.get('state'),
-            'country': validated_data.get('country', 'India')
-        }
         return SupabaseAuthService.register_customer(
-            email=email,
-            password=password,
-            full_name=full_name,
-            phone=phone,
-            **extra_fields
+            email=validated_data['email'],
+            password=validated_data['password'],
+            full_name=validated_data['full_name'],
+            gender=validated_data.get('gender'),
         )
 
 

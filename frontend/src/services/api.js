@@ -45,7 +45,7 @@ export async function loginUser(email, password) {
  * Public Customer Registration.
  * Strictly assigns role CUSTOMER (no role is ever sent from the frontend).
  */
-export async function registerCustomer({ fullName, email, phone, password, city, state }) {
+export async function registerCustomer({ fullName, email, gender, password }) {
   try {
     const payload = {
       full_name: fullName.trim(),
@@ -53,14 +53,7 @@ export async function registerCustomer({ fullName, email, phone, password, city,
       password,
     };
 
-    if (phone) {
-      const parsedPhone = parseInt(phone.replace(/\D/g, ''), 10);
-      if (!isNaN(parsedPhone)) {
-        payload.phone = parsedPhone;
-      }
-    }
-    if (city) payload.city = city.trim();
-    if (state) payload.state = state.trim();
+    if (gender) payload.gender = gender.trim();
 
     const response = await fetch(`${API_BASE_URL}/api/auth/register/`, {
       method: 'POST',

@@ -94,11 +94,11 @@ class SupabaseAuthentication(authentication.BaseAuthentication):
                 request.warehouse_id = None
                 return (user, raw_token)
 
-        # ---- Customer: the JWT subject is the Supabase Auth (auth.users) UUID ----
+        # ---- Customer: the JWT subject is the public.customers.customer_id ----
         email_claim = payload.get('email')
         if not email_claim:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT email FROM auth.users WHERE id = %s LIMIT 1;", [auth_user_id])
+                cursor.execute("SELECT email FROM public.customers WHERE customer_id = %s LIMIT 1;", [auth_user_id])
                 r = cursor.fetchone()
             email_claim = r[0] if r else None
 
@@ -106,19 +106,19 @@ class SupabaseAuthentication(authentication.BaseAuthentication):
         if email_claim:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT customer_id, customer_name, email, phone FROM public.customers WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
+                    "SELECT customer_id, customer_name, gender, email FROM public.customers WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
                     [email_claim],
                 )
                 customer = cursor.fetchone()
 
         if customer:
-            customer_id, customer_name, cust_email, phone = customer
+            customer_id, customer_name, gender, cust_email = customer
             profile = SimpleNamespace(
                 customer_id=customer_id,
                 full_name=customer_name,
                 name=customer_name,
                 email=cust_email,
-                phone=phone,
+                gender=gender,
                 is_active=True,
             )
             user = AuthenticatedUser(

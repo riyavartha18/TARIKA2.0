@@ -4,7 +4,6 @@ import { useAuth } from '../auth/AuthContext';
 import { 
   User, 
   Mail, 
-  Phone, 
   Lock, 
   Eye, 
   EyeOff, 
@@ -20,7 +19,7 @@ export default function Signup() {
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
+  const [gender, setGender] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
@@ -70,7 +69,7 @@ export default function Signup() {
     const result = await register({
       fullName: fullName.trim(),
       email: email.trim(),
-      phone: phone.trim(),
+      gender,
       password,
     });
 
@@ -216,21 +215,25 @@ export default function Signup() {
               </div>
             </div>
 
-            {/* Phone Number */}
+            {/* Gender */}
             <div className="tarika-form-group">
-              <label className="tarika-form-label" htmlFor="signup-phone">Phone Number (Optional)</label>
+              <label className="tarika-form-label" htmlFor="signup-gender">Gender</label>
               <div className="tarika-input-wrap">
-                <Phone size={18} className="tarika-input-icon" />
-                <input
-                  id="signup-phone"
-                  type="tel"
+                <User size={18} className="tarika-input-icon" />
+                <select
+                  id="signup-gender"
                   className="tarika-input"
-                  placeholder="9876543210"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
+                  value={gender}
+                  onChange={(e) => setGender(e.target.value)}
                   disabled={isLoading}
-                  autoComplete="tel"
-                />
+                  autoComplete="sex"
+                  style={{ appearance: 'none' }}
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Female">Female</option>
+                  <option value="Male">Male</option>
+                  <option value="Other">Other</option>
+                </select>
               </div>
             </div>
 
