@@ -1,12 +1,27 @@
 import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Heart, ShoppingBag, Trash2, ArrowRight, Sparkles, Check } from 'lucide-react';
+import { Heart, ShoppingBag, Trash2, ArrowRight, Sparkles, Check, AlertCircle } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
 import { getProductPricing } from '../../utils/pricing';
 
 export default function WishlistPage() {
-  const { wishlistItems, wishlistLoading, toggleWishlist, addToBag, openProductDetail } = useCustomer();
+  const {
+    wishlistItems,
+    wishlistLoading,
+    wishlistError,
+    toggleWishlist,
+    addToBag,
+    openProductDetail,
+    refreshCustomerData,
+  } = useCustomer();
   const [movingId, setMovingId] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    await refreshCustomerData();
+    setRetrying(false);
+  };
 
   const handleMoveToBag = async (item) => {
     const pId = item.product_id;
@@ -74,6 +89,18 @@ export default function WishlistPage() {
           </Link>
         )}
       </div>
+
+      {/* Loading / error state: a failed fetch is shown as itself, not as an
+          empty wishlist. */}
+      {wishlistError && !wishlistLoading && (
+        <div className="tarika-portal-alert" role="alert">
+          <AlertCircle size={18} style={{ flexShrink: 0 }} />
+          <span>{wishlistError}</span>
+          <button type="button" className="tarika-portal-alert-action" onClick={handleRetry} disabled={retrying}>
+            {retrying ? 'Retrying...' : 'Retry'}
+          </button>
+        </div>
+      )}
 
       {/* Wishlist Items Grid */}
       {wishlistLoading ? (
@@ -148,7 +175,9 @@ export default function WishlistPage() {
               >
                 {category.items.map((item) => {
             const { basePrice, currentPrice, isOnSale } = getProductPricing(item);
-            const isOutOfStock = item.total_stock !== undefined && item.total_stock <= 0;
+            // Driven by the backend's stock flag: `total_stock` is 0 both for a
+            // sold-out product and for one whose stock is simply not recorded.
+            const isOutOfStock = item.in_stock === false;
             const isBusy = movingId === item.product_id;
 
             const imageUrl =
@@ -172,28 +201,12 @@ export default function WishlistPage() {
                   {/* Remove button */}
                   <button
                     type="button"
+                    className="wishlist-remove-btn"
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleWishlist(item);
                     }}
-                    style={{
-                      position: 'absolute',
-                      top: '12px',
-                      right: '12px',
-                      width: '36px',
-                      height: '36px',
-                      borderRadius: '50%',
-                      backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                      border: '1px solid rgba(216, 114, 126, 0.3)',
-                      color: '#E04D60',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      zIndex: 10,
-                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.08)',
-                      transition: 'all 0.2s ease',
-                    }}
+                    aria-label={`Remove ${item.product_name || 'item'} from wishlist`}
                     title="Remove from wishlist"
                   >
                     <Trash2 size={16} />

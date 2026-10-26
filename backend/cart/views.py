@@ -1,3 +1,6 @@
+import logging
+
+from django.db import DatabaseError
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -9,16 +12,37 @@ from .serializers import (
     AddToCartSerializer,
     UpdateCartQuantitySerializer
 )
-from .services import CustomerResolver, WishlistService, CartService
+from .services import CustomerResolver, WishlistService, CartService, ServiceUnavailable
 
 
-class WishlistListView(APIView):
-    """
-    GET  /api/wishlist/ -> List all items in customer's wishlist.
-    POST /api/wishlist/ -> Add a product to customer's wishlist (prevents duplicates).
-    Requires authenticated CUSTOMER role.
+logger = logging.getLogger(__name__)
+
+
+class CustomerAPIView(APIView):
+    """Customer-scoped endpoint that never leaks a database failure detail.
+
+    Any database error that survives the service layer (an outage, a schema
+    change) becomes a generic 503 with no driver message, which can quote SQL.
     """
     permission_classes = [IsCustomer]
+
+    def handle_exception(self, exc):
+        if isinstance(exc, DatabaseError):
+            logger.error("%s: database error (%s)", self.__class__.__name__, type(exc).__name__)
+            return Response(
+                {'detail': ServiceUnavailable.default_detail},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return super().handle_exception(exc)
+
+
+class WishlistListView(CustomerAPIView):
+    """
+    GET  /api/wishlist/ -> List the signed-in customer's saved products.
+    POST /api/wishlist/ -> Save a product for the signed-in customer.
+    Duplicates are impossible: (customer_id, product_id) is unique in the
+    existing public.wishlist table.
+    """
 
     def get(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
@@ -44,20 +68,19 @@ class WishlistListView(APIView):
                 'already_in_wishlist': False,
                 'item': item_data
             }, status=status.HTTP_201_CREATED)
-        else:
-            return Response({
-                'message': 'Product is already in your wishlist.',
-                'already_in_wishlist': True,
-                'item': item_data
-            }, status=status.HTTP_200_OK)
+        return Response({
+            'message': 'Product is already in your wishlist.',
+            'already_in_wishlist': True,
+            'item': item_data
+        }, status=status.HTTP_200_OK)
 
 
-class WishlistRemoveView(APIView):
+class WishlistRemoveView(CustomerAPIView):
     """
-    DELETE /api/wishlist/<product_id>/ -> Remove product from customer's wishlist.
-    Requires authenticated CUSTOMER role.
+    DELETE /api/wishlist/<product_id>/ -> Remove the signed-in customer's row.
+    The customer is taken from the session, so another customer's row can never
+    be targeted by name or id.
     """
-    permission_classes = [IsCustomer]
 
     def delete(self, request, product_id):
         customer = CustomerResolver.get_customer_for_user(request.user)
@@ -73,13 +96,12 @@ class WishlistRemoveView(APIView):
         }, status=status.HTTP_404_NOT_FOUND)
 
 
-class CartView(APIView):
+class CartView(CustomerAPIView):
     """
-    GET  /api/cart/ (or /api/bag/) -> View customer's bag with subtotal & total.
-    POST /api/cart/ (or /api/bag/) -> Add product with quantity to customer's bag.
-    Requires authenticated CUSTOMER role.
+    GET  /api/cart/ (or /api/bag/) -> The customer's bag with subtotal & total.
+    POST /api/cart/ (or /api/bag/) -> Add a product, or raise the quantity of
+    the line that already holds it.
     """
-    permission_classes = [IsCustomer]
 
     def get(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
@@ -92,26 +114,29 @@ class CartView(APIView):
         serializer.is_valid(raise_exception=True)
 
         product_id = serializer.validated_data['product_id']
-        quantity = serializer.validated_data.get('quantity', 1)
+        quantity = serializer.validated_data.get('quantity') or 1
 
         item, created = CartService.add_to_cart(customer, product_id, quantity)
         summary = CartService.get_cart_summary(customer)
 
         return Response({
-            'message': 'Product added to your bag successfully.',
+            'message': (
+                'Product added to your bag successfully.'
+                if created else 'Quantity updated in your bag successfully.'
+            ),
+            'created': created,
             'item': CartItemSerializer(item).data,
-            'summary': summary
+            'cart': summary,
+            # Kept for existing callers.
+            'summary': summary,
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
-class CartItemDetailView(APIView):
+class CartItemDetailView(CustomerAPIView):
     """
-    PATCH  /api/cart/<product_id>/ -> Update item quantity in bag.
-    PUT    /api/cart/<product_id>/ -> Update item quantity in bag.
-    DELETE /api/cart/<product_id>/ -> Remove item from bag.
-    Requires authenticated CUSTOMER role.
+    PATCH/PUT /api/cart/<product_id>/ -> Set a line's quantity.
+    DELETE    /api/cart/<product_id>/ -> Remove a line.
     """
-    permission_classes = [IsCustomer]
 
     def patch(self, request, product_id):
         return self._update_quantity(request, product_id)
@@ -131,7 +156,8 @@ class CartItemDetailView(APIView):
         return Response({
             'message': 'Bag quantity updated successfully.',
             'item': CartItemSerializer(item).data,
-            'summary': summary
+            'cart': summary,
+            'summary': summary,
         }, status=status.HTTP_200_OK)
 
     def delete(self, request, product_id):
@@ -142,7 +168,8 @@ class CartItemDetailView(APIView):
             return Response({
                 'message': 'Product removed from your bag successfully.',
                 'product_id': product_id,
-                'summary': summary
+                'cart': summary,
+                'summary': summary,
             }, status=status.HTTP_200_OK)
         return Response({
             'message': 'Product was not found in your bag.',
@@ -150,12 +177,8 @@ class CartItemDetailView(APIView):
         }, status=status.HTTP_404_NOT_FOUND)
 
 
-class CartClearView(APIView):
-    """
-    DELETE /api/cart/clear/ -> Empty the customer's bag.
-    Requires authenticated CUSTOMER role.
-    """
-    permission_classes = [IsCustomer]
+class CartClearView(CustomerAPIView):
+    """DELETE /api/cart/clear/ -> Empty the signed-in customer's bag."""
 
     def delete(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)

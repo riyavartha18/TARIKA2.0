@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
+from django.db import DatabaseError
 from django.urls import reverse, resolve
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import Role, EmployeeRole
@@ -367,3 +369,155 @@ class AccountsViewAPITests(SimpleTestCase):
             response = view(request)
             self.assertEqual(response.status_code, 201)
             self.assertEqual(response.data['employee']['role'], EmployeeRole.WAREHOUSE_MANAGER)
+
+
+class CustomerCredentialTests(SimpleTestCase):
+    """public.customers authentication, including the plain-text -> bcrypt path.
+
+    The cursor is mocked here; the same branches are exercised against the real
+    Neon database by a live round-trip check.
+    """
+
+    # (customer_id, customer_name, gender, email, password_ok, is_bcrypt)
+    BCRYPT_OK = ('U1000001', 'Asha Shaikh', 'Female', 'asha@example.com', True, True)
+    PLAIN_OK = ('U1000002', 'Ravi Nair', 'Male', 'ravi@example.com', True, False)
+    BAD = ('U1000003', 'Meera Rao', 'Female', 'meera@example.com', False, True)
+
+    def _patch_connection(self, row, side_effect=None):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = row
+        if side_effect is not None:
+            cursor.execute.side_effect = side_effect
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return patch('accounts.services.supabase_auth.connection', conn), cursor
+
+    def test_bcrypt_row_authenticates_without_rewriting(self):
+        connector, cursor = self._patch_connection(self.BCRYPT_OK)
+        with connector:
+            profile = SupabaseAuthService.verify_customer_credentials(
+                'asha@example.com', 'Secret#123'
+            )
+        self.assertEqual(profile['customer_id'], 'U1000001')
+        # One statement only: the stored hash was never re-written.
+        self.assertEqual(cursor.execute.call_count, 1)
+
+    def test_crypt_is_only_applied_to_bcrypt_values(self):
+        connector, cursor = self._patch_connection(self.BCRYPT_OK)
+        with connector:
+            SupabaseAuthService.verify_customer_credentials('asha@example.com', 'Secret#123')
+        sql = cursor.execute.call_args_list[0][0][0]
+        # pgcrypto falls back to truncated DES when fed a plain-text salt, so
+        # the bcrypt comparison must be guarded by a scheme check.
+        self.assertIn("left(password, 4) IN ('$2a$', '$2b$', '$2y$')", sql)
+        self.assertIn('crypt(', sql)
+        # The stored secret is never selected out of the table.
+        self.assertNotIn('SELECT password', sql)
+
+    def test_plaintext_row_authenticates_and_is_upgraded(self):
+        connector, cursor = self._patch_connection(self.PLAIN_OK)
+        with connector:
+            profile = SupabaseAuthService.verify_customer_credentials(
+                'ravi@example.com', 'Legacy#123'
+            )
+        self.assertEqual(profile['customer_id'], 'U1000002')
+        # Verification, then the compare-and-set upgrade.
+        self.assertEqual(cursor.execute.call_count, 2)
+        upgrade_sql, upgrade_params = cursor.execute.call_args_list[1][0]
+        self.assertIn('UPDATE public.customers', upgrade_sql)
+        self.assertIn("gen_salt('bf'", upgrade_sql)
+        self.assertIn('AND password = %s', upgrade_sql)
+        self.assertEqual(upgrade_params[0], 'Legacy#123')
+
+    def test_wrong_password_returns_generic_message(self):
+        connector, _ = self._patch_connection(self.BAD)
+        with connector:
+            with self.assertRaises(AuthenticationFailed) as ctx:
+                SupabaseAuthService.verify_customer_credentials('meera@example.com', 'nope')
+        self.assertEqual(str(ctx.exception.detail), 'Invalid email or password.')
+        self.assertNotIn('nope', str(ctx.exception.detail))
+
+    def test_unknown_email_returns_same_generic_message(self):
+        connector, _ = self._patch_connection(None)
+        with connector:
+            with self.assertRaises(AuthenticationFailed) as ctx:
+                SupabaseAuthService.verify_customer_credentials('ghost@example.com', 'nope')
+        self.assertEqual(str(ctx.exception.detail), 'Invalid email or password.')
+
+    def test_database_error_is_reported_safely(self):
+        connector, _ = self._patch_connection(
+            None, side_effect=DatabaseError('hidden detail with the query text')
+        )
+        with connector:
+            with self.assertRaises(AuthenticationFailed) as ctx:
+                SupabaseAuthService.verify_customer_credentials('asha@example.com', 'Secret#123')
+        detail = str(ctx.exception.detail)
+        self.assertEqual(detail, 'Unable to sign in right now. Please try again later.')
+        # Driver messages (which quote the SQL and therefore the password) must
+        # not reach the client.
+        self.assertNotIn('Secret#123', detail)
+        self.assertNotIn('hidden detail', detail)
+
+    def test_over_long_password_never_reaches_the_database(self):
+        connector, cursor = self._patch_connection(self.BCRYPT_OK)
+        with connector:
+            with self.assertRaises(AuthenticationFailed):
+                SupabaseAuthService.verify_customer_credentials(
+                    'asha@example.com', 'x' * 200
+                )
+        cursor.execute.assert_not_called()
+
+    def test_empty_password_never_reaches_the_database(self):
+        connector, cursor = self._patch_connection(self.BCRYPT_OK)
+        with connector:
+            with self.assertRaises(AuthenticationFailed):
+                SupabaseAuthService.verify_customer_credentials('asha@example.com', '')
+        cursor.execute.assert_not_called()
+
+    def test_upgrade_failure_does_not_block_a_valid_login(self):
+        connector, cursor = self._patch_connection(self.PLAIN_OK)
+        cursor.execute.side_effect = [None, DatabaseError('write failed')]
+        with connector:
+            profile = SupabaseAuthService.verify_customer_credentials(
+                'ravi@example.com', 'Legacy#123'
+            )
+        self.assertEqual(profile['customer_id'], 'U1000002')
+
+    def test_login_serializer_rejects_blank_input_generically(self):
+        # A blank password is refused with the same wording as a credential
+        # mismatch, so the response cannot confirm the email is registered.
+        serializer = LoginSerializer(data={'email': 'asha@example.com', 'password': '   '})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('non_field_errors', serializer.errors)
+        self.assertEqual(str(serializer.errors['non_field_errors'][0]),
+                         'Invalid email or password.')
+
+        # A blank email never reaches the database at all.
+        serializer = LoginSerializer(data={'email': '   ', 'password': 'Secret#123'})
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('email', serializer.errors)
+
+    def test_login_view_response_never_echoes_the_password(self):
+        factory = APIRequestFactory()
+        request = factory.post('/api/auth/login/', {
+            'email': 'ghost@example.com', 'password': 'SuperSecret#99'
+        }, format='json')
+        # No matching row: the endpoint must answer with the generic message.
+        connector, _ = self._patch_connection(None)
+        with connector:
+            response = LoginView.as_view()(request)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(str(response.data['detail']), 'Invalid email or password.')
+        self.assertNotIn('SuperSecret#99', str(response.data))
+
+    def test_login_view_fails_closed_on_unexpected_error(self):
+        factory = APIRequestFactory()
+        request = factory.post('/api/auth/login/', {
+            'email': 'asha@example.com', 'password': 'Secret#123'
+        }, format='json')
+        with patch('accounts.serializers.SupabaseAuthService.login',
+                   side_effect=RuntimeError('boom')):
+            response = LoginView.as_view()(request)
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn('boom', str(response.data))
+        self.assertNotIn('Secret#123', str(response.data))

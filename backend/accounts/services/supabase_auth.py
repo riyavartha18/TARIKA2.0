@@ -2,11 +2,31 @@ import os
 import json
 import uuid
 import jwt
+import logging
 from datetime import datetime, timedelta, timezone
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import connection, transaction, DatabaseError
 from rest_framework.exceptions import AuthenticationFailed, ValidationError, PermissionDenied
 from accounts.models import Employee, Customer, Warehouse, Role, EmployeeRole
+
+
+logger = logging.getLogger(__name__)
+
+# bcrypt cost factor used for every hash written by this service. Matches the
+# cost already used by pgcrypto crypt()/gen_salt() in the existing schema.
+BCRYPT_SALT_COST = 10
+
+# bcrypt() consumes at most 72 bytes of the password, so longer inputs cannot
+# be verified reliably and are rejected before they reach the database.
+MAX_PASSWORD_LENGTH = 72
+
+# public.customers.password is text and holds two schemes today: bcrypt hashes
+# written by this service and legacy plain text from the imported retail
+# dataset. The scheme is detected from the stored value, never from the input.
+BCRYPT_PREFIX_SQL = "left(password, 4) IN ('$2a$', '$2b$', '$2y$')"
+NOT_BCRYPT_SQL = (
+    "password IS NOT NULL AND left(password, 4) NOT IN ('$2a$', '$2b$', '$2y$')"
+)
 
 
 class SupabaseAuthService:
@@ -154,6 +174,30 @@ class SupabaseAuthService:
     def _normalize_email(email):
         return str(email or '').strip().lower()
 
+    @staticmethod
+    def _check_password_shape(password):
+        """Reject unusable input before it reaches crypt().
+
+        The message is deliberately the same generic one used for bad
+        credentials, so an over-long or empty password never hints at whether
+        the email exists.
+        """
+        if not isinstance(password, str) or not password:
+            raise AuthenticationFailed("Invalid email or password.")
+        if len(password.encode('utf-8')) > MAX_PASSWORD_LENGTH:
+            raise AuthenticationFailed("Invalid email or password.")
+
+    @staticmethod
+    def _database_failed(context, exc):
+        """Map a database failure to a safe, generic client error.
+
+        Only the exception class is logged: psycopg2 messages quote the
+        offending statement, which in these queries contains the submitted
+        password.
+        """
+        logger.error("%s: database error (%s)", context, type(exc).__name__)
+        raise AuthenticationFailed("Unable to sign in right now. Please try again later.")
+
     @classmethod
     def verify_staff_credentials(cls, email, password):
         """Authenticate a staff member against public.app_users.
@@ -163,19 +207,23 @@ class SupabaseAuthService:
         database, so the stored hash is never returned to the application or
         the browser.
         """
+        cls._check_password_shape(password)
         norm = cls._normalize_email(email)
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT user_id, email, role, is_active,
-                       (password_hash = crypt(%s, password_hash)) AS password_ok
-                FROM public.app_users
-                WHERE LOWER(email) = LOWER(%s)
-                LIMIT 1;
-                """,
-                [password, norm],
-            )
-            row = cursor.fetchone()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT user_id, email, role, is_active,
+                           (password_hash = crypt(%s, password_hash)) AS password_ok
+                    FROM public.app_users
+                    WHERE LOWER(email) = LOWER(%s)
+                    LIMIT 1;
+                    """,
+                    [password, norm],
+                )
+                row = cursor.fetchone()
+        except DatabaseError as exc:
+            cls._database_failed("staff login", exc)
 
         if not row:
             raise AuthenticationFailed("Invalid email or password.")
@@ -201,31 +249,55 @@ class SupabaseAuthService:
     def verify_customer_credentials(cls, email, password):
         """Authenticate a customer against public.customers.
 
-        Password verification is performed server-side with pgcrypto bcrypt:
-        `password = crypt(%s, password)` is evaluated inside the database, so
-        the stored hash is never returned to the application or the browser.
-        Seed rows with a NULL password can never match.
+        public.customers.password holds two kinds of values: bcrypt hashes
+        written by this service (pgcrypto crypt/gen_salt) and legacy plain
+        text carried over from the imported retail dataset. The scheme is
+        detected from the stored value and both branches are evaluated inside
+        PostgreSQL, so a stored password - hash or plain - is never fetched
+        into the application or returned to the browser.
+
+        `crypt()` is only ever called on a bcrypt value; feeding it a plain-
+        text value would make pgcrypto silently fall back to DES, which
+        truncates the secret and could never match the stored string.
+
+        A legacy plain-text row that authenticates successfully is re-hashed
+        with bcrypt immediately (see _upgrade_customer_password), so plain
+        text stops being the authentication secret after first sign-in.
         """
+        cls._check_password_shape(password)
         norm = cls._normalize_email(email)
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT customer_id, customer_name, gender, email,
-                       (password IS NOT NULL AND password = crypt(%s, password)) AS password_ok
-                FROM public.customers
-                WHERE LOWER(email) = LOWER(%s)
-                LIMIT 1;
-                """,
-                [password, norm],
-            )
-            row = cursor.fetchone()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT customer_id, customer_name, gender, email,
+                           CASE
+                             WHEN password IS NULL THEN FALSE
+                             WHEN {BCRYPT_PREFIX_SQL}
+                               THEN (password = crypt(%s, password))
+                             ELSE (password = %s)
+                           END AS password_ok,
+                           COALESCE({BCRYPT_PREFIX_SQL}, TRUE) AS is_bcrypt
+                    FROM public.customers
+                    WHERE LOWER(email) = LOWER(%s)
+                    LIMIT 1;
+                    """,
+                    [password, password, norm],
+                )
+                row = cursor.fetchone()
+        except DatabaseError as exc:
+            cls._database_failed("customer login", exc)
 
         if not row or not row[4]:
             # Same generic message for unknown email and wrong password so the
             # endpoint does not leak which emails are registered.
             raise AuthenticationFailed("Invalid email or password.")
 
-        customer_id, customer_name, gender, cust_email, _ = row
+        customer_id, customer_name, gender, cust_email, _, is_bcrypt = row
+
+        if not is_bcrypt:
+            cls._upgrade_customer_password(customer_id, password)
+
         return {
             'customer_id': str(customer_id),
             'customer_name': customer_name,
@@ -234,13 +306,49 @@ class SupabaseAuthService:
         }
 
     @classmethod
+    def _upgrade_customer_password(cls, customer_id, password):
+        """Replace a verified legacy plain-text password with a bcrypt hash.
+
+        The hash is built by pgcrypto from the password that was just
+        verified, so the plain text is never read out of the database. The
+        extra `AND password = %s` predicate makes the write compare-and-set:
+        if the row changed concurrently, nothing is overwritten.
+
+        A failure here is not fatal - the credentials already matched - and
+        the row simply stays eligible for the batched
+        `migrate_customer_passwords` command.
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.customers
+                    SET password = crypt(%s, gen_salt('bf', %s))
+                    WHERE customer_id = %s
+                      AND password IS NOT NULL
+                      AND left(password, 4) NOT IN ('$2a$', '$2b$', '$2y$')
+                      AND password = %s;
+                    """,
+                    [password, BCRYPT_SALT_COST, customer_id, password],
+                )
+        except DatabaseError as exc:
+            # Log the exception class only; never the message or the SQL.
+            logger.error(
+                "customer password upgrade failed for a customer_id (database error: %s)",
+                type(exc).__name__,
+            )
+
+    @classmethod
     def login(cls, email_or_username, password):
         norm = cls._normalize_email(email_or_username)
 
         # ---- Staff path: public.app_users (bcrypt verified server-side) ----
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM public.app_users WHERE LOWER(email) = LOWER(%s) LIMIT 1;", [norm])
-            is_staff = cursor.fetchone() is not None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM public.app_users WHERE LOWER(email) = LOWER(%s) LIMIT 1;", [norm])
+                is_staff = cursor.fetchone() is not None
+        except DatabaseError as exc:
+            cls._database_failed("login", exc)
 
         if is_staff:
             staff = cls.verify_staff_credentials(norm, password)

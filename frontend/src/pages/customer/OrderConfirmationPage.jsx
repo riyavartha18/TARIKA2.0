@@ -322,7 +322,8 @@ export default function OrderConfirmationPage() {
                   Delivery Address
                 </span>
                 <p style={{ margin: '4px 0 0 0', fontSize: '0.9rem', color: '#1F191B', lineHeight: 1.5, fontWeight: 500 }}>
-                  {order.shipping_address}
+                  {/* public.orders has no address column, so nothing is stored */}
+                  {order.shipping_address || 'Address provided at checkout'}
                 </p>
                 {order.customer_name && (
                   <span style={{ fontSize: '0.8rem', color: '#6B5E63' }}>

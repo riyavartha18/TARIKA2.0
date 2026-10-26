@@ -1104,4 +1104,121 @@
 }
 
 
+/* ==========================================================================
+   WISHLIST / BAG
+   Reuses the product-card look from above; these rules only cover the
+   actions and the responsive layout of the two pages.
+   ========================================================================== */
+
+/* Floating remove button on a saved wishlist card */
+.wishlist-remove-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(216, 114, 126, 0.3);
+  color: #E04D60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  transition: all 0.2s ease;
+}
+
+.wishlist-remove-btn:hover {
+  background: #E04D60;
+  border-color: #E04D60;
+  color: #FFFFFF;
+  transform: scale(1.06);
+}
+
+/* Load-failure banner (wishlist, bag, orders) */
+.tarika-portal-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.9rem 1.15rem;
+  margin-bottom: 1.5rem;
+  background: #FDF2F2;
+  border: 1px solid rgba(220, 38, 38, 0.22);
+  border-left: 4px solid #DC2626;
+  border-radius: 14px;
+  color: #7F1D1D;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.tarika-portal-alert-action {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 0.4rem 0.95rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  background: #FFFFFF;
+  color: #B8505E;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tarika-portal-alert-action:hover:disabled {
+  opacity: 0.6;
+}
+
+/* Bag: one line per product */
+.bag-line {
+  display: flex;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  background-color: #FFFFFF;
+  border-radius: 18px;
+  border: 1px solid rgba(240, 226, 224, 0.9);
+  box-shadow: 0 4px 16px rgba(184, 80, 94, 0.04);
+  align-items: center;
+  position: relative;
+}
+
+.bag-line-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+/* Tablet: bag summary sits under the list, lines stay horizontal */
+@media (max-width: 900px) {
+  .bag-page-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* Mobile: stack the bag line so the controls stay reachable */
+@media (max-width: 640px) {
+  .bag-line {
+    flex-wrap: wrap;
+    padding: 1rem;
+    gap: 0.9rem;
+  }
+
+  .bag-line-thumb {
+    width: 72px !important;
+    height: 92px !important;
+  }
+
+  .bag-line-actions {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+
+
 

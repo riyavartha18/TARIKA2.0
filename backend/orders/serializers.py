@@ -1,15 +1,107 @@
+"""Serializers for customer order payloads built from `public.orders` rows.
+
+The response keeps the keys the customer pages already render (order_id,
+order_date, order_status, total_amount, items[], delivery) but only fills them
+from columns that exist. Fields the schema does not carry - shipping address,
+payment status, warehouse, return records - are returned as null so the UI shows
+its own neutral label instead of invented data.
+"""
+
 from rest_framework import serializers
-from .models import Order, Payment
-from catalog.models import OrderItem, Review
-from catalog.serializers import CATEGORY_IMAGE_MAPPING
-from warehouse.models import Delivery, Return
+
+from cart.serializers import build_product_payload
+from .models import Order
+
+
+def _iso_date(day_month_year):
+    """'DD-MM-YYYY' (the stored text) -> 'YYYY-MM-DD', or None if unparsable."""
+    raw = str(day_month_year or '').strip()
+    parts = raw.split('-')
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    day, month, year = parts
+    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def build_order_item(order):
+    """The single line of an order row, with product details joined in."""
+    payload = build_product_payload(order.product)
+    quantity = int(order.quantity or 1)
+    # final_price is what the customer paid for this order (see services docstring).
+    total = float(order.final_price or 0)
+    unit_price = round(total / quantity, 2) if quantity else total
+    rating = order.rating
+
+    return {
+        'order_item_id': order.order_id,
+        'order_id': order.order_id,
+        'product_id': payload['product_id'] or order.product_id,
+        'product_name': payload['product_name'] or 'Fashion Apparel',
+        'sku': payload['product_id'] or '',
+        'image': payload['image'],
+        'category_name': payload['category_name'],
+        'sub_category': payload['sub_category'],
+        'quantity': quantity,
+        'unit_price': unit_price,
+        'discount': float(order.additional_discount or 0),
+        'subtotal': round(total, 2),
+        # No returns table exists in this database.
+        'return_info': None,
+        # `orders.rating` is the only review column the schema has.
+        'customer_review': (
+            {
+                'rating': rating,
+                'review_text': None,
+                'review_date': None,
+                'is_verified_purchase': True,
+            }
+            if rating is not None else None
+        ),
+    }
+
+
+class OrderDetailSerializer(serializers.Serializer):
+    """One order, as returned to the My Orders and confirmation pages."""
+
+    def to_representation(self, instance):
+        order = instance
+        item = build_order_item(order)
+        customer = getattr(order, 'customer', None)
+        iso_date = _iso_date(order.purchase_date)
+
+        return {
+            'order_id': order.order_id,
+            # ISO for logic, the stored text for display.
+            'order_date': iso_date,
+            'order_date_display': order.purchase_date,
+            'order_status': order.order_status,
+            'delivery_status': order.delivery_status,
+            # Not columns in this schema.
+            'payment_status': None,
+            'shipping_address': None,
+            'warehouse_name': None,
+            'payment_method': order.payment_method,
+            'transaction_reference': None,
+            'total_amount': item['subtotal'],
+            'discount_amount': item['discount'],
+            'initial_price': float(order.initial_price or 0),
+            'customer_name': getattr(customer, 'full_name', None) or '',
+            'customer_email': getattr(customer, 'email', None) or '',
+            'items': [item],
+            'delivery': {
+                'delivery_status': order.delivery_status,
+                'shipping_time_days': order.shipping_time_days,
+            },
+        }
 
 
 class CheckoutRequestSerializer(serializers.Serializer):
     """
-    Validates customer checkout payload submitted from the frontend.
-    Currently, ONLY Cash on Delivery (COD) is permitted.
-    Online Payment / UPI is disabled and will be rejected with an informative notice.
+    Validates the checkout payload submitted from the frontend.
+
+    Only Cash on Delivery is accepted (the schema has no payment records), and
+    the address is validated for the confirmation message - `public.orders` has
+    no address column, so nothing is persisted from it.
     """
     shipping_address = serializers.CharField(
         required=True,
@@ -20,10 +112,7 @@ class CheckoutRequestSerializer(serializers.Serializer):
     city = serializers.CharField(required=False, allow_blank=True, max_length=100, default='')
     state = serializers.CharField(required=False, allow_blank=True, max_length=100, default='')
     postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20, default='')
-    payment_method = serializers.CharField(
-        required=False,
-        default='COD'
-    )
+    payment_method = serializers.CharField(required=False, default='COD')
 
     def validate_shipping_address(self, value):
         cleaned = value.strip()
@@ -32,13 +121,9 @@ class CheckoutRequestSerializer(serializers.Serializer):
         return cleaned
 
     def validate_payment_method(self, value):
-        val = str(value).strip().upper()
-        if val in ['COD', 'CASH ON DELIVERY']:
+        val = str(value or '').strip().upper()
+        if val in ('COD', 'CASH ON DELIVERY'):
             return 'COD'
-        if val in ['ONLINE', 'ONLINE PAYMENT', 'UPI', 'CREDIT CARD', 'DEBIT CARD', 'NET BANKING']:
-            raise serializers.ValidationError(
-                "Online payment is launching soon. Please choose Cash on Delivery to place your order."
-            )
         raise serializers.ValidationError(
             "Online payment is launching soon. Please choose Cash on Delivery to place your order."
         )
@@ -59,159 +144,3 @@ class OrderReturnRequestSerializer(serializers.Serializer):
         allow_blank=True,
         default='Unused, original packaging'
     )
-
-
-class OrderItemDetailSerializer(serializers.ModelSerializer):
-    """
-    Serializes an order item for order detail, my orders, and confirmation views.
-    Includes real catalog product images, customer's submitted review, and return/refund tracking data if applicable.
-    """
-    product_name = serializers.SerializerMethodField()
-    sku = serializers.SerializerMethodField()
-    image = serializers.SerializerMethodField()
-    return_info = serializers.SerializerMethodField()
-    customer_review = serializers.SerializerMethodField()
-
-    class Meta:
-        model = OrderItem
-        fields = [
-            'order_item_id',
-            'order_id',
-            'product_id',
-            'product_name',
-            'sku',
-            'image',
-            'quantity',
-            'unit_price',
-            'discount',
-            'subtotal',
-            'return_info',
-            'customer_review',
-        ]
-
-    def get_product_name(self, obj):
-        return obj.product.product_name if obj.product else 'Fashion Apparel'
-
-    def get_sku(self, obj):
-        return obj.product.sku if obj.product else ''
-
-    def get_image(self, obj):
-        if obj.product:
-            if hasattr(obj.product, 'category') and obj.product.category:
-                cat_name = (obj.product.category.category_name or '').strip().lower()
-                if cat_name in CATEGORY_IMAGE_MAPPING:
-                    return CATEGORY_IMAGE_MAPPING[cat_name]
-            if getattr(obj.product, 'primary_image', None):
-                return obj.product.primary_image
-        return 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80'
-
-    def get_return_info(self, obj):
-        ret = Return.objects.filter(order_item_id=obj.order_item_id).first()
-        if not ret:
-            return None
-        return {
-            'return_id': ret.return_id,
-            'return_status': ret.return_status,
-            'return_reason': ret.return_reason,
-            'return_date': ret.return_date,
-            'refund_amount': ret.refund_amount,
-            'condition_on_return': ret.condition_on_return,
-            'assigned_employee_id': ret.assigned_employee_id,
-            'delivery_partner': ret.delivery_partner,
-            'pickup_date': ret.pickup_date,
-        }
-
-    def get_customer_review(self, obj):
-        try:
-            customer_id = self.context.get('customer_id')
-            if not customer_id and obj.order_id:
-                order = Order.objects.filter(order_id=obj.order_id).first()
-                if order and order.customer:
-                    customer_id = order.customer.customer_id
-            if not customer_id:
-                return None
-            review = Review.objects.filter(product_id=obj.product_id, customer_id=customer_id).first()
-            if not review:
-                return None
-            return {
-                'review_id': review.review_id,
-                'rating': review.rating,
-                'review_text': review.review_text,
-                'review_date': review.review_date,
-                'is_verified_purchase': review.is_verified_purchase,
-            }
-        except Exception:
-            return None
-
-
-class OrderDetailSerializer(serializers.ModelSerializer):
-    """
-    Serializes complete order details including line items, payment info,
-    and genuine delivery/tracking data.
-    """
-    items = serializers.SerializerMethodField()
-    payment_method = serializers.SerializerMethodField()
-    transaction_reference = serializers.SerializerMethodField()
-    customer_name = serializers.SerializerMethodField()
-    customer_email = serializers.SerializerMethodField()
-    warehouse_name = serializers.SerializerMethodField()
-    delivery = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Order
-        fields = [
-            'order_id',
-            'order_date',
-            'order_status',
-            'payment_status',
-            'total_amount',
-            'discount_amount',
-            'shipping_address',
-            'created_at',
-            'updated_at',
-            'customer_name',
-            'customer_email',
-            'warehouse_name',
-            'payment_method',
-            'transaction_reference',
-            'items',
-            'delivery',
-        ]
-
-    def get_items(self, obj):
-        items = OrderItem.objects.filter(order_id=obj.order_id).select_related('product', 'product__category')
-        cust_id = obj.customer.customer_id if obj.customer else None
-        return OrderItemDetailSerializer(items, many=True, context={'customer_id': cust_id, 'order_id': obj.order_id}).data
-
-    def get_payment_method(self, obj):
-        payment = obj.payments.first()
-        return payment.payment_method if payment else 'COD'
-
-    def get_transaction_reference(self, obj):
-        payment = obj.payments.first()
-        return payment.transaction_reference if payment else ''
-
-    def get_customer_name(self, obj):
-        return obj.customer.full_name if obj.customer else ''
-
-    def get_customer_email(self, obj):
-        return obj.customer.email if obj.customer else ''
-
-    def get_warehouse_name(self, obj):
-        return obj.warehouse.warehouse_name if obj.warehouse else ''
-
-    def get_delivery(self, obj):
-        delivery = Delivery.objects.filter(order_id=obj.order_id).exclude(delivery_type__iexact='RETURN').first()
-        if not delivery:
-            return None
-        return {
-            'delivery_id': delivery.delivery_id,
-            'delivery_type': delivery.delivery_type or 'FORWARD',
-            'delivery_status': delivery.delivery_status,
-            'delivery_partner': delivery.delivery_partner,
-            'dispatch_date': delivery.dispatch_date,
-            'expected_delivery_date': delivery.expected_delivery_date,
-            'actual_delivery_date': delivery.actual_delivery_date,
-            'failure_reason': delivery.failure_reason,
-        }
-

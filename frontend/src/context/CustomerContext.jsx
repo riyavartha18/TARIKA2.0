@@ -21,6 +21,7 @@ export function CustomerProvider({ children }) {
   // Wishlist state
   const [wishlistItems, setWishlistItems] = useState([]);
   const [wishlistLoading, setWishlistLoading] = useState(false);
+  const [wishlistError, setWishlistError] = useState('');
 
   // Bag / Cart state
   const [bagItems, setBagItems] = useState([]);
@@ -28,6 +29,7 @@ export function CustomerProvider({ children }) {
   const [subtotal, setSubtotal] = useState(0);
   const [total, setTotal] = useState(0);
   const [bagLoading, setBagLoading] = useState(false);
+  const [bagError, setBagError] = useState('');
 
   // Micro-animation triggers for navbar badges
   const [wishlistBounced, setWishlistBounced] = useState(false);
@@ -73,11 +75,15 @@ export function CustomerProvider({ children }) {
       setTotalItems(0);
       setSubtotal(0);
       setTotal(0);
+      setWishlistError('');
+      setBagError('');
       return;
     }
 
     setWishlistLoading(true);
     setBagLoading(true);
+    setWishlistError('');
+    setBagError('');
 
     try {
       const [wishlistRes, bagRes] = await Promise.all([
@@ -87,15 +93,22 @@ export function CustomerProvider({ children }) {
 
       if (wishlistRes.success) {
         setWishlistItems(wishlistRes.items);
+      } else {
+        // Keep the page usable: show the failure instead of an empty wishlist.
+        setWishlistError(wishlistRes.error || 'Could not load your wishlist.');
       }
       if (bagRes.success) {
         setBagItems(bagRes.items);
         setTotalItems(bagRes.totalItems);
         setSubtotal(bagRes.subtotal);
         setTotal(bagRes.total);
+      } else {
+        setBagError(bagRes.error || 'Could not load your shopping bag.');
       }
     } catch (err) {
       console.error('Failed to load customer cart/wishlist', err);
+      setWishlistError('Could not load your wishlist. Please check your connection.');
+      setBagError('Could not load your shopping bag. Please check your connection.');
     } finally {
       setWishlistLoading(false);
       setBagLoading(false);
@@ -304,6 +317,7 @@ export function CustomerProvider({ children }) {
   const value = {
     wishlistItems,
     wishlistLoading,
+    wishlistError,
     wishlistIds,
     isWishlisted,
     toggleWishlist,
@@ -314,6 +328,7 @@ export function CustomerProvider({ children }) {
     subtotal,
     total,
     bagLoading,
+    bagError,
     addToBag,
     updateBagQuantity,
     removeFromBag,

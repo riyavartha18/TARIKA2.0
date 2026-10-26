@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import APIException
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
 from accounts.serializers import (
@@ -10,6 +11,11 @@ from accounts.serializers import (
     AdminStaffCreateSerializer
 )
 from accounts.models import Employee, Customer, Role
+
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerRegisterView(APIView):
@@ -35,19 +41,39 @@ class LoginView(APIView):
     """
     Universal login endpoint for all roles:
     CUSTOMER, ADMIN, WAREHOUSE_MANAGER, DELIVERY_PARTNER.
-    Validates credentials against auth.users and queries trusted profile/role.
+    Credentials are checked against public.app_users (staff) and
+    public.customers (customers) inside PostgreSQL; the response only ever
+    carries the profile and the issued tokens.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        if serializer.is_valid():
+        # AuthenticationFailed (bad credentials) is raised from inside the
+        # serializer's validate() and stays an APIException, so DRF renders it
+        # as {"detail": "Invalid email or password."}. Anything else must not
+        # reach the traceback: with DEBUG on, Django's 500 page echoes the
+        # submitted password, so fail closed with a generic message and log
+        # only the exception class.
+        try:
+            serializer = LoginSerializer(data=request.data)
+            valid = serializer.is_valid(raise_exception=False)
+        except APIException:
+            raise
+        except Exception as exc:
+            logger.error("login failed unexpectedly (%s)", type(exc).__name__)
+            return Response(
+                {"detail": "Unable to sign in right now. Please try again later."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        if valid:
             auth_result = serializer.validated_data['auth_result']
             return Response({
                 "message": "Login successful.",
                 "user": auth_result['user'],
                 "tokens": auth_result['tokens']
             }, status=status.HTTP_200_OK)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -84,17 +110,16 @@ class MeView(APIView):
             customer = user.profile
             if not customer:
                 try:
-                    customer = Customer.objects.filter(auth_user_id=user.auth_user_id).first()
+                    customer = Customer.objects.filter(customer_id=user.auth_user_id).first()
                 except Exception:
                     customer = None
             if customer:
+                # Only columns that exist in public.customers are exposed.
                 profile_data.update({
                     "customer_id": getattr(customer, 'customer_id', None),
                     "full_name": getattr(customer, 'full_name', None),
-                    "phone": getattr(customer, 'phone', None),
-                    "city": getattr(customer, 'city', None),
-                    "state": getattr(customer, 'state', None),
-                    "country": getattr(customer, 'country', None),
+                    "customer_name": getattr(customer, 'customer_name', None),
+                    "gender": getattr(customer, 'gender', None),
                 })
         else:
             employee = user.profile

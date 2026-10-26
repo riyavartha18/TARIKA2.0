@@ -1,11 +1,17 @@
 from rest_framework import serializers
 from accounts.models import Employee, Customer, Warehouse, Role, EmployeeRole
-from accounts.services.supabase_auth import SupabaseAuthService
+from accounts.services.supabase_auth import SupabaseAuthService, MAX_PASSWORD_LENGTH
 
 
 class CustomerRegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
-    password = serializers.CharField(write_only=True, required=True, min_length=6)
+    # bcrypt uses at most 72 bytes of the password; longer values cannot be
+    # verified reliably, so they are refused at signup instead of silently
+    # truncated in the stored hash.
+    password = serializers.CharField(
+        write_only=True, required=True, min_length=6,
+        max_length=MAX_PASSWORD_LENGTH, trim_whitespace=False
+    )
     full_name = serializers.CharField(required=True, max_length=255)
     gender = serializers.CharField(required=False, allow_blank=True, max_length=50)
 
@@ -25,11 +31,17 @@ class CustomerRegisterSerializer(serializers.Serializer):
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.CharField(required=True, help_text="Username or Email address")
-    password = serializers.CharField(write_only=True, required=True)
+    # Trimmed, never stripped of case: the password is compared exactly as
+    # submitted. write_only keeps it out of every response payload.
+    password = serializers.CharField(write_only=True, required=True, trim_whitespace=False)
 
     def validate(self, attrs):
-        email_or_username = attrs.get('email')
+        email_or_username = str(attrs.get('email') or '').strip()
         password = attrs.get('password')
+        if not email_or_username or not str(password or '').strip():
+            # Same generic wording as a credential mismatch, so a malformed
+            # request cannot reveal whether an email is registered.
+            raise serializers.ValidationError("Invalid email or password.")
         auth_result = SupabaseAuthService.login(email_or_username, password)
         attrs['auth_result'] = auth_result
         return attrs

@@ -149,6 +149,26 @@ export default function MyOrdersPage() {
     }
   };
 
+  // public.orders keeps purchase_date as 'DD-MM-YYYY' text and the API also
+  // returns an ISO 'YYYY-MM-DD'. Either form is shown as '27 Mar 2026'.
+  const formatOrderDate = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(raw);
+    const dmy = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(raw);
+    if (!iso && !dmy) return raw;
+    const [year, month, day] = iso
+      ? [Number(iso[1]), Number(iso[2]), Number(iso[3])]
+      : [Number(dmy[3]), Number(dmy[2]), Number(dmy[1])];
+    const parsed = new Date(year, month - 1, day);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+  };
+
   // Status mapping and styling helpers
   const getStatusConfig = (status, delivery) => {
     const s = (status || '').toLowerCase();
@@ -827,7 +847,9 @@ export default function MyOrdersPage() {
                       >
                         <CheckCircle2 size={14} color="#059669" />
                         <span>
-                          Delivered {item.delivery?.actual_delivery_date ? `on ${item.delivery.actual_delivery_date}` : (item.order.order_date ? `on ${item.order.order_date}` : '')}
+                          Delivered {item.order.order_date || item.delivery?.actual_delivery_date
+                            ? `on ${formatOrderDate(item.delivery?.actual_delivery_date || item.order.order_date)}`
+                            : ''}
                         </span>
                       </span>
                     )}
@@ -850,7 +872,7 @@ export default function MyOrdersPage() {
 
                     {!isDelivered && !item.delivery?.expected_delivery_date && (
                       <span style={{ fontSize: '0.78rem', color: '#6B5E63' }}>
-                        Order placed on {item.order.order_date || 'Recently'}
+                        Order placed on {formatOrderDate(item.order.order_date) || 'Recently'}
                       </span>
                     )}
 
@@ -1229,7 +1251,7 @@ export default function MyOrdersPage() {
                   Order Date
                 </span>
                 <span style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#1F191B', marginTop: '3px' }}>
-                  {detailsModalOrder.order_date || 'Recent'}
+                  {formatOrderDate(detailsModalOrder.order_date) || 'Recent'}
                 </span>
               </div>
 
@@ -1603,7 +1625,7 @@ export default function MyOrdersPage() {
               const stages = [
                 {
                   title: 'Order Placed',
-                  desc: trackingModalOrder.order_date ? `Received on ${trackingModalOrder.order_date}` : 'Order initiated',
+                  desc: trackingModalOrder.order_date ? `Received on ${formatOrderDate(trackingModalOrder.order_date)}` : 'Order initiated',
                 },
                 {
                   title: 'Confirmed by Atelier',

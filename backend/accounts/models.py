@@ -35,28 +35,33 @@ class Warehouse(models.Model):
 
 
 class Customer(models.Model):
+    """Maps the real `public.customers` table.
+
+    Only the four non-secret columns are mapped on purpose: Django builds an
+    explicit column list, so `customers.password` is never selected,
+    serialized or logged by anything that goes through this model. Password
+    verification stays in accounts/services/supabase_auth.py where pgcrypto
+    compares it inside PostgreSQL.
+
+    `full_name` is kept as an alias because the API responses and the frontend
+    already use that key.
+    """
     customer_id = models.CharField(max_length=255, primary_key=True)
-    auth_user_id = models.UUIDField(unique=True, blank=True, null=True)
-    full_name = models.CharField(max_length=255, blank=True, null=True)
-    email = models.CharField(max_length=255, blank=True, null=True)
-    phone = models.BigIntegerField(blank=True, null=True)
+    customer_name = models.CharField(max_length=255, blank=True, null=True)
     gender = models.CharField(max_length=50, blank=True, null=True)
-    date_of_birth = models.CharField(max_length=50, blank=True, null=True)
-    city = models.CharField(max_length=100, blank=True, null=True)
-    state = models.CharField(max_length=100, blank=True, null=True)
-    country = models.CharField(max_length=100, blank=True, null=True)
-    postal_code = models.BigIntegerField(blank=True, null=True)
-    registration_date = models.CharField(max_length=100, blank=True, null=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.CharField(max_length=100, blank=True, null=True)
-    updated_at = models.CharField(max_length=100, blank=True, null=True)
+    email = models.CharField(max_length=255, blank=True, null=True)
 
     class Meta:
-        db_table = 'customer'
+        db_table = 'customers'
         managed = False
+        ordering = ['customer_id']
+
+    @property
+    def full_name(self):
+        return self.customer_name
 
     def __str__(self):
-        return f"{self.full_name or 'Customer'} ({self.email})"
+        return f"{self.customer_name or 'Customer'} ({self.email})"
 
 
 class Employee(models.Model):

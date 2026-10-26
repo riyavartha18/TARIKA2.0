@@ -1,206 +1,356 @@
-import uuid
-from datetime import datetime, timezone
-from rest_framework.exceptions import ValidationError, NotFound
-from django.db.models import Sum
-from catalog.pricing import get_dim_product_selling_price_map
-from catalog.models import Product, Inventory
+import logging
+
+from django.db import connection, transaction, DatabaseError, IntegrityError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError, NotFound
+
 from accounts.models import Customer
+from accounts.models import Role
+from catalog.models import Product
 from .models import WishlistItem, CartItem
 from .serializers import CartItemSerializer
 
 
+logger = logging.getLogger(__name__)
+
+# Upper bound for a single cart line. The catalogue's own rows never exceed a
+# handful of units, and stock is additionally checked against the product row.
+MAX_QUANTITY_PER_LINE = 99
+
+# wishkey / cartkey are plain text primary keys with no sequence or default.
+# The dataset allocates them as PREFIX + zero-padded running number.
+KEY_ALLOCATORS = {
+    'wishlist': {'key': 'wishkey', 'prefix': 'WISH', 'width': 7},
+    'cart': {'key': 'cartkey', 'prefix': 'CART', 'width': 7},
+    'orders': {'key': 'orderid', 'prefix': 'ORD', 'width': 7},
+}
+
+
+class ServiceUnavailable(APIException):
+    """Raised for database failures; carries no driver detail."""
+    status_code = 503
+    default_detail = 'Service temporarily unavailable. Please try again later.'
+    default_code = 'service_unavailable'
+
+
+def safe_database_failure(context, exc):
+    """Log only the exception class and raise a client-safe error.
+
+    Driver messages quote the failing statement, so they are never returned or
+    logged.
+    """
+    logger.error("%s: database error (%s)", context, type(exc).__name__)
+    raise ServiceUnavailable()
+
+
+def allocate_key(table):
+    """Return the next sequential key for `table`, e.g. 'WISH00306214'.
+
+    Must run inside transaction.atomic(): the transaction-scoped advisory lock
+    serialises allocation for concurrent requests, which the table needs
+    because the column has no sequence backing it.
+    """
+    spec = KEY_ALLOCATORS[table]
+    key_column, prefix, width = spec['key'], spec['prefix'], spec['width']
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", [f'{table}_key'])
+        cursor.execute(
+            f"""
+            SELECT coalesce(max(substring({key_column} from {len(prefix) + 1})::bigint), 0) + 1
+            FROM public.{table}
+            WHERE {key_column} LIKE %s
+              AND substring({key_column} from {len(prefix) + 1}) ~ '^[0-9]+$';
+            """,
+            [f'{prefix}%'],
+        )
+        next_number = cursor.fetchone()[0]
+
+    return f"{prefix}{int(next_number):0{width}d}"
+
+
 class CustomerResolver:
+    """Resolves the Customer row that owns the current request."""
+
     @staticmethod
     def get_customer_for_user(user):
+        """Return the authenticated customer's own `public.customers` row.
+
+        The identity comes only from the verified JWT subject (its profile),
+        never from request data, and no customer is created on the fly: a token
+        whose subject no longer maps to a row is refused. Every wishlist, cart
+        and order query is then scoped to this row, so one customer cannot read
+        or write another customer's data.
         """
-        Extracts or retrieves the Customer profile instance for an authenticated user.
-        """
-        if hasattr(user, 'profile') and isinstance(user.profile, Customer):
-            return user.profile
+        if getattr(user, 'role', None) != Role.CUSTOMER:
+            raise PermissionDenied("Customer access required.")
 
-        auth_user_id = getattr(user, 'auth_user_id', None) or getattr(user, 'id', None)
-        if auth_user_id:
-            customer = Customer.objects.filter(auth_user_id=auth_user_id).first()
-            if customer:
-                return customer
+        profile = getattr(user, 'profile', None)
+        if isinstance(profile, Customer) and profile.customer_id:
+            return profile
 
-        email = getattr(user, 'email', None)
-        if email:
-            customer = Customer.objects.filter(email__iexact=email).first()
-            if customer:
-                if auth_user_id and not customer.auth_user_id:
-                    customer.auth_user_id = auth_user_id
-                    customer.save(update_fields=['auth_user_id'])
-                return customer
+        customer_id = getattr(user, 'auth_user_id', None) or getattr(user, 'id', None)
+        if not customer_id:
+            raise PermissionDenied("No customer identity is bound to this session.")
 
-        if auth_user_id or email:
-            now = datetime.now(timezone.utc)
-            cust_email = email or f"customer_{auth_user_id[:8]}@iras.com"
-            customer = Customer.objects.create(
-                customer_id=str(uuid.uuid4()),
-                auth_user_id=auth_user_id,
-                email=cust_email,
-                full_name=cust_email.split('@')[0].capitalize(),
-                registration_date=now.strftime('%Y-%m-%d'),
-                is_active=True,
-                created_at=now.isoformat(),
-                updated_at=now.isoformat()
-            )
-            return customer
+        try:
+            customer = Customer.objects.filter(customer_id=customer_id).first()
+        except DatabaseError as exc:
+            safe_database_failure("customer lookup", exc)
 
-        raise ValidationError("Authenticated user does not have a linked Customer profile.")
+        if not customer:
+            # The account no longer exists (or the subject is not a customer).
+            raise PermissionDenied("Your customer account could not be found.")
+
+        return customer
+
+
+def _get_active_product(product_id):
+    """Load a product by its real key, or raise 404.
+
+    `public.products` has no active flag, so a row's existence is the only
+    availability signal the schema provides; stock is checked separately.
+    """
+    cleaned = str(product_id or '').strip()
+    if not cleaned:
+        raise ValidationError({"product_id": "A product id is required."})
+    product = Product.objects.filter(product_id=cleaned).first()
+    if not product:
+        raise NotFound("Product not found.")
+    return product
 
 
 class WishlistService:
+    """Reads and writes rows in the existing `public.wishlist` table."""
+
     @classmethod
     def get_customer_wishlist(cls, customer):
         return (
-            WishlistItem.objects.filter(customer=customer)
-            .select_related('product__category')
-            .prefetch_related('product__inventory_items')
-            .order_by('-created_at')
+            WishlistItem.objects
+            .filter(customer=customer)
+            .select_related('product')
+            .order_by('-wishkey')
         )
 
     @classmethod
     def add_to_wishlist(cls, customer, product_id):
-        try:
-            product = Product.objects.get(product_id=product_id, is_active=True)
-        except Product.DoesNotExist:
-            raise NotFound("Product not found or is currently inactive.")
+        """Save the product for this customer, or report it already saved.
 
-        item, created = WishlistItem.objects.get_or_create(
-            customer=customer,
-            product=product
-        )
-        return item, created
+        The unique index on (customer_id, product_id) makes the second insert
+        of the same pair impossible: an IntegrityError from a concurrent
+        request falls back to the existing row instead of duplicating it.
+        """
+        product = _get_active_product(product_id)
+
+        existing = WishlistItem.objects.filter(customer=customer, product=product).first()
+        if existing:
+            return existing, False
+
+        try:
+            with transaction.atomic():
+                wishkey = allocate_key('wishlist')
+                item = WishlistItem.objects.create(
+                    wishkey=wishkey, customer=customer, product=product
+                )
+        except IntegrityError:
+            raced = WishlistItem.objects.filter(customer=customer, product=product).first()
+            if raced:
+                return raced, False
+            raise
+        except DatabaseError as exc:
+            safe_database_failure("wishlist add", exc)
+
+        return item, True
 
     @classmethod
     def remove_from_wishlist(cls, customer, product_id):
-        deleted_count, _ = WishlistItem.objects.filter(
-            customer=customer,
-            product_id=product_id
-        ).delete()
+        """Delete only this customer's row for the given product."""
+        try:
+            deleted_count, _ = (
+                WishlistItem.objects
+                .filter(customer=customer, product_id=str(product_id or '').strip())
+                .delete()
+            )
+        except DatabaseError as exc:
+            safe_database_failure("wishlist remove", exc)
         return deleted_count > 0
 
 
 class CartService:
+    """Reads and writes rows in the existing `public.cart` table."""
+
     @staticmethod
     def get_available_stock(product):
+        """Stock carried on the product row (`available_quantity`).
+
+        There is no separate inventory table in this database. A missing value
+        is treated as unknown stock rather than zero, so products without
+        recorded quantities are not blocked at the cart level.
         """
-        Returns real-time sum of stock across all fulfillment center warehouses.
-        """
+        quantity = getattr(product, 'available_quantity', None)
+        if quantity is None:
+            return None
         try:
-            total = sum(i.stock_quantity or 0 for i in product.inventory_items.all())
-            return total
-        except Exception:
-            return 0
+            return int(quantity)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _guard_quantity(cls, product, quantity, current_in_cart=0):
+        available = cls.get_available_stock(product)
+        if available is not None and quantity > available:
+            raise ValidationError(
+                f"Only {available} unit(s) of '{product.product_name}' are in stock "
+                f"(you have {current_in_cart} in your bag)."
+            )
+        if quantity > MAX_QUANTITY_PER_LINE:
+            raise ValidationError(
+                f"A single line can hold at most {MAX_QUANTITY_PER_LINE} item(s)."
+            )
 
     @classmethod
     def get_customer_cart_items(cls, customer):
         return (
-            CartItem.objects.filter(customer=customer)
-            .select_related('product__category')
-            .prefetch_related('product__inventory_items')
-            .order_by('-created_at')
+            CartItem.objects
+            .filter(customer=customer)
+            .select_related('product')
+            .order_by('-cartkey')
         )
 
     @classmethod
     def get_cart_summary(cls, customer):
-        items = cls.get_customer_cart_items(customer)
-        price_map = get_dim_product_selling_price_map(
-            item.product.product_id for item in items if item.product
-        )
-        for item in items:
-            if item.product:
-                item.product._dim_product_selling_price = price_map.get(
-                    str(item.product.product_id)
-                ) or 0
+        """Build the cart payload from the database rows themselves."""
+        items = list(cls.get_customer_cart_items(customer))
         item_data = CartItemSerializer(items, many=True).data
 
         total_items = sum(item.quantity or 0 for item in items)
         subtotal = sum(
-            (item.quantity or 0) * (price_map.get(str(item.product.product_id)) or 0)
-            for item in items if item.product
+            float(line['unit_price'] or 0) * int(line['quantity'] or 0)
+            for line in item_data
         )
 
         return {
             'items': item_data,
             'total_items': total_items,
-            'subtotal': subtotal,
-            'total': subtotal,
+            'subtotal': round(subtotal, 2),
+            'total': round(subtotal, 2),
         }
 
     @classmethod
     def add_to_cart(cls, customer, product_id, quantity=1):
+        """Add one line, or raise the quantity of the existing line.
+
+        Existing behaviour is kept: the same product is never stored twice for
+        one customer. The row is locked for the duration of the transaction so
+        concurrent adds to the same line accumulate instead of overwriting each
+        other.
+        """
+        product = _get_active_product(product_id)
         try:
-            product = (
-                Product.objects.prefetch_related('inventory_items')
-                .get(product_id=product_id, is_active=True)
-            )
-        except Product.DoesNotExist:
-            raise NotFound("Product not found or is currently inactive.")
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            raise ValidationError({"quantity": "Quantity must be a whole number."})
+        if quantity < 1:
+            raise ValidationError({"quantity": "Quantity must be at least 1."})
 
-        available_stock = cls.get_available_stock(product)
-        if available_stock <= 0:
-            raise ValidationError(
-                f"'{product.product_name}' is currently out of stock."
-            )
+        available = cls.get_available_stock(product)
+        if available is not None and available <= 0:
+            raise ValidationError(f"'{product.product_name}' is currently out of stock.")
 
-        existing_item = CartItem.objects.filter(
-            customer=customer,
-            product=product
-        ).first()
+        try:
+            with transaction.atomic():
+                existing = (
+                    CartItem.objects
+                    .select_for_update()
+                    .filter(customer=customer, product=product)
+                    .first()
+                )
+                if existing:
+                    cls._guard_quantity(product, (existing.quantity or 0) + quantity,
+                                        existing.quantity or 0)
+                    existing.quantity = (existing.quantity or 0) + quantity
+                    existing.save(update_fields=['quantity'])
+                    return existing, False
 
-        current_qty = existing_item.quantity if existing_item else 0
-        desired_qty = current_qty + quantity
+                cls._guard_quantity(product, quantity, 0)
+                cartkey = allocate_key('cart')
+                new_item = CartItem.objects.create(
+                    cartkey=cartkey, customer=customer, product=product,
+                    quantity=quantity,
+                )
+        except IntegrityError:
+            # Another request inserted the same (customer, product) line first:
+            # accumulate onto it instead of failing or duplicating.
+            with transaction.atomic():
+                raced = (
+                    CartItem.objects
+                    .select_for_update()
+                    .filter(customer=customer, product=product)
+                    .first()
+                )
+                if not raced:
+                    # Another writer removed the row between our two reads; the
+                    # client can simply retry the add.
+                    raise ServiceUnavailable()
+                cls._guard_quantity(product, (raced.quantity or 0) + quantity,
+                                    raced.quantity or 0)
+                raced.quantity = (raced.quantity or 0) + quantity
+                raced.save(update_fields=['quantity'])
+                return raced, False
+        except DatabaseError as exc:
+            safe_database_failure("cart add", exc)
 
-        if desired_qty > available_stock:
-            raise ValidationError(
-                f"Cannot add {quantity} item(s). Only {available_stock} available in stock "
-                f"(you currently have {current_qty} in your bag)."
-            )
-
-        if existing_item:
-            existing_item.quantity = desired_qty
-            existing_item.save(update_fields=['quantity', 'updated_at'])
-            return existing_item, False
-        else:
-            new_item = CartItem.objects.create(
-                customer=customer,
-                product=product,
-                quantity=quantity
-            )
-            return new_item, True
+        return new_item, True
 
     @classmethod
     def update_cart_quantity(cls, customer, product_id, quantity):
+        """Set a line's quantity (never deletes; removal is its own action)."""
         try:
             item = (
-                CartItem.objects.select_related('product')
-                .prefetch_related('product__inventory_items')
-                .get(customer=customer, product_id=product_id)
+                CartItem.objects
+                .select_related('product')
+                .filter(customer=customer, product_id=str(product_id or '').strip())
+                .first()
             )
-        except CartItem.DoesNotExist:
+        except DatabaseError as exc:
+            safe_database_failure("cart quantity read", exc)
+
+        if not item:
             raise NotFound("Item not found in your shopping bag.")
 
-        available_stock = cls.get_available_stock(item.product)
-        if quantity > available_stock:
-            raise ValidationError(
-                f"Cannot update quantity to {quantity}. Only {available_stock} available in stock."
-            )
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            raise ValidationError({"quantity": "Quantity must be a whole number."})
+        if quantity < 1:
+            raise ValidationError({"quantity": "Quantity must be at least 1."})
 
-        item.quantity = quantity
-        item.save(update_fields=['quantity', 'updated_at'])
+        cls._guard_quantity(item.product, quantity)
+
+        try:
+            with transaction.atomic():
+                item.quantity = quantity
+                item.save(update_fields=['quantity'])
+        except DatabaseError as exc:
+            safe_database_failure("cart quantity update", exc)
+
         return item
 
     @classmethod
     def remove_from_cart(cls, customer, product_id):
-        deleted_count, _ = CartItem.objects.filter(
-            customer=customer,
-            product_id=product_id
-        ).delete()
+        try:
+            deleted_count, _ = (
+                CartItem.objects
+                .filter(customer=customer, product_id=str(product_id or '').strip())
+                .delete()
+            )
+        except DatabaseError as exc:
+            safe_database_failure("cart remove", exc)
         return deleted_count > 0
 
     @classmethod
     def clear_cart(cls, customer):
-        CartItem.objects.filter(customer=customer).delete()
+        try:
+            with transaction.atomic():
+                CartItem.objects.filter(customer=customer).delete()
+        except DatabaseError as exc:
+            safe_database_failure("cart clear", exc)

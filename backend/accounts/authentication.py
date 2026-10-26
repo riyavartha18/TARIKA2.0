@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from rest_framework import authentication
 from rest_framework.exceptions import AuthenticationFailed
 from django.db import connection
-from accounts.models import Role
+from accounts.models import Customer, Role
 from accounts.services.supabase_auth import SupabaseAuthService
 
 
@@ -95,32 +95,15 @@ class SupabaseAuthentication(authentication.BaseAuthentication):
                 return (user, raw_token)
 
         # ---- Customer: the JWT subject is the public.customers.customer_id ----
+        # The subject is looked up on the primary key, so the identity used by
+        # the wishlist / cart / orders APIs is the one bound to this token.
+        # A deleted customer immediately loses access.
         email_claim = payload.get('email')
-        if not email_claim:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT email FROM public.customers WHERE customer_id = %s LIMIT 1;", [auth_user_id])
-                r = cursor.fetchone()
-            email_claim = r[0] if r else None
-
-        customer = None
-        if email_claim:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT customer_id, customer_name, gender, email FROM public.customers WHERE LOWER(email) = LOWER(%s) LIMIT 1;",
-                    [email_claim],
-                )
-                customer = cursor.fetchone()
+        customer = Customer.objects.filter(customer_id=auth_user_id).first()
 
         if customer:
-            customer_id, customer_name, gender, cust_email = customer
-            profile = SimpleNamespace(
-                customer_id=customer_id,
-                full_name=customer_name,
-                name=customer_name,
-                email=cust_email,
-                gender=gender,
-                is_active=True,
-            )
+            profile = customer
+            cust_email = customer.email or email_claim
             user = AuthenticatedUser(
                 auth_user_id=auth_user_id,
                 email=cust_email,

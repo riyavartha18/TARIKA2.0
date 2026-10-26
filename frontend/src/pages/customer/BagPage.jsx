@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ShoppingBag,
@@ -8,6 +8,7 @@ import {
   Truck,
   Sparkles,
   Info,
+  AlertCircle,
 } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
 
@@ -19,12 +20,21 @@ export default function BagPage() {
     subtotal,
     total,
     bagLoading,
+    bagError,
     updateBagQuantity,
     removeFromBag,
     clearBag,
     addToast,
     openProductDetail,
+    refreshCustomerData,
   } = useCustomer();
+  const [retrying, setRetrying] = useState(false);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    await refreshCustomerData();
+    setRetrying(false);
+  };
 
   const handleCheckoutClick = () => {
     navigate('/customer/checkout');
@@ -103,6 +113,16 @@ export default function BagPage() {
         )}
       </div>
 
+      {bagError && !bagLoading && (
+        <div className="tarika-portal-alert" role="alert">
+          <AlertCircle size={18} style={{ flexShrink: 0 }} />
+          <span>{bagError}</span>
+          <button type="button" className="tarika-portal-alert-action" onClick={handleRetry} disabled={retrying}>
+            {retrying ? 'Retrying...' : 'Retry'}
+          </button>
+        </div>
+      )}
+
       {bagLoading ? (
         <div style={{ padding: '3rem', textAlign: 'center', color: '#B8505E' }}>
           Loading your shopping bag...
@@ -154,7 +174,12 @@ export default function BagPage() {
               const pId = item.product_id;
               const unitPrice = Number(item.unit_price || 0);
               const lineTotal = Number(item.line_total || 0);
-              const maxStock = item.available_stock !== undefined ? item.available_stock : 10;
+              // null stock means the catalogue does not record a quantity, so
+              // the line is not capped rather than capped at an invented number.
+              const maxStock = item.available_stock == null ? null : Number(item.available_stock);
+              const quantity = Number(item.quantity || 0);
+              const atMaxStock = maxStock !== null && quantity >= maxStock;
+              const outOfStock = item.is_stock_available === false;
               const imageUrl =
                 product.primary_image ||
                 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80';
@@ -162,21 +187,12 @@ export default function BagPage() {
               return (
                 <div
                   key={item.id || pId}
-                  style={{
-                    display: 'flex',
-                    gap: '1.25rem',
-                    padding: '1.25rem',
-                    backgroundColor: '#FFFFFF',
-                    borderRadius: '18px',
-                    border: '1px solid rgba(240, 226, 224, 0.9)',
-                    boxShadow: '0 4px 16px rgba(184, 80, 94, 0.04)',
-                    alignItems: 'center',
-                    position: 'relative',
-                  }}
+                  className="bag-line"
                 >
                   {/* Thumbnail */}
                   <div
                     onClick={() => openProductDetail(pId)}
+                    className="bag-line-thumb"
                     style={{
                       width: '90px',
                       height: '115px',
@@ -215,14 +231,24 @@ export default function BagPage() {
                       Price: <strong>₹{unitPrice.toLocaleString('en-IN')}</strong>
                     </span>
 
-                    {/* Stock status indicator */}
-                    <span style={{ fontSize: '0.74rem', color: '#166534', fontWeight: 600 }}>
-                      ✓ In Stock ({maxStock} available)
-                    </span>
+                    {/* Stock status indicator, taken from the backend's check */}
+                    {outOfStock ? (
+                      <span style={{ fontSize: '0.74rem', color: '#B42318', fontWeight: 600 }}>
+                        Only {maxStock} in stock - reduce the quantity to continue
+                      </span>
+                    ) : maxStock === null ? (
+                      <span style={{ fontSize: '0.74rem', color: '#166534', fontWeight: 600 }}>
+                        ✓ In Stock
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: '0.74rem', color: '#166534', fontWeight: 600 }}>
+                        ✓ In Stock ({maxStock} available)
+                      </span>
+                    )}
                   </div>
 
                   {/* Quantity and Line Total */}
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '12px' }}>
+                  <div className="bag-line-actions">
                     {/* Quantity Selector */}
                     <div
                       style={{
@@ -236,7 +262,12 @@ export default function BagPage() {
                     >
                       <button
                         type="button"
-                        onClick={() => updateBagQuantity(pId, item.quantity - 1)}
+                        onClick={() =>
+                          // Going below 1 removes the line instead of asking
+                          // the API for an invalid quantity.
+                          quantity <= 1 ? removeFromBag(pId) : updateBagQuantity(pId, quantity - 1)
+                        }
+                        aria-label={quantity <= 1 ? `Remove ${item.product_name} from bag` : 'Decrease quantity'}
                         style={{
                           width: '30px',
                           height: '30px',
@@ -263,17 +294,18 @@ export default function BagPage() {
                       </span>
                       <button
                         type="button"
-                        onClick={() => updateBagQuantity(pId, item.quantity + 1)}
-                        disabled={item.quantity >= maxStock}
+                        onClick={() => updateBagQuantity(pId, quantity + 1)}
+                        disabled={atMaxStock}
+                        aria-label="Increase quantity"
                         style={{
                           width: '30px',
                           height: '30px',
                           border: 'none',
                           background: 'none',
-                          cursor: item.quantity >= maxStock ? 'not-allowed' : 'pointer',
+                          cursor: atMaxStock ? 'not-allowed' : 'pointer',
                           fontSize: '1rem',
                           fontWeight: 700,
-                          color: item.quantity >= maxStock ? '#C4B5B8' : '#1F191B',
+                          color: atMaxStock ? '#C4B5B8' : '#1F191B',
                         }}
                       >
                         +

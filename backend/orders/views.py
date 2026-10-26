@@ -1,82 +1,86 @@
 from rest_framework import status
-from rest_framework.views import APIView
 from rest_framework.response import Response
 
-from accounts.permissions import IsCustomer
+from cart.views import CustomerAPIView
 from cart.services import CustomerResolver
-from .serializers import CheckoutRequestSerializer, OrderDetailSerializer, OrderReturnRequestSerializer
+from .serializers import (
+    CheckoutRequestSerializer,
+    OrderDetailSerializer,
+    OrderReturnRequestSerializer,
+)
 from .services import OrderCreationService, OrderQueryService, CustomerReturnService
-from .models import Order
 
 
-class CheckoutView(APIView):
+class CheckoutView(CustomerAPIView):
     """
     POST /api/orders/checkout/
-    Validates delivery address & payment selection, re-checks real-time inventory,
-    creates Order + OrderItem(s) + Payment, and clears the customer's cart.
-    Requires authenticated CUSTOMER role.
+    Re-checks stock, prices the bag from the database, writes one row per line
+    into the existing public.orders table and clears the cart afterwards.
     """
-    permission_classes = [IsCustomer]
 
     def post(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
         serializer = CheckoutRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        order = OrderCreationService.create_order_from_cart(
+        orders = OrderCreationService.create_orders_from_cart(
             customer=customer,
-            checkout_data=serializer.validated_data
+            checkout_data=serializer.validated_data,
         )
 
-        response_data = OrderDetailSerializer(order).data
+        payloads = OrderDetailSerializer(orders, many=True).data
+        first = payloads[0]
+        grand_total = round(sum(order['total_amount'] for order in payloads), 2)
+
         return Response({
-            'message': 'Order placed successfully.',
-            'order': response_data,
+            'message': (
+                f'{len(payloads)} order(s) placed successfully.'
+                if len(payloads) > 1 else 'Order placed successfully.'
+            ),
+            # `order` keeps the single-order contract the confirmation page uses.
+            'order': first,
+            'orders': payloads,
+            'order_count': len(payloads),
+            'total_amount': grand_total,
         }, status=status.HTTP_201_CREATED)
 
 
-class OrderDetailView(APIView):
+class OrderDetailView(CustomerAPIView):
     """
     GET /api/orders/<order_id>/
-    Retrieves full details of an order.
-    Enforces authorization: Customers can only view their own orders.
-    Requires authenticated CUSTOMER role.
+    Ownership is enforced inside the query, so an order belonging to someone
+    else is simply not found.
     """
-    permission_classes = [IsCustomer]
 
     def get(self, request, order_id):
         customer = CustomerResolver.get_customer_for_user(request.user)
         order = OrderQueryService.get_customer_order(customer, order_id)
-        serializer = OrderDetailSerializer(order)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(OrderDetailSerializer(order).data, status=status.HTTP_200_OK)
 
 
-class CustomerOrdersListView(APIView):
+class CustomerOrdersListView(CustomerAPIView):
     """
     GET /api/orders/
-    Lists all orders placed by the authenticated customer.
-    Requires authenticated CUSTOMER role.
+    The signed-in customer's own orders, newest first, with product details
+    joined from public.products.
     """
-    permission_classes = [IsCustomer]
 
     def get(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
-        orders = Order.objects.filter(customer=customer).order_by('-order_date')
-        serializer = OrderDetailSerializer(orders, many=True)
+        orders = OrderQueryService.get_customer_orders(customer)
+        payloads = OrderDetailSerializer(orders, many=True).data
         return Response({
-            'count': len(serializer.data),
-            'results': serializer.data
+            'count': len(payloads),
+            'results': payloads,
         }, status=status.HTTP_200_OK)
 
 
-class CustomerOrderReturnView(APIView):
+class CustomerOrderReturnView(CustomerAPIView):
     """
     POST /api/orders/<order_id>/return/
-    Allows customer to submit a return request for an eligible delivered order item.
-    Enforces authorization: Customer can only request returns for their own orders.
-    Requires authenticated CUSTOMER role.
+    The current database has no returns records, so this answers with a clear
+    validation message after verifying that the order belongs to the requester.
     """
-    permission_classes = [IsCustomer]
 
     def post(self, request, order_id):
         customer = CustomerResolver.get_customer_for_user(request.user)
@@ -84,24 +88,10 @@ class CustomerOrderReturnView(APIView):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
-        ret = CustomerReturnService.request_return(
+        CustomerReturnService.request_return(
             customer=customer,
             order_id=order_id,
             order_item_id=data['order_item_id'],
             return_reason=data['return_reason'],
-            condition_on_return=data.get('condition_on_return')
+            condition_on_return=data.get('condition_on_return'),
         )
-
-        return Response({
-            'message': 'Return request submitted successfully.',
-            'return': {
-                'return_id': ret.return_id,
-                'order_item_id': ret.order_item_id,
-                'customer_id': ret.customer_id,
-                'return_reason': ret.return_reason,
-                'return_date': ret.return_date,
-                'return_status': ret.return_status,
-                'refund_amount': ret.refund_amount,
-                'condition_on_return': ret.condition_on_return,
-            }
-        }, status=status.HTTP_201_CREATED)

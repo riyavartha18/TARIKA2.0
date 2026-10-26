@@ -1,27 +1,69 @@
-from unittest.mock import MagicMock, patch
-from django.test import SimpleTestCase
-from django.urls import reverse, resolve
-from rest_framework.test import APIRequestFactory, force_authenticate
-from rest_framework.exceptions import ValidationError, NotFound, PermissionDenied
-from rest_framework import status
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from accounts.models import Role, Customer, Warehouse
-from accounts.authentication import AuthenticatedUser
-from catalog.models import Product, Inventory, OrderItem
-from cart.models import CartItem
-from orders.models import Order, Payment
-from orders.serializers import CheckoutRequestSerializer, OrderDetailSerializer
-from orders.services import (
-    WarehouseAllocationService,
-    StockVerificationService,
-    OrderCreationService,
-    OrderQueryService
+from django.test import SimpleTestCase
+from django.db import DatabaseError
+from django.urls import reverse, resolve
+from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+from accounts.models import Customer, Role
+from orders.models import Order
+from orders.serializers import (
+    CheckoutRequestSerializer,
+    OrderDetailSerializer,
+    build_order_item,
+    _iso_date,
 )
-from orders.views import CheckoutView, OrderDetailView, CustomerOrdersListView
+from orders.services import OrderCreationService, OrderQueryService, CustomerReturnService
+from orders.views import (
+    CheckoutView,
+    OrderDetailView,
+    CustomerOrdersListView,
+    CustomerOrderReturnView,
+)
+
+
+def make_order(order_id='ORD0000042', quantity=2, final_price=1479.86,
+               initial_price=1500.0, discount=20.14, purchase_date='27-03-2026',
+               delivery_status='Delivered', rating=4.0, customer_id='U100010'):
+    """An unsaved Order row over the real public.orders columns."""
+    from catalog.models import Product
+    order = Order(
+        order_id=order_id,
+        quantity=quantity,
+        initial_price=initial_price,
+        additional_discount=discount,
+        final_price=final_price,
+        purchase_date=purchase_date,
+        delivery_status=delivery_status,
+        shipping_time_days=4,
+        payment_method='UPI',
+        rating=rating,
+    )
+    order.product = Product(
+        product_id='P67929',
+        product_name="Pepe Jeans Men's Slim Fit Jeans",
+        main_category="men's clothing",
+        sub_category='jeans',
+        image='https://example.test/jeans.jpg',
+        link='https://example.test/link',
+        discount_price=739.93,
+        actual_price_text='1,500',
+        available_quantity=12,
+    )
+    order.customer = Customer(customer_id=customer_id, customer_name='Asha',
+                              email='asha@example.com')
+    return order
 
 
 class OrdersURLTests(SimpleTestCase):
-    """Test URL routing for Orders & Checkout endpoints."""
+    """The existing order routes keep their addresses."""
+
+    def test_order_list_url_resolves(self):
+        url = reverse('orders:order-list')
+        self.assertEqual(url, '/api/orders/')
+        self.assertEqual(resolve(url).func.view_class, CustomerOrdersListView)
 
     def test_checkout_url_resolves(self):
         url = reverse('orders:checkout')
@@ -29,277 +71,278 @@ class OrdersURLTests(SimpleTestCase):
         self.assertEqual(resolve(url).func.view_class, CheckoutView)
 
     def test_order_detail_url_resolves(self):
-        url = reverse('orders:order-detail', kwargs={'order_id': 'ord-123'})
-        self.assertEqual(url, '/api/orders/ord-123/')
+        url = reverse('orders:order-detail', kwargs={'order_id': 'ORD1'})
+        self.assertEqual(url, '/api/orders/ORD1/')
         self.assertEqual(resolve(url).func.view_class, OrderDetailView)
 
-    def test_order_list_url_resolves(self):
-        url = reverse('orders:order-list')
-        self.assertEqual(url, '/api/orders/')
-        self.assertEqual(resolve(url).func.view_class, CustomerOrdersListView)
+
+class OrderDateMappingTests(SimpleTestCase):
+    """purchase_date TEXT is converted without inventing a value."""
+
+    def test_day_month_year_becomes_iso(self):
+        self.assertEqual(_iso_date('27-03-2026'), '2026-03-27')
+
+    def test_unparsable_date_returns_none(self):
+        self.assertIsNone(_iso_date('not-a-date'))
+        self.assertIsNone(_iso_date(''))
+        self.assertIsNone(_iso_date(None))
+
+
+class OrderStatusMappingTests(SimpleTestCase):
+    """Only the delivery_status column signals progress in this schema."""
+
+    def test_statuses_map_to_the_frontend_vocabulary(self):
+        expected = {
+            'Delivered': 'delivered',
+            'In Transit': 'shipped',
+            'Delayed': 'processing',
+            'Returned': 'returned',
+        }
+        for raw, mapped in expected.items():
+            self.assertEqual(Order(delivery_status=raw).order_status, mapped)
+
+    def test_a_fresh_order_has_no_invented_status(self):
+        # A just-placed order stores no status yet, so it reads as processing.
+        self.assertEqual(Order(delivery_status=None).order_status, 'processing')
+
+
+class OrderItemPayloadTests(SimpleTestCase):
+    """Line pricing stays self-consistent: unit x quantity == order total."""
+
+    def test_unit_price_and_subtotal(self):
+        item = build_order_item(make_order(quantity=2, final_price=1479.86))
+        self.assertEqual(item['subtotal'], 1479.86)
+        self.assertEqual(item['unit_price'], 739.93)
+        self.assertAlmostEqual(item['unit_price'] * item['quantity'], item['subtotal'], places=2)
+
+    def test_product_details_are_joined_from_products(self):
+        item = build_order_item(make_order())
+        self.assertEqual(item['product_id'], 'P67929')
+        self.assertEqual(item['product_name'], "Pepe Jeans Men's Slim Fit Jeans")
+        self.assertEqual(item['image'], 'https://example.test/jeans.jpg')
+        self.assertEqual(item['category_name'], "men's clothing")
+
+    def test_rating_becomes_the_customer_review(self):
+        self.assertEqual(build_order_item(make_order(rating=4.0))['customer_review']['rating'], 4.0)
+        self.assertIsNone(build_order_item(make_order(rating=None))['customer_review'])
+
+    def test_no_returns_table_means_no_return_info(self):
+        self.assertIsNone(build_order_item(make_order())['return_info'])
+
+
+class OrderDetailSerializerTests(SimpleTestCase):
+    """The My Orders payload exposes only columns the table actually has."""
+
+    def test_payload_shape(self):
+        payload = OrderDetailSerializer(make_order()).data
+        self.assertEqual(payload['order_id'], 'ORD0000042')
+        self.assertEqual(payload['order_date'], '2026-03-27')
+        self.assertEqual(payload['order_date_display'], '27-03-2026')
+        self.assertEqual(payload['order_status'], 'delivered')
+        self.assertEqual(payload['delivery_status'], 'Delivered')
+        self.assertEqual(payload['payment_method'], 'UPI')
+        self.assertEqual(payload['total_amount'], 1479.86)
+        self.assertEqual(payload['discount_amount'], 20.14)
+        self.assertEqual(payload['delivery']['shipping_time_days'], 4)
+        self.assertEqual(len(payload['items']), 1)
+
+    def test_fields_absent_from_the_schema_are_null_not_fake(self):
+        payload = OrderDetailSerializer(make_order()).data
+        self.assertIsNone(payload['payment_status'])
+        self.assertIsNone(payload['shipping_address'])
+        self.assertIsNone(payload['warehouse_name'])
+        self.assertIsNone(payload['transaction_reference'])
+
+    def test_customer_details_are_the_requesters_own(self):
+        payload = OrderDetailSerializer(make_order()).data
+        self.assertEqual(payload['customer_name'], 'Asha')
+        self.assertEqual(payload['customer_email'], 'asha@example.com')
 
 
 class CheckoutSerializerTests(SimpleTestCase):
-    """Test CheckoutRequestSerializer validation rules and payment method normalization."""
+    """Only Cash on Delivery is accepted, and the address must be usable."""
 
-    def test_valid_checkout_payload_cod(self):
-        data = {
-            'shipping_address': 'Flat 402, Royale Palms, MG Road',
-            'city': 'Mumbai',
-            'state': 'Maharashtra',
-            'postal_code': '400001',
-            'payment_method': 'COD'
-        }
-        serializer = CheckoutRequestSerializer(data=data)
-        self.assertTrue(serializer.is_valid())
+    def _payload(self, **overrides):
+        data = {'shipping_address': '12 Marine Drive, Mumbai 400001',
+                'city': 'Mumbai', 'state': 'MH', 'postal_code': '400001',
+                'payment_method': 'COD'}
+        data.update(overrides)
+        return data
+
+    def test_valid_cod_payload(self):
+        serializer = CheckoutRequestSerializer(data=self._payload())
+        self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertEqual(serializer.validated_data['payment_method'], 'COD')
 
-    def test_online_payment_rejected_with_notice(self):
-        data = {
-            'shipping_address': 'Flat 402, Royale Palms, MG Road',
-            'city': 'Mumbai',
-            'state': 'Maharashtra',
-            'postal_code': '400001',
-            'payment_method': 'Online Payment'
-        }
-        serializer = CheckoutRequestSerializer(data=data)
-        self.assertFalse(serializer.is_valid())
-        self.assertIn('payment_method', serializer.errors)
-        self.assertIn("Online payment is launching soon", str(serializer.errors['payment_method']))
+    def test_cash_on_delivery_spelling_is_accepted(self):
+        serializer = CheckoutRequestSerializer(
+            data=self._payload(payment_method='CASH ON DELIVERY'))
+        self.assertTrue(serializer.is_valid())
 
-    def test_empty_address_fails(self):
-        data = {
-            'shipping_address': '   ',
-            'payment_method': 'COD'
-        }
-        serializer = CheckoutRequestSerializer(data=data)
-        self.assertFalse(serializer.is_valid())
-        self.assertIn('shipping_address', serializer.errors)
-
-    def test_invalid_payment_method_fails(self):
-        data = {
-            'shipping_address': 'Valid Address, Road 12',
-            'payment_method': 'Crypto'
-        }
-        serializer = CheckoutRequestSerializer(data=data)
+    def test_online_payment_is_rejected_with_notice(self):
+        serializer = CheckoutRequestSerializer(data=self._payload(payment_method='UPI'))
         self.assertFalse(serializer.is_valid())
         self.assertIn('payment_method', serializer.errors)
 
+    def test_short_address_is_rejected(self):
+        serializer = CheckoutRequestSerializer(data=self._payload(shipping_address='abc'))
+        self.assertFalse(serializer.is_valid())
 
-class OrdersServiceTests(SimpleTestCase):
-    """Test OrderCreationService, StockVerificationService, and WarehouseAllocationService."""
+    def test_blank_address_is_rejected(self):
+        serializer = CheckoutRequestSerializer(data=self._payload(shipping_address=''))
+        self.assertFalse(serializer.is_valid())
 
-    def setUp(self):
-        self.customer = Customer(
-            customer_id='cust-001',
-            full_name='Riya Vartha',
-            email='riya@tarika.com'
-        )
-        self.warehouse_a = Warehouse(
-            warehouse_id='wh-west',
-            warehouse_name='West Zone Fulfillment Center'
-        )
-        self.warehouse_b = Warehouse(
-            warehouse_id='wh-north',
-            warehouse_name='North Zone Fulfillment Center'
-        )
-        self.product_1 = Product(
-            product_id='prod-101',
-            product_name='Silk Embroidered Kurti',
-            selling_price=4500,
-            is_active=True
-        )
-        self.product_2 = Product(
-            product_id='prod-102',
-            product_name='Tailored Linen Trousers',
-            selling_price=3200,
-            is_active=True
+
+class CheckoutPaymentMappingTests(SimpleTestCase):
+    """The stored value matches the vocabulary the table already uses."""
+
+    def test_cod_maps_to_the_stored_label(self):
+        self.assertEqual(
+            OrderCreationService._resolve_payment_method({'payment_method': 'COD'}),
+            'Cash on Delivery',
         )
 
-    @patch('orders.services.CartItem.objects.filter')
-    def test_empty_cart_raises_validation_error(self, mock_cart_filter):
-        mock_cart_filter.return_value.select_related.return_value = []
-        with self.assertRaises(ValidationError) as ctx:
-            OrderCreationService.create_order_from_cart(
-                customer=self.customer,
-                checkout_data={'shipping_address': '123 Fashion Street', 'payment_method': 'COD'}
-            )
-        self.assertIn("empty", str(ctx.exception).lower())
+    def test_any_other_method_is_refused(self):
+        with self.assertRaises(ValidationError):
+            OrderCreationService._resolve_payment_method({'payment_method': 'UPI'})
 
-    @patch('orders.services.CartService.get_available_stock')
-    def test_insufficient_stock_raises_validation_error(self, mock_stock):
-        cart_item = CartItem(
-            id=1,
-            customer=self.customer,
-            product=self.product_1,
-            quantity=5
-        )
-        mock_stock.return_value = 2  # Only 2 available in total
 
-        with self.assertRaises(ValidationError) as ctx:
-            StockVerificationService.verify_stock([cart_item])
-        self.assertIn("insufficient stock", str(ctx.exception).lower())
+class OrderQueryServiceTests(SimpleTestCase):
+    """Reads are scoped to the requesting customer inside the query."""
 
-    @patch('orders.services.Warehouse.objects.all')
-    @patch('orders.services.Inventory.objects.filter')
-    def test_warehouse_allocation_fails_if_no_single_warehouse_can_fulfill_all_items(
-        self,
-        mock_inv_filter,
-        mock_wh_all
-    ):
-        mock_wh_all.return_value = [self.warehouse_a, self.warehouse_b]
-        cart_items = [
-            CartItem(id=1, customer=self.customer, product=self.product_1, quantity=3),
-            CartItem(id=2, customer=self.customer, product=self.product_2, quantity=2),
-        ]
+    def test_get_customer_order_filters_on_customer_and_id(self):
+        customer = Customer(customer_id='U100010')
+        order = make_order()
+        queryset = MagicMockQuerySet(first_value=order)
+        with patch('orders.services.OrderQueryService._base_queryset',
+                   return_value=queryset):
+            found = OrderQueryService.get_customer_order(customer, 'ORD0000042')
+        self.assertIs(found, order)
+        self.assertEqual(queryset.last_kwargs,
+                         {'customer': customer, 'order_id': 'ORD0000042'})
 
-        def inventory_side_effect(warehouse, product):
-            mock_obj = MagicMock()
-            if warehouse == self.warehouse_a and product == self.product_1:
-                mock_obj.first.return_value = Inventory(stock_quantity=5)
-            elif warehouse == self.warehouse_b and product == self.product_2:
-                mock_obj.first.return_value = Inventory(stock_quantity=5)
-            else:
-                mock_obj.first.return_value = Inventory(stock_quantity=0)
-            return mock_obj
+    def test_foreign_order_id_is_simply_not_found(self):
+        queryset = MagicMockQuerySet(first_value=None)
+        with patch('orders.services.OrderQueryService._base_queryset',
+                   return_value=queryset):
+            with self.assertRaises(NotFound):
+                OrderQueryService.get_customer_order(
+                    Customer(customer_id='U1'), 'ORD9999999')
 
-        mock_inv_filter.side_effect = inventory_side_effect
+    def test_blank_order_id_is_rejected_before_the_query(self):
+        with self.assertRaises(NotFound):
+            OrderQueryService.get_customer_order(Customer(customer_id='U1'), '  ')
 
-        with self.assertRaises(ValidationError) as ctx:
-            WarehouseAllocationService.allocate_warehouse(cart_items)
-        self.assertIn("fulfillment centers currently has sufficient stock", str(ctx.exception))
+    def test_return_request_needs_a_returns_table(self):
+        queryset = MagicMockQuerySet(first_value=make_order())
+        with patch('orders.services.OrderQueryService._base_queryset',
+                   return_value=queryset):
+            with self.assertRaises(ValidationError):
+                CustomerReturnService.request_return(
+                    Customer(customer_id='U100010'), 'ORD0000042',
+                    'ORD0000042', 'Wrong size')
 
-    @patch('orders.services.transaction.atomic')
-    @patch('orders.services.CartService.clear_cart')
-    @patch('orders.services.Payment.objects.create')
-    @patch('orders.services.OrderItem.objects.create')
-    @patch('orders.services.Order.objects.create')
-    @patch('orders.services.WarehouseAllocationService.allocate_warehouse')
-    @patch('orders.services.StockVerificationService.verify_stock')
-    @patch('orders.services.CartItem.objects.filter')
-    @patch('orders.services.get_dim_product_selling_price_map', return_value={'prod-101': 4700})
-    def test_successful_order_creation_and_cart_clearing(
-        self,
-        mock_price_map,
-        mock_cart_filter,
-        mock_verify_stock,
-        mock_allocate_wh,
-        mock_order_create,
-        mock_item_create,
-        mock_payment_create,
-        mock_clear_cart,
-        mock_atomic
-    ):
-        mock_atomic.return_value.__enter__.return_value = None
-        mock_atomic.return_value.__exit__.return_value = None
 
-        cart_item = CartItem(
-            id=1,
-            customer=self.customer,
-            product=self.product_1,
-            quantity=2
-        )
-        mock_cart_filter.return_value.select_related.return_value = [cart_item]
-        mock_allocate_wh.return_value = self.warehouse_a
+class MagicMockQuerySet:
+    """Tiny stand-in that records the filter used by the service."""
 
-        fake_order = Order(
-            order_id='ord-test-uuid',
-            customer=self.customer,
-            warehouse=self.warehouse_a,
-            total_amount=9400.0,
-            order_status='confirmed',
-            payment_status='unpaid'
-        )
-        mock_order_create.return_value = fake_order
+    def __init__(self, first_value=None):
+        self.first_value = first_value
+        self.last_kwargs = None
 
-        order = OrderCreationService.create_order_from_cart(
-            customer=self.customer,
-            checkout_data={
-                'shipping_address': '221B Baker Street',
-                'city': 'Mumbai',
-                'state': 'Maharashtra',
-                'postal_code': '400001',
-                'payment_method': 'COD'
-            }
-        )
+    def filter(self, **kwargs):
+        self.last_kwargs = kwargs
+        return self
 
-        self.assertEqual(order.order_id, 'ord-test-uuid')
-        self.assertEqual(order.total_amount, 9400.0)
-        mock_item_create.assert_called_once()
-        self.assertEqual(mock_item_create.call_args.kwargs['unit_price'], 4700)
-        mock_price_map.assert_called_once()
-        self.assertEqual(list(mock_price_map.call_args.args[0]), ['prod-101'])
-        mock_payment_create.assert_called_once()
-        mock_clear_cart.assert_called_once_with(self.customer)
+    def first(self):
+        return self.first_value
 
-    @patch('orders.services.Order.objects.select_related')
-    def test_cross_customer_order_access_denied(self, mock_select_related):
-        other_customer = Customer(customer_id='cust-other')
-        fake_order = Order(
-            order_id='ord-secret',
-            customer=other_customer
-        )
-        mock_select_related.return_value.prefetch_related.return_value.get.return_value = fake_order
+    def order_by(self, *args):
+        return self
 
-        with self.assertRaises(PermissionDenied):
-            OrderQueryService.get_customer_order(self.customer, 'ord-secret')
+    def __iter__(self):
+        return iter([])
 
 
 class OrdersViewTests(SimpleTestCase):
-    """Test API views with authentication and permissions."""
+    """View contracts: list, detail, checkout, and failure handling."""
 
     def setUp(self):
         self.factory = APIRequestFactory()
-        self.customer = Customer(
-            customer_id='cust-view-1',
-            full_name='Test Customer',
-            email='test@tarika.com'
-        )
-        self.user = AuthenticatedUser(
-            auth_user_id='auth-view-1',
-            email='test@tarika.com',
-            role=Role.CUSTOMER,
-            profile=self.customer
+        self.customer = Customer(customer_id='U100010', email='a@example.com')
+        self.user = SimpleNamespace(
+            role=Role.CUSTOMER, profile=self.customer, auth_user_id='U100010',
+            is_authenticated=True, is_active=True,
         )
 
-    @patch('orders.views.OrderDetailSerializer')
-    @patch('orders.views.OrderCreationService.create_order_from_cart')
-    @patch('orders.views.CustomerResolver.get_customer_for_user')
-    def test_checkout_view_success(self, mock_resolver, mock_create, mock_serializer):
-        mock_resolver.return_value = self.customer
-        mock_create.return_value = MagicMock(order_id='ord-new-123')
-        mock_serializer.return_value.data = {'order_id': 'ord-new-123', 'total_amount': 5000}
+    def _get(self, request, user=None):
+        force_authenticate(request, user=user or self.user)
+        return request
 
-        payload = {
-            'shipping_address': 'Flat 101, Lotus Enclave, Link Road',
-            'city': 'Delhi',
-            'state': 'Delhi',
-            'postal_code': '110001',
-            'payment_method': 'COD'
-        }
-        request = self.factory.post('/api/orders/checkout/', payload, format='json')
-        force_authenticate(request, user=self.user)
+    def test_orders_list_requires_authentication(self):
+        request = self.factory.get('/api/orders/')
+        response = CustomerOrdersListView.as_view()(request)
+        self.assertEqual(response.status_code, 401)
 
-        view = CheckoutView.as_view()
-        response = view(request)
+    def test_orders_list_returns_only_the_customers_orders(self):
+        request = self._get(self.factory.get('/api/orders/'))
+        with patch('orders.views.OrderQueryService.get_customer_orders',
+                   return_value=[make_order()]) as mock_list:
+            response = CustomerOrdersListView.as_view()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(mock_list.call_args[0][0], self.customer)
+        self.assertEqual(response.data['results'][0]['order_id'], 'ORD0000042')
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['order']['order_id'], 'ord-new-123')
+    def test_order_detail_is_customer_scoped(self):
+        request = self._get(self.factory.get('/api/orders/ORD0000042/'))
+        with patch('orders.views.OrderQueryService.get_customer_order',
+                   return_value=make_order()) as mock_get:
+            response = OrderDetailView.as_view()(request, order_id='ORD0000042')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_get.call_args[0][0], self.customer)
 
-    @patch('orders.views.OrderDetailSerializer')
-    @patch('orders.views.OrderQueryService.get_customer_order')
-    @patch('orders.views.CustomerResolver.get_customer_for_user')
-    def test_order_detail_view_success(self, mock_resolver, mock_get_order, mock_serializer):
-        mock_resolver.return_value = self.customer
-        fake_order = MagicMock(order_id='ord-new-123')
-        mock_get_order.return_value = fake_order
-        mock_serializer.return_value.data = {'order_id': 'ord-new-123', 'order_status': 'confirmed'}
+    def test_someone_elses_order_is_404(self):
+        request = self._get(self.factory.get('/api/orders/ORD9999999/'))
+        with patch('orders.views.OrderQueryService.get_customer_order',
+                   side_effect=NotFound('Order not found.')):
+            response = OrderDetailView.as_view()(request, order_id='ORD9999999')
+        self.assertEqual(response.status_code, 404)
 
-        request = self.factory.get('/api/orders/ord-new-123/')
-        force_authenticate(request, user=self.user)
+    def test_checkout_returns_the_placed_order(self):
+        request = self._get(self.factory.post(
+            '/api/orders/checkout/',
+            {'shipping_address': '12 Marine Drive, Mumbai 400001', 'payment_method': 'COD'},
+            format='json'))
+        with patch('orders.views.OrderCreationService.create_orders_from_cart',
+                   return_value=[make_order()]):
+            response = CheckoutView.as_view()(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['order']['order_id'], 'ORD0000042')
+        self.assertEqual(response.data['order_count'], 1)
 
-        view = OrderDetailView.as_view()
-        response = view(request, order_id='ord-new-123')
+    def test_checkout_rejects_an_invalid_payment_method(self):
+        request = self._get(self.factory.post(
+            '/api/orders/checkout/',
+            {'shipping_address': '12 Marine Drive, Mumbai 400001', 'payment_method': 'UPI'},
+            format='json'))
+        response = CheckoutView.as_view()(request)
+        self.assertEqual(response.status_code, 400)
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['order_id'], 'ord-new-123')
+    def test_database_failure_is_reported_generically(self):
+        request = self._get(self.factory.get('/api/orders/'))
+        with patch('orders.views.OrderQueryService.get_customer_orders',
+                   side_effect=DatabaseError('secret connection string')):
+            response = CustomerOrdersListView.as_view()(request)
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn('secret', str(response.data))
+
+    def test_return_route_answers_a_clear_validation_error(self):
+        request = self._get(self.factory.post(
+            '/api/orders/ORD0000042/return/',
+            {'order_item_id': 'ORD0000042', 'return_reason': 'Wrong size'},
+            format='json'))
+        with patch('orders.views.CustomerReturnService.request_return',
+                   side_effect=ValidationError('not available')):
+            response = CustomerOrderReturnView.as_view()(request, order_id='ORD0000042')
+        self.assertEqual(response.status_code, 400)

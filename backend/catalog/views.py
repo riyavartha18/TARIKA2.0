@@ -313,7 +313,10 @@ class ProductReviewsView(APIView):
         customer = getattr(request.user, 'profile', None)
         if not customer or not hasattr(customer, 'customer_id'):
             from accounts.models import Customer
-            customer = Customer.objects.filter(auth_user_id=request.user.auth_user_id).first()
+            # The verified token subject is the public.customers primary key.
+            customer = Customer.objects.filter(
+                customer_id=getattr(request.user, 'auth_user_id', None)
+            ).first()
         if not customer:
             return Response(
                 {'detail': 'Customer account profile could not be found.'},
