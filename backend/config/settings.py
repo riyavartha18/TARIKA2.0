@@ -139,6 +139,21 @@ DATABASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Cache
+# The customer-facing category list is derived from a GROUP BY over the whole
+# ~90k-row products table (~2.4s cold). It changes only when a warehouse
+# product's category is edited, so a short-lived in-process cache turns repeat
+# homepage loads into sub-millisecond reads without risking stale private data
+# (the endpoint is public and identical for every customer).
+# ---------------------------------------------------------------------------
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'tarika-retail',
+    }
+}
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 

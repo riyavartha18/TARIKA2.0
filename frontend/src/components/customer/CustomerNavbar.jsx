@@ -118,6 +118,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
         }}
       >
         <div
+          className="customer-nav-inner"
           style={{
             maxWidth: '1680px',
             margin: '0 auto',
@@ -203,6 +204,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           {/* Search Input Bar */}
           <form
             onSubmit={handleSearchSubmit}
+            className="customer-nav-search"
             style={{
               position: 'relative',
               maxWidth: '320px',

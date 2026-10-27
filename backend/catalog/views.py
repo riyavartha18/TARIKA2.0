@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Count, Q
+from django.core.cache import cache
 from django.shortcuts import get_object_or_404
 
 from accounts.permissions import IsCustomer
@@ -73,11 +74,21 @@ class CategoryListView(APIView):
     GET /api/catalog/categories/
     Returns all available product categories with product count and image URLs.
     Publicly accessible.
+
+    The category list is a GROUP BY over the whole ~90k-row products table
+    (~2.4s cold) and is identical for every visitor, so it is cached
+    server-side. Warehouse product-category edits bust the cache explicitly.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
+    cache_key = 'catalog:categories:v1'
+    cache_timeout = 600  # 10 minutes
 
     def get(self, request):
+        cached = cache.get(self.cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         # New `public.products` schema has no separate `categories` table.
         # Customer-facing categories are derived from the real `main_category`
         # column so navigation and filtering use actual database values.
@@ -114,6 +125,7 @@ class CategoryListView(APIView):
                     'product_count': row['product_count'],
                 })
         data = sorted(cat_map.values(), key=lambda c: c['category_name'])
+        cache.set(self.cache_key, data, self.cache_timeout)
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -205,7 +217,7 @@ class NewArrivalsView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        return _paginated_curated_products(request, CatalogService.get_new_arrivals())
+        return _paginated_curated_products(request, lambda: CatalogService.get_new_arrivals(), 'new-arrivals')
 
 
 class TrendingView(APIView):
@@ -221,10 +233,9 @@ class TrendingView(APIView):
 
     def get(self, request):
         try:
-            queryset = CatalogService.get_trending()
-            return _paginated_curated_products(request, queryset)
+            return _paginated_curated_products(request, lambda: CatalogService.get_trending(), 'trending')
         except DatabaseError:
-            return _paginated_curated_products(request, CatalogService.get_new_arrivals())
+            return _paginated_curated_products(request, lambda: CatalogService.get_new_arrivals(), 'trending')
 
 
 class SaleView(APIView):
@@ -239,10 +250,26 @@ class SaleView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        return _paginated_curated_products(request, CatalogService.get_sale_products())
+        return _paginated_curated_products(request, lambda: CatalogService.get_sale_products(), 'sale')
 
 
-def _paginated_curated_products(request, queryset):
+def _paginated_curated_products(request, queryset, endpoint):
+    # The curated home lists run expensive aggregations / regex parsing over the
+    # ~90k-row products table (trending ~0.9s, sale ~0.8s warm). Their output is
+    # public and identical for every customer, so cache the serialized payload
+    # keyed by endpoint + the exact query string for a short TTL.
+    query_key = request.get_full_path()
+    cache_key = f'catalog:curated:{endpoint}:{query_key}'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return Response(cached, status=status.HTTP_200_OK)
+
+    # Build the queryset only after the cache check: some producers (e.g. sale)
+    # run eager regex/exists queries when constructed, so deferring the call is
+    # what keeps a cache hit cheap.
+    if callable(queryset):
+        queryset = queryset()
+
     filters = {
         key: request.query_params.get(key)
         for key in (
@@ -265,10 +292,12 @@ def _paginated_curated_products(request, queryset):
             limit = 20
         products = list(queryset[:limit])
         serializer = ProductListSerializer(products, many=True)
-        return Response({
+        payload = {
             'count': len(serializer.data),
             'results': serializer.data,
-        }, status=status.HTTP_200_OK)
+        }
+        cache.set(cache_key, payload, 300)
+        return Response(payload, status=status.HTTP_200_OK)
 
     paginator = StandardCatalogPagination()
     page = paginator.paginate_queryset(queryset, request)

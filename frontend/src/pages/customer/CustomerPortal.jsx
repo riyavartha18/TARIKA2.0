@@ -1,24 +1,37 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { CustomerProvider } from '../../context/CustomerContext';
 import CustomerNavbar from '../../components/customer/CustomerNavbar';
 import ProductDetailModal from '../../components/customer/ProductDetailModal';
 import CustomerToast from '../../components/customer/CustomerToast';
+import { SkeletonProductGrid } from '../../components/customer/Skeleton';
 
-// Subviews
+// Landing view stays eager so the first page after login paints immediately.
 import CustomerHome from './CustomerHome';
-import ShopCategories from './ShopCategories';
-import ProductListingPage from './ProductListingPage';
-import WishlistPage from './WishlistPage';
-import BagPage from './BagPage';
-import CheckoutPage from './CheckoutPage';
-import OrderConfirmationPage from './OrderConfirmationPage';
-import MyOrdersPage from './MyOrdersPage';
-import ProfilePage from './ProfilePage';
+
+// Everything below is reached only on navigation, so it is code-split out of
+// the landing bundle (ShopCategories, CheckoutPage and MyOrdersPage alone are
+// >3500 lines and were previously downloaded on first login).
+const ShopCategories = lazy(() => import('./ShopCategories'));
+const ProductListingPage = lazy(() => import('./ProductListingPage'));
+const WishlistPage = lazy(() => import('./WishlistPage'));
+const BagPage = lazy(() => import('./BagPage'));
+const CheckoutPage = lazy(() => import('./CheckoutPage'));
+const OrderConfirmationPage = lazy(() => import('./OrderConfirmationPage'));
+const MyOrdersPage = lazy(() => import('./MyOrdersPage'));
+const ProfilePage = lazy(() => import('./ProfilePage'));
 
 // Portal CSS
 import '../../styles/tarika.css';
 import '../../styles/customer-portal.css';
+
+function RouteFallback() {
+  return (
+    <div style={{ padding: '1rem 0' }}>
+      <SkeletonProductGrid count={8} />
+    </div>
+  );
+}
 
 export default function CustomerPortal() {
   useEffect(() => {
@@ -52,16 +65,86 @@ export default function CustomerPortal() {
         >
           <Routes>
             <Route index element={<CustomerHome />} />
-            <Route path="shop" element={<ShopCategories />} />
-            <Route path="new-in" element={<ProductListingPage type="new-in" />} />
-            <Route path="trending" element={<ProductListingPage type="trending" />} />
-            <Route path="sale" element={<ProductListingPage type="sale" />} />
-            <Route path="wishlist" element={<WishlistPage />} />
-            <Route path="bag" element={<BagPage />} />
-            <Route path="checkout" element={<CheckoutPage />} />
-            <Route path="order-confirmation/:orderId" element={<OrderConfirmationPage />} />
-            <Route path="orders" element={<MyOrdersPage />} />
-            <Route path="profile" element={<ProfilePage />} />
+            <Route
+              path="shop"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <ShopCategories />
+                </Suspense>
+              }
+            />
+            <Route
+              path="new-in"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <ProductListingPage type="new-in" />
+                </Suspense>
+              }
+            />
+            <Route
+              path="trending"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <ProductListingPage type="trending" />
+                </Suspense>
+              }
+            />
+            <Route
+              path="sale"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <ProductListingPage type="sale" />
+                </Suspense>
+              }
+            />
+            <Route
+              path="wishlist"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <WishlistPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="bag"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <BagPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="checkout"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <CheckoutPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="order-confirmation/:orderId"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <OrderConfirmationPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="orders"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <MyOrdersPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="profile"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <ProfilePage />
+                </Suspense>
+              }
+            />
             {/* Fallback to customer home */}
             <Route path="*" element={<Navigate to="/customer" replace />} />
           </Routes>

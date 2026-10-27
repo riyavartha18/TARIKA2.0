@@ -1,4 +1,5 @@
 import math
+from django.core.cache import cache
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -132,6 +133,9 @@ class WarehouseProductDetailView(APIView):
             )
 
         # 4. Serialise and return the updated product (with fresh inventory stock)
+        # A category edit changes the derived customer category list, so bust the
+        # cached /api/catalog/categories/ aggregate on the next request.
+        cache.delete('catalog:categories:v1')
         read_serializer = WarehouseProductDetailSerializer(updated_product)
         return Response(
             {

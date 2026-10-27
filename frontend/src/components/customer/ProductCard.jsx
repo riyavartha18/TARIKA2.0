@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { Heart, ShoppingBag, Zap, Check, Eye } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
 import { getProductPricing } from '../../utils/pricing';
 
-export default function ProductCard({ product, onCardClick }) {
+function ProductCard({ product, onCardClick }) {
   const { isWishlisted, toggleWishlist, addToBag, openProductDetail } = useCustomer();
   const [addingToBag, setAddingToBag] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
@@ -79,7 +79,7 @@ export default function ProductCard({ product, onCardClick }) {
         {/* Sale Discount Badge */}
         {isOnSale && discountAmount > 0 && (
           <span className="product-badge-sale">
-            ₹{discountAmount.toLocaleString('en-IN')} OFF
+            ₹{Math.round(discountAmount).toLocaleString('en-IN')} OFF
           </span>
         )}
 
@@ -211,7 +211,7 @@ export default function ProductCard({ product, onCardClick }) {
               fontFamily: "'Plus Jakarta Sans', sans-serif",
             }}
           >
-            ₹{currentPrice.toLocaleString('en-IN')}
+            ₹{Math.round(currentPrice).toLocaleString('en-IN')}
           </span>
 
           {isOnSale && (
@@ -222,7 +222,7 @@ export default function ProductCard({ product, onCardClick }) {
                 textDecoration: 'line-through',
               }}
             >
-              ₹{basePrice.toLocaleString('en-IN')}
+              ₹{Math.round(basePrice).toLocaleString('en-IN')}
             </span>
           )}
         </div>
@@ -259,3 +259,7 @@ export default function ProductCard({ product, onCardClick }) {
     </div>
   );
 }
+
+// Memoized so a card only re-renders when its own `product`/`onCardClick`
+// change, not whenever a sibling section's loading state updates.
+export default memo(ProductCard);
