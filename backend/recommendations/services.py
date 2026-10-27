@@ -21,29 +21,33 @@ class RecommendationService:
       5. Retrieving recommendations for individual products.
     """
 
-    DEFAULT_MIN_SUPPORT = 0.002
+    DEFAULT_MIN_SUPPORT = 0.001
     DEFAULT_MIN_CONFIDENCE = 0.0
 
     @classmethod
     def fetch_delivered_order_items(cls):
         """
-        Executes a SQL query joining orders, order_items, and products
-        for orders with status 'delivered'.
+        Executes a SQL query joining orders and products
+        for orders with status 'Delivered' containing multi-item baskets.
         Returns a pandas DataFrame with columns: order_id, product_id, product_name.
         """
         query = """
         SELECT
-            o.order_id,
-            oi.product_id,
-            p.product_name
+            CONCAT(o.customer_id, '_', o.purchase_date) AS order_id,
+            o.product_id,
+            p.name AS product_name
         FROM orders o
-        JOIN order_items oi
-            ON o.order_id = oi.order_id
-        JOIN products p
-            ON oi.product_id = p.product_id
-        WHERE o.order_status = 'delivered'
-          AND p.product_name IS NOT NULL
-          AND TRIM(p.product_name) != ''
+        JOIN products p ON o.product_id = p.product_key
+        WHERE o.delivery_status = 'Delivered'
+          AND p.name IS NOT NULL
+          AND TRIM(p.name) != ''
+          AND CONCAT(o.customer_id, '_', o.purchase_date) IN (
+              SELECT CONCAT(customer_id, '_', purchase_date)
+              FROM orders
+              WHERE delivery_status = 'Delivered'
+              GROUP BY customer_id, purchase_date
+              HAVING COUNT(DISTINCT product_id) >= 2
+          );
         """
         with connection.cursor() as cursor:
             cursor.execute(query)
@@ -291,11 +295,12 @@ class RecommendationService:
                     # Truncate / delete existing recommendation rules
                     cursor.execute("DELETE FROM product_recommendations;")
 
-                    # Insert newly mined association rules
+                    # Insert newly mined association rules using batch execute_values
+                    from psycopg2.extras import execute_values
                     insert_query = """
                     INSERT INTO product_recommendations
                     (product, frequently_bought_with, support, confidence, lift, created_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    VALUES %s
                     """
                     records_to_insert = [
                         (
@@ -307,7 +312,19 @@ class RecommendationService:
                         )
                         for r in new_rules
                     ]
-                    cursor.executemany(insert_query, records_to_insert)
+                    try:
+                        from psycopg2.extras import execute_values
+                        execute_values(
+                            cursor,
+                            insert_query,
+                            records_to_insert,
+                            template="(%s, %s, %s, %s, %s, NOW())"
+                        )
+                    except (AttributeError, TypeError):
+                        cursor.executemany(
+                            "INSERT INTO product_recommendations (product, frequently_bought_with, support, confidence, lift, created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
+                            records_to_insert
+                        )
 
             results['message'] = (
                 f"Successfully updated recommendation dataset with {len(new_rules)} rules."
@@ -355,9 +372,8 @@ class RecommendationService:
             target_name = rule.frequently_bought_with
             # Find matching active products in catalog
             matching_products = Product.objects.filter(
-                product_name=target_name,
-                is_active=True
-            ).select_related('category')
+                product_name=target_name
+            )
 
             # Build list of matching product representations
             matched_items = []
@@ -365,16 +381,16 @@ class RecommendationService:
                 matched_items.append({
                     'product_id': p.product_id,
                     'product_name': p.product_name,
-                    'sku': p.sku,
-                    'selling_price': p.selling_price,
-                    'base_price': p.base_price,
-                    'category_id': p.category.category_id if p.category else None,
-                    'category_name': p.category.category_name if p.category else None,
-                    'gender': p.gender,
-                    'color': p.color,
-                    'size': p.size,
-                    'material': p.material,
-                    'is_active': p.is_active
+                    'sku': getattr(p, 'sku', None),
+                    'selling_price': int(p.selling_price) if p.selling_price else 0,
+                    'base_price': int(p.base_price) if p.base_price else 0,
+                    'category_id': getattr(p, 'sub_category', None) or getattr(p, 'main_category', None),
+                    'category_name': getattr(p, 'main_category', None),
+                    'gender': getattr(p, 'main_category', None),
+                    'color': None,
+                    'size': None,
+                    'material': None,
+                    'is_active': (p.available_quantity or 0) > 0
                 })
 
             primary_product = matched_items[0] if matched_items else None

@@ -33,7 +33,7 @@ export default function ProductListingPage({ type }) {
 
   // Active filters
   const [selectedCategory, setSelectedCategory] = useState(searchParams.get('category') || 'ALL');
-  const initialSearch = searchParams.get('search') || '';
+  const currentSearch = (searchParams.get('search') || '').trim();
   const [selectedSort, setSelectedSort] = useState('newest');
   const [onlyInStock, setOnlyInStock] = useState(false);
   const [maxPrice, setMaxPrice] = useState('');
@@ -92,14 +92,14 @@ export default function ProductListingPage({ type }) {
       sort: mapSortParam(selectedSort),
     };
     if (selectedCategory && selectedCategory !== 'ALL') params.category = selectedCategory;
-    if (initialSearch) params.search = initialSearch;
+    if (currentSearch) params.search = currentSearch;
     if (onlyInStock) params.in_stock = 'true';
     if (maxPrice) params.max_price = maxPrice;
     if (sectionType === 'new-in') return getNewArrivals(20, params);
     if (sectionType === 'trending') return getTrending(20, params);
     if (sectionType === 'sale') return getSale(20, params);
     return getProducts(params);
-  }, [selectedCategory, initialSearch, onlyInStock, maxPrice, selectedSort, sectionType]);
+  }, [selectedCategory, currentSearch, onlyInStock, maxPrice, selectedSort, sectionType]);
 
   useEffect(() => {
     const seq = ++reqSeq.current;

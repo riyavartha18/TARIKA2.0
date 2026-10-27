@@ -1,0 +1,390 @@
+/**
+ * Editorial Categories for TARIKA Haute Boutique
+ * Matches the editorial presentation of the boutique storefront with curated
+ * titles, taglines, imagery, and mapping keys for backend queries.
+ * Differentiates Men's and Women's footwear.
+ */
+
+export const EDITORIAL_DEPARTMENTS = [
+  { id: 'all', label: 'All Collections' },
+  { id: 'women', label: "Women's Fashion" },
+  { id: 'men', label: "Men's Fashion" },
+  { id: 'accessories', label: 'Accessories' },
+];
+
+export const EDITORIAL_CATEGORIES = [
+  // =========================================================================
+  // WOMEN'S FASHION
+  // =========================================================================
+  {
+    id: 'dresses',
+    department: 'women',
+    dbCategory: 'The Dress Story',
+    creativeTitle: 'THE DRESS STORY',
+    tag: 'DRESSES',
+    subtitle: 'Dresses for every you.',
+    bannerQuote: 'Same dress. A different you.',
+    image: 'https://images.unsplash.com/photo-1572804013309-59a88b7e92f1?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: true,
+    subcategories: [
+      'All Dresses',
+      'Maxi Dresses',
+      'Midi Dresses',
+      'Mini Dresses',
+      'Party Dresses',
+      'Casual Dresses',
+      'Gowns',
+      'Jumpsuits',
+    ],
+  },
+  {
+    id: 'tops',
+    department: 'women',
+    dbCategory: 'Top Stories',
+    creativeTitle: 'TOP STORIES',
+    tag: 'TOPS',
+    subtitle: 'Tops that speak you.',
+    bannerQuote: 'Unapologetic silhouettes. Effortless you.',
+    image: 'https://images.unsplash.com/photo-1564257631407-4deb1f99d992?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: false,
+    subcategories: [
+      'All Tops',
+      'Crop Tops',
+      'Blouses',
+      'Tank Tops',
+      'Camisoles',
+      'Tunics',
+      'Party Tops',
+    ],
+  },
+  {
+    id: 'bottom-wear',
+    department: 'women',
+    dbCategory: 'Bottom Line',
+    creativeTitle: 'BOTTOM LINE',
+    tag: 'BOTTOM WEAR',
+    subtitle: 'Foundations for your looks.',
+    bannerQuote: 'Tailored drape. Architectural lines.',
+    image: 'https://images.unsplash.com/photo-1509551388413-e18d0ac5d495?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Bottoms',
+      'Trousers',
+      'Palazzos',
+      'Pants',
+      'Skirts',
+      'Leggings',
+      'Shorts',
+      'Culottes',
+    ],
+  },
+  {
+    id: 'jeans',
+    department: 'women',
+    dbCategory: 'Denim Diaries',
+    creativeTitle: 'DENIM DIARIES',
+    tag: 'JEANS',
+    subtitle: 'Denim for every mood.',
+    bannerQuote: 'Good denim, better days.',
+    scriptOverlay: 'Good Denim Better Days',
+    image: 'https://images.unsplash.com/photo-1541099649105-f69ad21f3246?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Denim',
+      'Wide-Leg Jeans',
+      'Straight Fit',
+      'Skinny Jeans',
+      'Jeggings',
+      'High Waist',
+      'Bootcut',
+    ],
+  },
+  {
+    id: 'jackets',
+    department: 'women',
+    dbCategory: 'The Layer Room',
+    creativeTitle: 'THE LAYER ROOM',
+    tag: 'JACKETS',
+    subtitle: 'Layers that complete the look.',
+    bannerQuote: 'Layer your story. Define your presence.',
+    scriptOverlay: 'Layers Your Story',
+    image: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Layers',
+      'Jackets',
+      'Blazers',
+      'Shrugs',
+      'Coats',
+      'Sweaters',
+      'Sweatshirts',
+      'Cardigans',
+    ],
+  },
+  {
+    id: 'shirts',
+    department: 'women',
+    dbCategory: 'Shirt Theory',
+    creativeTitle: 'SHIRT THEORY',
+    tag: 'SHIRTS',
+    subtitle: 'Shirts for new perspectives.',
+    bannerQuote: 'Crisp poplins. Everyday poetry.',
+    image: 'https://images.unsplash.com/photo-1598033129183-c4f50c736f10?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Shirts',
+      'Button-Downs',
+      'Casual Shirts',
+      'Formal Shirts',
+      'Oversized Shirts',
+      'Printed Shirts',
+    ],
+  },
+  {
+    id: 'ethnic-edit',
+    department: 'women',
+    isMulti: true,
+    dbCategory: 'Ethnic Edit',
+    creativeTitle: 'ETHNIC EDIT',
+    subtitle: 'Tradition, reimagined.',
+    bannerQuote: 'Heritage looms. Contemporary grace.',
+    layout: 'multi',
+    subcategories: [
+      'All Ethnic',
+      'Kurtis',
+      'Sarees',
+      'Ethnic Wear',
+      'Lehengas',
+      'Dupattas',
+      'Anarkali',
+    ],
+    items: [
+      {
+        name: 'Kurtis',
+        dbCategory: 'Kurtis',
+        image: 'https://images.unsplash.com/photo-1610030469983-98e550d6193c?w=600&auto=format&fit=crop&q=85',
+      },
+      {
+        name: 'Sarees',
+        dbCategory: 'Sarees',
+        image: 'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?w=600&auto=format&fit=crop&q=85',
+      },
+      {
+        name: 'Ethnic Wear',
+        dbCategory: 'Ethnic Wear',
+        image: 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?w=600&auto=format&fit=crop&q=85',
+      },
+    ],
+  },
+  {
+    id: 'sole-studio',
+    department: 'women',
+    dbCategory: "Women's Footwear",
+    creativeTitle: 'SOLE STUDIO',
+    tag: 'WOMEN’S FOOTWEAR',
+    subtitle: 'Elegance in every step.',
+    bannerQuote: 'Graceful silhouettes. Walk with poise.',
+    image: 'https://images.unsplash.com/photo-1543163521-1bf539c55dd2?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: true,
+    subcategories: [
+      'All Women\'s Footwear',
+      'Fashion Sandals',
+      'Heels',
+      'Flats',
+      'Wedges',
+      'Boots',
+      'Casual Shoes',
+    ],
+  },
+
+  // =========================================================================
+  // MEN'S FASHION
+  // =========================================================================
+  {
+    id: 'gentlemans-edit',
+    department: 'men',
+    dbCategory: 'The Gentleman’s Edit',
+    creativeTitle: 'THE GENTLEMAN’S EDIT',
+    tag: 'TAILORED',
+    subtitle: 'Classic never goes out of style.',
+    bannerQuote: 'Structured elegance. Undeniable presence.',
+    image: 'https://images.unsplash.com/photo-1507679799987-c73779587ccf?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: false,
+    subcategories: [
+      'All Tailored',
+      'Blazers',
+      'Suits',
+      'Trousers',
+      'Formal Trousers',
+      'Waistcoats',
+    ],
+  },
+  {
+    id: 'shirt-society',
+    department: 'men',
+    dbCategory: 'The Shirt Society',
+    creativeTitle: 'THE SHIRT SOCIETY',
+    tag: 'MEN’S SHIRTS',
+    subtitle: 'Every detail makes the look.',
+    bannerQuote: 'Fine tailoring. Impeccable finish.',
+    image: 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Shirts',
+      'Casual Shirts',
+      'Formal Shirts',
+      'Slim Fit',
+      'Checks & Stripes',
+      'Cotton Shirts',
+    ],
+  },
+  {
+    id: 'denim-district',
+    department: 'men',
+    dbCategory: 'Denim District',
+    creativeTitle: 'DENIM DISTRICT',
+    tag: 'MEN’S DENIM',
+    subtitle: 'Made for your kind of cool.',
+    bannerQuote: 'Rugged craftsmanship. Everyday comfort.',
+    image: 'https://images.unsplash.com/photo-1542272604-780c96856592?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Denim',
+      'Slim Fit Jeans',
+      'Regular Fit',
+      'Stretch Denim',
+      'Black Denim',
+      'Blue Denim',
+    ],
+  },
+  {
+    id: 'sole-stories',
+    department: 'men',
+    dbCategory: 'Sole Stories',
+    creativeTitle: 'SOLE STORIES',
+    tag: 'MEN’S FOOTWEAR',
+    subtitle: 'Every step, your signature.',
+    bannerQuote: 'Crafted stride. Grounded perfection.',
+    image: 'https://images.unsplash.com/photo-1614252235316-8c857d38b5f4?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: true,
+    subcategories: [
+      'All Men\'s Footwear',
+      'Casual Shoes',
+      'Loafers',
+      'Formal Shoes',
+      'Boots',
+      'Sneakers',
+      'Sandals',
+    ],
+  },
+
+  // =========================================================================
+  // ACCESSORIES
+  // =========================================================================
+  {
+    id: 'accessory-edit',
+    department: 'accessories',
+    dbCategory: 'The Accessory Edit',
+    creativeTitle: 'THE ACCESSORY EDIT',
+    tag: 'JEWELLERY',
+    subtitle: 'It’s the little things that make the look.',
+    bannerQuote: 'Timeless sparkle. Delicate moments.',
+    image: 'https://images.unsplash.com/photo-1611652022419-a9419f74343d?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-left',
+    isArch: false,
+    subcategories: [
+      'All Jewellery',
+      'Necklaces',
+      'Earrings',
+      'Rings',
+      'Bangles',
+      'Bracelets',
+      'Pendants',
+    ],
+  },
+  {
+    id: 'style-accessories',
+    department: 'accessories',
+    isMulti: true,
+    dbCategory: 'The Finishing Touch',
+    creativeTitle: 'STYLE & ACCESSORIES',
+    tag: 'ACCENTS',
+    subtitle: 'The details that do more.',
+    bannerQuote: 'The finishing touch that speaks volumes.',
+    layout: 'multi',
+    subcategories: [
+      'All Accents',
+      'Watches',
+      'Belts',
+      'Sunglasses',
+      'Scarves',
+      'Caps & Hats',
+      'Hair Accessories',
+    ],
+    items: [
+      {
+        name: 'Handbags',
+        dbCategory: 'Carry the Look',
+        image: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?w=600&auto=format&fit=crop&q=85',
+      },
+      {
+        name: 'Footwear',
+        dbCategory: "Women's Footwear",
+        image: 'https://images.unsplash.com/photo-1543163521-1bf539c55dd2?w=600&auto=format&fit=crop&q=85',
+      },
+      {
+        name: 'Jewellery',
+        dbCategory: 'The Accessory Edit',
+        image: 'https://images.unsplash.com/photo-1611652022419-a9419f74343d?w=600&auto=format&fit=crop&q=85',
+      },
+    ],
+  },
+  {
+    id: 'carry-the-look',
+    department: 'accessories',
+    dbCategory: 'Carry the Look',
+    creativeTitle: 'CARRY THE LOOK',
+    tag: 'BAGS & WALLETS',
+    subtitle: 'Little details. Big statements.',
+    bannerQuote: 'Structure meets function in every carry.',
+    image: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?w=800&auto=format&fit=crop&q=85',
+    layout: 'media-right',
+    isArch: false,
+    subcategories: [
+      'All Bags',
+      'Handbags',
+      'Wallets',
+      'Totes',
+      'Backpacks',
+      'Clutches',
+      'Sling Bags',
+    ],
+  },
+];
+
+/** Lookup map for fast matching by any case/alias */
+export const CATEGORY_BY_NAME_MAP = {};
+EDITORIAL_CATEGORIES.forEach((cat) => {
+  const normTitle = cat.creativeTitle.toLowerCase();
+  const normDb = cat.dbCategory.toLowerCase();
+  CATEGORY_BY_NAME_MAP[normTitle] = cat;
+  CATEGORY_BY_NAME_MAP[normDb] = cat;
+  CATEGORY_BY_NAME_MAP[cat.id] = cat;
+  if (cat.items) {
+    cat.items.forEach((item) => {
+      CATEGORY_BY_NAME_MAP[item.name.toLowerCase()] = cat;
+      CATEGORY_BY_NAME_MAP[item.dbCategory.toLowerCase()] = cat;
+    });
+  }
+});
