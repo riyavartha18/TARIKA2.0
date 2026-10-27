@@ -247,22 +247,24 @@ class SupabaseAuthService:
 
     @classmethod
     def verify_customer_credentials(cls, email, password):
-        """Authenticate a customer against public.customers.
+        """Authenticate a customer against public.customers (read-only).
 
         public.customers.password holds two kinds of values: bcrypt hashes
-        written by this service (pgcrypto crypt/gen_salt) and legacy plain
-        text carried over from the imported retail dataset. The scheme is
-        detected from the stored value and both branches are evaluated inside
-        PostgreSQL, so a stored password - hash or plain - is never fetched
-        into the application or returned to the browser.
+        written by signup / password changes (pgcrypto crypt/gen_salt) and
+        legacy plain text carried over from the imported retail dataset. The
+        scheme is detected from the stored value and both branches are
+        evaluated inside PostgreSQL, so a stored password - hash or plain - is
+        never fetched into the application or returned to the browser.
 
         `crypt()` is only ever called on a bcrypt value; feeding it a plain-
         text value would make pgcrypto silently fall back to DES, which
         truncates the secret and could never match the stored string.
 
-        A legacy plain-text row that authenticates successfully is re-hashed
-        with bcrypt immediately (see _upgrade_customer_password), so plain
-        text stops being the authentication secret after first sign-in.
+        Signing in is a read and never rewrites the stored credential. Legacy
+        plain-text rows keep authenticating through the plain-text branch and
+        are converted to bcrypt off-band by the idempotent
+        `migrate_customer_passwords` command, so logging in cannot surprise a
+        customer by turning their copied password into a hash.
         """
         cls._check_password_shape(password)
         norm = cls._normalize_email(email)
@@ -276,8 +278,7 @@ class SupabaseAuthService:
                              WHEN {BCRYPT_PREFIX_SQL}
                                THEN (password = crypt(%s, password))
                              ELSE (password = %s)
-                           END AS password_ok,
-                           COALESCE({BCRYPT_PREFIX_SQL}, TRUE) AS is_bcrypt
+                           END AS password_ok
                     FROM public.customers
                     WHERE LOWER(email) = LOWER(%s)
                     LIMIT 1;
@@ -293,10 +294,7 @@ class SupabaseAuthService:
             # endpoint does not leak which emails are registered.
             raise AuthenticationFailed("Invalid email or password.")
 
-        customer_id, customer_name, gender, cust_email, _, is_bcrypt = row
-
-        if not is_bcrypt:
-            cls._upgrade_customer_password(customer_id, password)
+        customer_id, customer_name, gender, cust_email, _password_ok = row
 
         return {
             'customer_id': str(customer_id),
@@ -304,39 +302,6 @@ class SupabaseAuthService:
             'gender': gender,
             'email': cust_email,
         }
-
-    @classmethod
-    def _upgrade_customer_password(cls, customer_id, password):
-        """Replace a verified legacy plain-text password with a bcrypt hash.
-
-        The hash is built by pgcrypto from the password that was just
-        verified, so the plain text is never read out of the database. The
-        extra `AND password = %s` predicate makes the write compare-and-set:
-        if the row changed concurrently, nothing is overwritten.
-
-        A failure here is not fatal - the credentials already matched - and
-        the row simply stays eligible for the batched
-        `migrate_customer_passwords` command.
-        """
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE public.customers
-                    SET password = crypt(%s, gen_salt('bf', %s))
-                    WHERE customer_id = %s
-                      AND password IS NOT NULL
-                      AND left(password, 4) NOT IN ('$2a$', '$2b$', '$2y$')
-                      AND password = %s;
-                    """,
-                    [password, BCRYPT_SALT_COST, customer_id, password],
-                )
-        except DatabaseError as exc:
-            # Log the exception class only; never the message or the SQL.
-            logger.error(
-                "customer password upgrade failed for a customer_id (database error: %s)",
-                type(exc).__name__,
-            )
 
     @classmethod
     def login(cls, email_or_username, password):

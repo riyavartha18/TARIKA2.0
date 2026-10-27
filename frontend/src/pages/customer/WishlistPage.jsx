@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Heart, ShoppingBag, Trash2, ArrowRight, Sparkles, Check, AlertCircle } from 'lucide-react';
+import { Heart, ShoppingBag, Trash2, ArrowRight, AlertCircle } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
 import { getProductPricing } from '../../utils/pricing';
 
@@ -33,20 +33,6 @@ export default function WishlistPage() {
     }
     setMovingId(null);
   };
-
-  // Group saved items by their product category, mirroring the Warehouse
-  // portal's category-wise layout (real category_name, alphabetical order).
-  const groupedWishlist = useMemo(() => {
-    const map = {};
-    wishlistItems.forEach((item) => {
-      const catName = item.category_name || 'Uncategorized';
-      if (!map[catName]) {
-        map[catName] = { category_name: catName, items: [] };
-      }
-      map[catName].items.push(item);
-    });
-    return Object.values(map).sort((a, b) => a.category_name.localeCompare(b.category_name));
-  }, [wishlistItems]);
 
   return (
     <div style={{ paddingBottom: '4rem' }}>
@@ -124,56 +110,15 @@ export default function WishlistPage() {
           ))}
         </div>
       ) : wishlistItems.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-          {groupedWishlist.map((category) => (
-            <section
-              key={category.category_name}
-              style={{
-                background: '#FFFFFF',
-                borderRadius: '20px',
-                padding: '1.75rem',
-                border: '1px solid rgba(216, 114, 126, 0.18)',
-                boxShadow: '0 8px 30px rgba(184, 80, 94, 0.04)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '1.25rem',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', paddingBottom: '1rem', borderBottom: '1.5px solid #F0E2E0' }}>
-                <div
-                  style={{
-                    width: '42px',
-                    height: '42px',
-                    borderRadius: '12px',
-                    background: 'linear-gradient(135deg, #FBF1F0 0%, #F7E4E2 100%)',
-                    border: '1px solid rgba(216, 114, 126, 0.2)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: '#B8505E',
-                    fontWeight: 700,
-                  }}
-                >
-                  {category.category_name ? category.category_name[0].toUpperCase() : 'C'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                  <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.45rem', fontWeight: 700, margin: 0, color: '#1F191B' }}>
-                    {category.category_name}
-                  </h3>
-                  <span style={{ fontSize: '0.75rem', fontWeight: 700, padding: '0.2rem 0.65rem', borderRadius: '9999px', backgroundColor: 'rgba(216, 114, 126, 0.12)', color: '#B8505E' }}>
-                    {category.items.length} {category.items.length === 1 ? 'Item' : 'Items'}
-                  </span>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-                  gap: '1.75rem',
-                }}
-              >
-                {category.items.map((item) => {
+        /* All saved products displayed together, without category grouping. */
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+            gap: '1.75rem',
+          }}
+        >
+          {wishlistItems.map((item) => {
             const { basePrice, currentPrice, isOnSale } = getProductPricing(item);
             // Driven by the backend's stock flag: `total_stock` is 0 both for a
             // sold-out product and for one whose stock is simply not recorded.
@@ -305,11 +250,8 @@ export default function WishlistPage() {
                   </button>
                 </div>
               </div>
-                );
-              })}
-              </div>
-            </section>
-          ))}
+            );
+          })}
         </div>
       ) : (
         /* Empty State */

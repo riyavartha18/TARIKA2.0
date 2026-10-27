@@ -28,7 +28,7 @@ export default function CheckoutPage() {
     total,
     bagLoading,
     addToast,
-    refreshCustomerData,
+    clearCartLocal,
   } = useCustomer();
 
   // Form State
@@ -90,8 +90,10 @@ export default function CheckoutPage() {
       const res = await createOrder(token, payload);
 
       if (res.success && res.order) {
-        if (refreshCustomerData) {
-          await refreshCustomerData();
+        // The checkout transaction already removed the ordered rows from the
+        // Neon cart, so empty the bag locally instead of refetching it.
+        if (clearCartLocal) {
+          clearCartLocal();
         }
         if (addToast) {
           addToast('Your order has been placed successfully!', 'success');
@@ -974,10 +976,6 @@ export default function CheckoutPage() {
                   </>
                 )}
               </button>
-
-              <p style={{ margin: 0, fontSize: '0.72rem', color: '#9E8F94', textAlign: 'center' }}>
-                🔒 Protected by 256-Bit SSL Encryption • Authentic Quality Guaranteed
-              </p>
 
               {/* Atelier Perks */}
               <div

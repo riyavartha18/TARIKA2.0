@@ -780,20 +780,6 @@ export default function MyOrdersPage() {
 
                 {/* 2. Product Name, Quantity & Pricing */}
                 <div style={{ flex: 1, minWidth: '220px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <span
-                      style={{
-                        fontSize: '0.72rem',
-                        fontWeight: 700,
-                        color: '#8E3642',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.08em',
-                      }}
-                    >
-                      {item.sku}
-                    </span>
-                  </div>
-
                   <h3
                     onClick={() => item.productId && openProductDetail && openProductDetail(item.productId)}
                     title={item.productId ? 'View product details' : ''}

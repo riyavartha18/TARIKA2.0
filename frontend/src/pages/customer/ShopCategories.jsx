@@ -1,130 +1,33 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ChevronRight,
   Sparkles,
   Tag,
   Check,
-  ArrowRight,
-  ArrowDown,
-  Flower2,
-  Shirt,
   RotateCcw
 } from 'lucide-react';
 import ProductCard from '../../components/customer/ProductCard';
 import { getCategories, getProducts } from '../../services/api';
 
-// Creative Presentation metadata matching the attached reference image
-const CREATIVE_CATEGORIES = [
-  {
-    id: 'dresses',
-    dbCategory: 'Dresses',
-    creativeTitle: 'THE DRESS STORY',
-    tag: 'DRESSES',
-    subtitle: 'Dresses for every you.',
-    bannerQuote: 'Same dress. A different you.',
-    image: 'https://images.unsplash.com/photo-1572804013309-59a88b7e92f1?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-left',
-    isArch: true,
-    subcategories: ['All Dresses', 'Mini Dresses', 'Midi Dresses', 'Maxi Dresses', 'Party Dresses', 'Formal Dresses', 'Casual Dresses']
-  },
-  {
-    id: 'tops',
-    dbCategory: 'Tops',
-    creativeTitle: 'TOP STORIES',
-    tag: 'TOPS',
-    subtitle: 'Tops that speak you.',
-    bannerQuote: 'Unapologetic silhouettes. Effortless you.',
-    image: 'https://images.unsplash.com/photo-1564257631407-4deb1f99d992?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-left',
-    isArch: false,
-    subcategories: ['All Tops', 'Crop Tops', 'Corset Blouses', 'Satin Camisoles', 'Ribbed Knits', 'Party Tops']
-  },
-  {
-    id: 'bottom-wear',
-    dbCategory: 'Bottom Wear',
-    creativeTitle: 'BOTTOM LINE',
-    tag: 'BOTTOM WEAR',
-    subtitle: 'Foundations for your looks.',
-    bannerQuote: 'Tailored drape. Architectural lines.',
-    image: 'https://images.unsplash.com/photo-1509551388413-e18d0ac5d495?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-right',
-    isArch: false,
-    subcategories: ['All Bottoms', 'Wide-Leg Trousers', 'Pleated Slacks', 'Palazzos', 'High-Rise Pants', 'Formal Trousers']
-  },
-  {
-    id: 'jeans',
-    dbCategory: 'Jeans',
-    creativeTitle: 'DENIM DIARIES',
-    tag: 'JEANS',
-    subtitle: 'Denim for every mood.',
-    bannerQuote: 'Good denim, better days.',
-    scriptOverlay: 'Good Denim Better Days',
-    image: 'https://images.unsplash.com/photo-1541099649105-f69ad21f3246?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-right',
-    isArch: false,
-    subcategories: ['All Jeans', 'Wide-Leg Jeans', 'Straight Fit', 'Bootcut Jeans', 'Skinny Jeans', 'Relaxed Fit']
-  },
-  {
-    id: 'jackets',
-    dbCategory: 'Jackets',
-    creativeTitle: 'THE LAYER ROOM',
-    tag: 'JACKETS',
-    subtitle: 'Jackets to complete the look.',
-    bannerQuote: 'Layer your story. Define your presence.',
-    scriptOverlay: 'Layers Your Story',
-    image: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-right',
-    isArch: false,
-    subcategories: ['All Jackets', 'Tailored Blazers', 'Leather Jackets', 'Bombers', 'Denim Jackets', 'Trench Coats']
-  },
-  {
-    id: 'shirts',
-    dbCategory: 'Shirts',
-    creativeTitle: 'SHIRT THEORY',
-    tag: 'SHIRTS',
-    subtitle: 'Shirts for new perspectives.',
-    bannerQuote: 'Crisp poplins. Everyday poetry.',
-    image: 'https://images.unsplash.com/photo-1598033129183-c4f50c736f10?w=800&auto=format&fit=crop&q=85',
-    layout: 'media-right',
-    isArch: false,
-    subcategories: ['All Shirts', 'Oversized Poplin', 'Linen Shirts', 'Silk Button-Downs', 'Formal Shirts', 'Casual Shirts']
-  },
-  {
-    id: 'ethnic-edit',
-    isMulti: true,
-    creativeTitle: 'ETHNIC EDIT',
-    subtitle: 'Tradition reimagined for today.',
-    bannerQuote: 'Heritage looms. Contemporary grace.',
-    layout: 'multi',
-    items: [
-      { name: 'Kurtis', dbCategory: 'Kurtis', image: 'https://images.unsplash.com/photo-1610030469983-98e550d6193c?w=600&auto=format&fit=crop&q=85' },
-      { name: 'Sarees', dbCategory: 'Sarees', image: 'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?w=600&auto=format&fit=crop&q=85' },
-      { name: 'Ethnic Wear', dbCategory: 'Ethnic Wear', image: 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?w=600&auto=format&fit=crop&q=85' }
-    ]
-  },
-  {
-    id: 'style-accessories',
-    isMulti: true,
-    creativeTitle: 'STYLE & ACCESSORIES',
-    subtitle: 'The details that do more.',
-    bannerQuote: 'The finishing touch that speaks volumes.',
-    layout: 'multi',
-    items: [
-      { name: 'Handbags', dbCategory: 'Handbags', image: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?w=600&auto=format&fit=crop&q=85' },
-      { name: 'Footwear', dbCategory: 'Footwear', image: 'https://images.unsplash.com/photo-1543163521-1bf539c55dd2?w=600&auto=format&fit=crop&q=85' },
-      { name: 'Accessories', dbCategory: 'Accessories', image: 'https://images.unsplash.com/photo-1611652022419-a9419f74343d?w=600&auto=format&fit=crop&q=85' }
-    ]
-  }
-];
+// Neutral banner copy used when a category carries no creative metadata.
+// Category names, counts and subcategories all come from the database.
+const DEFAULT_SUBTITLE = 'Curated with refined craftsmanship for the modern wardrobe.';
+const FALLBACK_CATEGORY_IMAGE =
+  'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=600&auto=format&fit=crop&q=80';
+
+const normalizeName = (value) => String(value || '').trim().toLowerCase();
 
 export default function ShopCategories() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialCategory = searchParams.get('category') || 'Dresses';
   const initialSearch = searchParams.get('search') || '';
 
   const [categories, setCategories] = useState([]);
-  const [selectedCategory, setSelectedCategory] = useState(initialCategory);
+  // '' until the database category list has loaded, so the page can never
+  // render or query an invented category.
+  const [selectedCategory, setSelectedCategory] = useState(
+    searchParams.get('category') || ''
+  );
   const [rawProducts, setRawProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [productsError, setProductsError] = useState(null);
@@ -147,7 +50,8 @@ export default function ShopCategories() {
   // Guards against stale responses when filters change rapidly.
   const reqSeq = useRef(0);
 
-  // Fetch all customer-facing categories, strictly excluding Kids Wear
+  // Customer-facing categories straight from the database (products
+  // main_category GROUP BY), strictly excluding Kids Wear.
   useEffect(() => {
     async function fetchCatList() {
       const res = await getCategories();
@@ -161,14 +65,47 @@ export default function ShopCategories() {
     fetchCatList();
   }, []);
 
-  // When query param changes in URL
+  // Ensure the active category is always a real database category: keep the
+  // URL selection when it matches, otherwise fall back to the first DB one.
   useEffect(() => {
-    const urlCategory = searchParams.get('category');
-    if (urlCategory && urlCategory !== selectedCategory) {
-      setSelectedCategory(urlCategory);
+    if (!categories.length) return;
+    const matchesDb = categories.some(
+      (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
+    );
+    if (matchesDb) {
+      const canonical = categories.find(
+        (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
+      ).category_name;
+      if (canonical !== selectedCategory) setSelectedCategory(canonical);
+    } else {
+      setSelectedCategory(categories[0].category_name);
       setActiveSubcategory('All');
     }
-  }, [searchParams, selectedCategory]);
+  }, [categories, selectedCategory]);
+
+  // The DB entry for the active category, with its real sub_categories.
+  const activeCategory = useMemo(
+    () =>
+      categories.find(
+        (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
+      ) || null,
+    [categories, selectedCategory]
+  );
+
+  // When a query param changes in URL. Only real database categories are
+  // applied, so an old bookmark (e.g. ?category=Dresses) can never re-enter
+  // the selection and fight the reconciliation effect above.
+  useEffect(() => {
+    const urlCategory = searchParams.get('category');
+    if (!urlCategory || urlCategory === selectedCategory || !categories.length) return;
+    const match = categories.find(
+      (c) => normalizeName(c.category_name) === normalizeName(urlCategory)
+    );
+    if (match) {
+      setSelectedCategory(match.category_name);
+      setActiveSubcategory('All');
+    }
+  }, [searchParams, selectedCategory, categories]);
 
   // Build the server query from the currently active filters.
   const buildProductParams = useCallback((pageNum) => {
@@ -192,28 +129,22 @@ export default function ShopCategories() {
     if (onlySale) params.on_sale = 'true';
     if (selectedSize !== 'All') params.size = selectedSize;
     if (selectedColor !== 'All') params.color = selectedColor;
-    if (activeSubcategory && !activeSubcategory.startsWith('All')) {
-      const selectedDbCategory = categories.find(
-        (category) => (category.category_name || category.name || '').toLowerCase() === selectedCategory.toLowerCase()
-      );
-      const isRealSubcategory = (selectedDbCategory?.sub_categories || []).some(
+    // Subcategory filtering only ever uses real database sub_category values.
+    if (activeSubcategory && activeSubcategory !== 'All' && activeCategory) {
+      const isRealSubcategory = (activeCategory.sub_categories || []).some(
         (subcategory) => subcategory.sub_category === activeSubcategory
       );
       if (isRealSubcategory) {
         params.sub_category = activeSubcategory;
-      } else {
-        const keyword = activeSubcategory
-          .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Kurtis|Sarees|Ethnic Wear|Handbags|Footwear|Accessories)/gi, '')
-          .trim();
-        if (keyword) params.subcategory_search = keyword;
       }
     }
     return params;
   }, [selectedCategory, initialSearch, onlyInStock, maxPriceFilter, onlySale,
-    selectedSize, selectedColor, activeSubcategory, categories, selectedSort]);
+    selectedSize, selectedColor, activeSubcategory, activeCategory, selectedSort]);
 
   // Fetch the first page whenever the active filters change.
   useEffect(() => {
+    if (!selectedCategory) return;
     const seq = ++reqSeq.current;
     async function fetchCategoryProducts() {
       setLoadingProducts(true);
@@ -242,7 +173,7 @@ export default function ShopCategories() {
     }
 
     fetchCategoryProducts();
-  }, [buildProductParams]);
+  }, [buildProductParams, selectedCategory]);
 
   // Append the next page without duplicating already-loaded products.
   const handleLoadMore = async () => {
@@ -298,265 +229,23 @@ export default function ShopCategories() {
     }
   };
 
-  // Find active creative category metadata
-  const activeCreativeMeta = CREATIVE_CATEGORIES.find(
-    (c) =>
-      c.dbCategory?.toLowerCase() === selectedCategory?.toLowerCase() ||
-      c.items?.some((it) => it.dbCategory.toLowerCase() === selectedCategory?.toLowerCase())
-  );
+  const activeCreativeTitle = selectedCategory ? selectedCategory.toUpperCase() : '';
+  const activeSubtitle = DEFAULT_SUBTITLE;
+  const activeBannerQuote = activeCategory?.image
+    ? 'Curated from the latest drops.'
+    : 'Chosen from the real collection.';
 
-  const activeCreativeTitle = activeCreativeMeta?.creativeTitle || selectedCategory.toUpperCase();
-  const activeSubtitle = activeCreativeMeta?.subtitle || 'Curated with refined craftsmanship for the modern wardrobe.';
-  const activeBannerQuote = activeCreativeMeta?.bannerQuote || 'Same dress. A different you.';
-
-  // Determine subcategories
-  let activeSubcategories = activeCreativeMeta?.subcategories;
-  if (!activeSubcategories) {
-    if (activeCreativeMeta?.isMulti) {
-      activeSubcategories = [
-        `All ${selectedCategory}`,
-        `New ${selectedCategory}`,
-        `Classic ${selectedCategory}`,
-        `Embroidered ${selectedCategory}`,
-        `Atelier ${selectedCategory}`,
-      ];
-    } else {
-      activeSubcategories = [
-        `All ${selectedCategory}`,
-        `Classic ${selectedCategory}`,
-        `Casual ${selectedCategory}`,
-        `Formal ${selectedCategory}`,
-        `Atelier ${selectedCategory}`,
-      ];
-    }
-  }
+  // Sidebar subcategory list built ONLY from database sub_category values.
+  const activeSubcategories = useMemo(() => {
+    if (!activeCategory) return [];
+    return ['All', ...(activeCategory.sub_categories || []).map((s) => s.sub_category)];
+  }, [activeCategory]);
 
   return (
     <div style={{ paddingBottom: '4rem' }}>
       {/* =================================================================
-          1. CREATIVE CATEGORIES LANDING SECTION (Matching Reference Image)
-         ================================================================= */}
-      <section className="cat-editorial-landing">
-        {/* Editorial Masthead */}
-        <div className="cat-editorial-masthead">
-          <div className="cat-masthead-left">
-            <div className="cat-masthead-eyebrow">EXPLORE BY STYLE</div>
-            <h1 className="cat-masthead-main-title">CATEGORIES</h1>
-            <p className="cat-masthead-script">Find your style. Tell your story..</p>
-            <div className="cat-masthead-meta-tags">
-              - CURATED LOOKS &nbsp;/&nbsp; TIMELESS TRENDS &nbsp;/&nbsp; MADE FOR YOU
-            </div>
-          </div>
-
-          {/* Right Accent with Arched Floral Photo & Vertical Motto */}
-          <div className="cat-masthead-right">
-            <div className="cat-masthead-quote-wrap">
-              <p className="cat-masthead-quote">
-                More than just fashion,
-                <br />
-                it's a new chapter every day.
-              </p>
-              <div
-                style={{
-                  width: '32px',
-                  height: '1.5px',
-                  backgroundColor: '#D8727E',
-                  margin: '4px 0',
-                }}
-              />
-            </div>
-
-            <div className="cat-masthead-arch-art">
-              <img
-                src="https://images.unsplash.com/photo-1518895949257-7621c3c786d7?w=400&auto=format&fit=crop&q=80"
-                alt="Botanical floral silhouette"
-                loading="lazy"
-              />
-            </div>
-
-            <div className="cat-masthead-motto-stack">
-              <span>WEAR</span>
-              <span>EXPLORE</span>
-              <span>EXPRESS</span>
-              <span>REPEAT</span>
-            </div>
-          </div>
-        </div>
-
-        {/* 4x2 Editorial Category Cards Grid */}
-        <div className="cat-editorial-grid">
-          {CREATIVE_CATEGORIES.map((cat, index) => {
-            if (cat.isMulti) {
-              // Multi-Item Card: ETHNIC EDIT or STYLE & ACCESSORIES
-              const isAnySelected = cat.items.some(
-                (sub) => selectedCategory.toLowerCase() === sub.dbCategory.toLowerCase()
-              );
-
-              return (
-                <div
-                  key={cat.id}
-                  className="cat-card-interactive"
-                  style={{
-                    animationDelay: `${index * 80}ms`,
-                    borderColor: isAnySelected ? '#D8727E' : 'rgba(216, 114, 126, 0.2)',
-                    boxShadow: isAnySelected
-                      ? '0 12px 30px rgba(216, 114, 126, 0.2)'
-                      : '0 6px 25px rgba(184, 80, 94, 0.05)',
-                    cursor: 'default',
-                  }}
-                >
-                  <div className="cat-multi-card-layout">
-                    {/* Header */}
-                    <div className="cat-multi-card-header">
-                      {/* Corner SVG flourishes */}
-                      {cat.id === 'ethnic-edit' ? (
-                        <svg
-                          className="cat-multi-corner-accent"
-                          viewBox="0 0 100 100"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                        >
-                          <path
-                            d="M85 10C65 20 50 45 45 75M85 10C75 35 78 58 88 75M85 10C55 18 30 35 18 65"
-                            stroke="#D8727E"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            opacity="0.4"
-                          />
-                        </svg>
-                      ) : (
-                        <svg
-                          className="cat-multi-corner-accent"
-                          viewBox="0 0 100 100"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                        >
-                          <circle cx="70" cy="30" r="24" stroke="#E2B755" strokeWidth="2.8" opacity="0.45" />
-                          <circle cx="50" cy="52" r="14" stroke="#D8727E" strokeWidth="2" opacity="0.35" />
-                        </svg>
-                      )}
-
-                      <h3 className="cat-multi-card-title">{cat.creativeTitle}</h3>
-                      <p className="cat-multi-card-subtitle">{cat.subtitle}</p>
-                    </div>
-
-                    {/* 3 Sub-items in a Row */}
-                    <div className="cat-multi-items-row">
-                      {cat.items.map((sub) => {
-                        const isSubSelected =
-                          selectedCategory.toLowerCase() === sub.dbCategory.toLowerCase();
-                        return (
-                          <button
-                            key={sub.dbCategory}
-                            type="button"
-                            className="cat-multi-subitem-btn"
-                            onClick={() => handleCategorySelect(sub.dbCategory)}
-                            style={{
-                              borderColor: isSubSelected ? '#D8727E' : 'rgba(216, 114, 126, 0.22)',
-                              backgroundColor: isSubSelected ? '#FBF1F0' : '#FFFFFF',
-                              boxShadow: isSubSelected
-                                ? '0 4px 14px rgba(216, 114, 126, 0.22)'
-                                : 'none',
-                            }}
-                          >
-                            <div className="cat-multi-subitem-thumb">
-                              <img src={sub.image} alt={sub.name} loading="lazy" />
-                            </div>
-                            <span
-                              className="cat-multi-subitem-label"
-                              style={{ color: isSubSelected ? '#B8505E' : '#1F191B' }}
-                            >
-                              {sub.name} <ArrowRight size={11} color="#D8727E" />
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              );
-            }
-
-            // Single Category Cards: THE DRESS STORY, TOP STORIES, BOTTOM LINE, etc.
-            const isMediaLeft = cat.layout === 'media-left' || cat.id === 'dresses' || cat.id === 'tops';
-            const isSelected = selectedCategory.toLowerCase() === cat.dbCategory.toLowerCase();
-
-            return (
-              <div
-                key={cat.id}
-                className="cat-card-interactive"
-                onClick={() => handleCategorySelect(cat.dbCategory)}
-                style={{
-                  animationDelay: `${index * 80}ms`,
-                  borderColor: isSelected ? '#D8727E' : 'rgba(216, 114, 126, 0.2)',
-                  boxShadow: isSelected
-                    ? '0 12px 30px rgba(216, 114, 126, 0.22)'
-                    : '0 6px 25px rgba(184, 80, 94, 0.05)',
-                }}
-              >
-                <div className={`cat-split-layout ${isMediaLeft ? 'is-media-left' : 'is-media-right'}`}>
-                  {/* Media Wrapper */}
-                  <div className={`cat-split-media ${cat.isArch ? 'is-arch' : ''}`}>
-                    <img src={cat.image} alt={cat.creativeTitle} loading="lazy" />
-                    {cat.scriptOverlay && (
-                      <span className="cat-split-media-script">{cat.scriptOverlay}</span>
-                    )}
-                  </div>
-
-                  {/* Info Wrapper */}
-                  <div className="cat-split-info">
-                    <div className="cat-split-info-top">
-                      <h3 className="cat-split-title">{cat.creativeTitle}</h3>
-                      <p className="cat-split-subtitle">{cat.subtitle}</p>
-                      <div className="cat-split-action">
-                        <div className="cat-circle-arrow-btn">
-                          <ArrowRight size={14} />
-                        </div>
-                      </div>
-                    </div>
-                    <span className="cat-split-bottom-tag">{cat.tag}</span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Affirmation Quality Strip */}
-        <div className="cat-features-affirmation-strip">
-          <div className="cat-affirmation-item">
-            <Flower2 size={18} color="#D8727E" />
-            <span>Every category. A new you.</span>
-          </div>
-
-          <div className="cat-affirmation-divider" />
-
-          <div className="cat-affirmation-item">
-            <Shirt size={18} color="#D8727E" />
-            <span>Curated for your next favorite look.</span>
-          </div>
-
-          <div className="cat-affirmation-divider" />
-
-          <div className="cat-affirmation-item">
-            <Sparkles size={18} color="#D8727E" />
-            <span>Fashion that feels like you.</span>
-          </div>
-
-          <div className="cat-affirmation-brand">
-            TARIKA — <em>More than fashion</em>
-          </div>
-        </div>
-
-        {/* Transition Indicator Badge */}
-        <div className="cat-transition-indicator">
-          <span>Smooth transition animation</span>
-          <ArrowDown size={14} />
-        </div>
-      </section>
-
-      {/* =================================================================
-          2. CATEGORY PRODUCT SECTION (Loaded with Actual Database Products)
+          CATEGORY PRODUCT SECTION (Loaded with Actual Database Products)
+          The category-card landing now lives on the Customer Home page.
          ================================================================= */}
       <div ref={productsSectionRef} id="category-products-view" style={{ scrollMarginTop: '110px' }}>
         {/* Breadcrumb Navigation */}
@@ -599,7 +288,7 @@ export default function ShopCategories() {
           }}
           className="department-dual-pane"
         >
-          {/* LEFT SIDEBAR: Sub-categories and Department Switcher */}
+          {/* LEFT SIDEBAR: database sub-categories and department switcher */}
           <aside className="department-tabs-sidebar">
             <span
               style={{
@@ -614,10 +303,15 @@ export default function ShopCategories() {
               {selectedCategory}
             </span>
 
-            {/* Subcategories */}
+            {/* Subcategories straight from the database sub_category column */}
             {activeSubcategories.map((sub, index) => {
-              const isActive =
-                activeSubcategory === sub || (index === 0 && activeSubcategory === 'All');
+              const isActive = activeSubcategory === sub || (index === 0 && activeSubcategory === 'All');
+              const subCount =
+                index === 0
+                  ? activeCategory?.product_count
+                  : (activeCategory?.sub_categories || []).find(
+                      (s) => s.sub_category === sub
+                    )?.product_count;
               return (
                 <button
                   key={sub}
@@ -625,15 +319,15 @@ export default function ShopCategories() {
                   className={`department-tab-btn ${isActive ? 'is-active' : ''}`}
                   onClick={() => setActiveSubcategory(sub)}
                 >
-                  <span>{sub}</span>
-                  {index === 0 && (
+                  <span>{sub === 'All' ? `All ${selectedCategory}` : sub}</span>
+                  {subCount !== undefined && (
                     <span
                       style={{
                         fontSize: '0.72rem',
                         color: isActive ? '#B8505E' : '#9E8F94',
                       }}
                     >
-                      ({filteredProducts.length})
+                      ({subCount.toLocaleString('en-IN')})
                     </span>
                   )}
                 </button>
@@ -665,18 +359,20 @@ export default function ShopCategories() {
             {categories
               .filter(
                 (cat) =>
-                  (cat.category_name || '').toLowerCase() !== selectedCategory?.toLowerCase()
+                  normalizeName(cat.category_name) !== normalizeName(selectedCategory)
               )
               .map((cat) => (
                 <button
-                  key={cat.category_id || cat.id}
+                  key={cat.category_id || cat.category_name}
                   type="button"
                   className="department-tab-btn"
                   onClick={() => handleCategorySelect(cat.category_name)}
                 >
                   <span>{cat.category_name}</span>
                   <span style={{ fontSize: '0.72rem', color: '#9E8F94' }}>
-                    {cat.product_count !== undefined ? `(${cat.product_count})` : ''}
+                    {cat.product_count !== undefined
+                      ? `(${cat.product_count.toLocaleString('en-IN')})`
+                      : ''}
                   </span>
                 </button>
               ))}
@@ -719,10 +415,7 @@ export default function ShopCategories() {
                 <p className="cat-hero-script-tagline">{activeBannerQuote}</p>
                 <div className="cat-hero-vignette-circle">
                   <img
-                    src={
-                      activeCreativeMeta?.image ||
-                      'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=300&auto=format&fit=crop&q=80'
-                    }
+                    src={activeCategory?.image || FALLBACK_CATEGORY_IMAGE}
                     alt={activeCreativeTitle}
                     loading="lazy"
                   />
@@ -1019,11 +712,14 @@ export default function ShopCategories() {
                     margin: '0 0 0.5rem 0',
                   }}
                 >
-                  No Products Found In This Selection
+                  {categories.length === 0
+                    ? 'Categories Are Loading'
+                    : 'No Products Found In This Selection'}
                 </h3>
                 <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: '0 0 1.5rem 0' }}>
-                  Try resetting your price, size, or stock filters to view available styles in{' '}
-                  {selectedCategory}.
+                  {categories.length === 0
+                    ? 'The category list could not be loaded. Please refresh the page.'
+                    : `Try resetting your price, size, or stock filters to view available styles in ${selectedCategory}.`}
                 </p>
                 <button
                   type="button"

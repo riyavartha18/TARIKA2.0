@@ -35,7 +35,6 @@ export default function ProductDetailModal() {
   } = useCustomer();
 
   const [quantity, setQuantity] = useState(1);
-  const [addingToBag, setAddingToBag] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
@@ -348,14 +347,13 @@ export default function ProductDetailModal() {
   };
 
   const handleAdd = async () => {
-    if (isOutOfStock || addingToBag) return;
-    setAddingToBag(true);
-    const res = await addToBag(product, quantity);
-    setAddingToBag(false);
-    if (res && res.success) {
-      setJustAdded(true);
-      setTimeout(() => setJustAdded(false), 2000);
-    }
+    if (isOutOfStock) return;
+    // Optimistic feedback, matching the card's Quick Add: the badge and this
+    // button react in the same paint while the context confirms the Neon
+    // write and reverts with an error toast if it fails.
+    setJustAdded(true);
+    setTimeout(() => setJustAdded(false), 2000);
+    addToBag(product, quantity);
   };
 
   return (
@@ -711,7 +709,7 @@ export default function ProductDetailModal() {
                 type="button"
                 className="tarika-btn-primary"
                 onClick={handleAdd}
-                disabled={isOutOfStock || addingToBag}
+                disabled={isOutOfStock}
                 style={{
                   flex: 1,
                   padding: '0.95rem 1.5rem',
@@ -723,8 +721,6 @@ export default function ProductDetailModal() {
                     <Check size={18} />
                     <span>Added to Bag!</span>
                   </>
-                ) : addingToBag ? (
-                  <span>Adding to Bag...</span>
                 ) : (
                   <>
                     <ShoppingBag size={18} />

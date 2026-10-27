@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ShoppingBag,
@@ -6,8 +6,6 @@ import {
   ArrowRight,
   ShieldCheck,
   Truck,
-  Sparkles,
-  Info,
   AlertCircle,
 } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
@@ -24,7 +22,6 @@ export default function BagPage() {
     updateBagQuantity,
     removeFromBag,
     clearBag,
-    addToast,
     openProductDetail,
     refreshCustomerData,
   } = useCustomer();
@@ -39,21 +36,6 @@ export default function BagPage() {
   const handleCheckoutClick = () => {
     navigate('/customer/checkout');
   };
-
-  // Group cart lines by their product category, mirroring the Warehouse
-  // portal's category-wise layout. Grouping is display-only: each item keeps
-  // its own product_id, so quantity updates / removal / totals are unaffected.
-  const groupedBag = useMemo(() => {
-    const map = {};
-    bagItems.forEach((item) => {
-      const catName = (item.product && item.product.category_name) || 'Uncategorized';
-      if (!map[catName]) {
-        map[catName] = { category_name: catName, items: [] };
-      }
-      map[catName].items.push(item);
-    });
-    return Object.values(map).sort((a, b) => a.category_name.localeCompare(b.category_name));
-  }, [bagItems]);
 
   return (
     <div style={{ paddingBottom: '4rem' }}>
@@ -137,39 +119,9 @@ export default function BagPage() {
           }}
           className="bag-page-grid"
         >
-          {/* LEFT: Cart Items List (grouped category-wise) */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-            {groupedBag.map((category) => (
-              <section key={category.category_name} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', paddingBottom: '0.9rem', borderBottom: '1.5px solid rgba(216, 114, 126, 0.2)' }}>
-                  <div
-                    style={{
-                      width: '40px',
-                      height: '40px',
-                      borderRadius: '12px',
-                      background: 'linear-gradient(135deg, #FBF1F0 0%, #F7E4E2 100%)',
-                      border: '1px solid rgba(216, 114, 126, 0.2)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: '#B8505E',
-                      fontWeight: 700,
-                    }}
-                  >
-                    {category.category_name ? category.category_name[0].toUpperCase() : 'C'}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                    <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.3rem', fontWeight: 700, margin: 0, color: '#1F191B' }}>
-                      {category.category_name}
-                    </h3>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, padding: '0.2rem 0.65rem', borderRadius: '9999px', backgroundColor: 'rgba(216, 114, 126, 0.12)', color: '#B8505E' }}>
-                      {category.items.length} {category.items.length === 1 ? 'item' : 'items'}
-                    </span>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                  {category.items.map((item) => {
+          {/* LEFT: All cart lines displayed together, without category grouping */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            {bagItems.map((item) => {
               const product = item.product || {};
               const pId = item.product_id;
               const unitPrice = Number(item.unit_price || 0);
@@ -345,10 +297,7 @@ export default function BagPage() {
                   </div>
                 </div>
               );
-                })}
-                </div>
-              </section>
-            ))}
+            })}
           </div>
 
           {/* RIGHT: Order Summary Card */}
@@ -434,10 +383,6 @@ export default function BagPage() {
               <span>Proceed to Checkout</span>
               <ArrowRight size={16} />
             </button>
-
-            <p style={{ margin: 0, fontSize: '0.72rem', color: '#9E8F94', textAlign: 'center' }}>
-              🔒 Protected by 256-Bit SSL Encryption
-            </p>
 
             {/* Perks */}
             <div

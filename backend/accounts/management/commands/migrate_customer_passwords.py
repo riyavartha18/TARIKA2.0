@@ -1,10 +1,10 @@
 """Hash the legacy plain-text passwords in public.customers with bcrypt.
 
 The imported retail dataset stores customer passwords as plain text in
-public.customers.password. Login already refuses to treat those values as
-hashes (accounts/services/supabase_auth.py re-hashes a row with bcrypt the
-first time its owner signs in), but plain text must not remain the stored
-secret, so this command migrates the rest of the table in place.
+public.customers.password. Login verifies those values without rewriting them
+(accounts/services/supabase_auth.py compares against the stored format and
+never mutates the row), so this command is the sole path that migrates the
+table to bcrypt in place.
 
 How it works
     * Hashing happens entirely inside PostgreSQL with pgcrypto
@@ -209,8 +209,7 @@ class Command(BaseCommand):
                     self.stdout.write(
                         self.style.WARNING(
                             "Stopped: remaining rows could not be hashed in this "
-                            "batch. Sign-in upgrades still cover them; re-run to "
-                            "retry."
+                            "batch. Re-run to retry."
                         )
                     )
                 break

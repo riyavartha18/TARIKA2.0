@@ -372,16 +372,16 @@ class AccountsViewAPITests(SimpleTestCase):
 
 
 class CustomerCredentialTests(SimpleTestCase):
-    """public.customers authentication, including the plain-text -> bcrypt path.
+    """public.customers authentication is read-only for the stored secret.
 
     The cursor is mocked here; the same branches are exercised against the real
     Neon database by a live round-trip check.
     """
 
-    # (customer_id, customer_name, gender, email, password_ok, is_bcrypt)
-    BCRYPT_OK = ('U1000001', 'Asha Shaikh', 'Female', 'asha@example.com', True, True)
-    PLAIN_OK = ('U1000002', 'Ravi Nair', 'Male', 'ravi@example.com', True, False)
-    BAD = ('U1000003', 'Meera Rao', 'Female', 'meera@example.com', False, True)
+    # (customer_id, customer_name, gender, email, password_ok)
+    BCRYPT_OK = ('U1000001', 'Asha Shaikh', 'Female', 'asha@example.com', True)
+    PLAIN_OK = ('U1000002', 'Ravi Nair', 'Male', 'ravi@example.com', True)
+    BAD = ('U1000003', 'Meera Rao', 'Female', 'meera@example.com', False)
 
     def _patch_connection(self, row, side_effect=None):
         cursor = MagicMock()
@@ -414,20 +414,21 @@ class CustomerCredentialTests(SimpleTestCase):
         # The stored secret is never selected out of the table.
         self.assertNotIn('SELECT password', sql)
 
-    def test_plaintext_row_authenticates_and_is_upgraded(self):
+    def test_plaintext_row_authenticates_without_rewriting(self):
         connector, cursor = self._patch_connection(self.PLAIN_OK)
         with connector:
             profile = SupabaseAuthService.verify_customer_credentials(
                 'ravi@example.com', 'Legacy#123'
             )
         self.assertEqual(profile['customer_id'], 'U1000002')
-        # Verification, then the compare-and-set upgrade.
-        self.assertEqual(cursor.execute.call_count, 2)
-        upgrade_sql, upgrade_params = cursor.execute.call_args_list[1][0]
-        self.assertIn('UPDATE public.customers', upgrade_sql)
-        self.assertIn("gen_salt('bf'", upgrade_sql)
-        self.assertIn('AND password = %s', upgrade_sql)
-        self.assertEqual(upgrade_params[0], 'Legacy#123')
+        # Login is a read: it must never rewrite the stored credential into a
+        # hash (the surprise the bug report describes). Legacy conversion is
+        # handled solely by the migrate_customer_passwords command.
+        self.assertEqual(cursor.execute.call_count, 1)
+        sql = cursor.execute.call_args_list[0][0][0]
+        self.assertNotIn('UPDATE public.customers', sql)
+        # The plain-text branch is still compared inside PostgreSQL.
+        self.assertIn('ELSE (password = %s)', sql)
 
     def test_wrong_password_returns_generic_message(self):
         connector, _ = self._patch_connection(self.BAD)
@@ -473,15 +474,6 @@ class CustomerCredentialTests(SimpleTestCase):
             with self.assertRaises(AuthenticationFailed):
                 SupabaseAuthService.verify_customer_credentials('asha@example.com', '')
         cursor.execute.assert_not_called()
-
-    def test_upgrade_failure_does_not_block_a_valid_login(self):
-        connector, cursor = self._patch_connection(self.PLAIN_OK)
-        cursor.execute.side_effect = [None, DatabaseError('write failed')]
-        with connector:
-            profile = SupabaseAuthService.verify_customer_credentials(
-                'ravi@example.com', 'Legacy#123'
-            )
-        self.assertEqual(profile['customer_id'], 'U1000002')
 
     def test_login_serializer_rejects_blank_input_generically(self):
         # A blank password is refused with the same wording as a credential

@@ -1,4 +1,4 @@
-import React, { useEffect, lazy, Suspense } from 'react';
+import React, { useEffect, lazy, Suspense, Component } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { CustomerProvider } from '../../context/CustomerContext';
 import CustomerNavbar from '../../components/customer/CustomerNavbar';
@@ -33,6 +33,67 @@ function RouteFallback() {
   );
 }
 
+// A single uncaught render error otherwise unmounts the whole portal to a
+// blank/black screen. This boundary keeps the navbar and page shell intact and
+// shows a recoverable message instead, so a failing component or request never
+// leaves the customer staring at an empty page after login.
+class PortalErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error('Customer portal render error:', error, info);
+  }
+
+  handleRetry = () => {
+    this.setState({ error: null });
+  };
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            padding: '4rem 2rem',
+            textAlign: 'center',
+            backgroundColor: '#FFFFFF',
+            borderRadius: '20px',
+            border: '1px solid #F0E2E0',
+            maxWidth: '560px',
+            margin: '2rem auto',
+          }}
+        >
+          <h2
+            style={{
+              fontFamily: "'Playfair Display', serif",
+              fontSize: '1.5rem',
+              color: '#1F191B',
+              margin: '0 0 0.5rem 0',
+            }}
+          >
+            Something went wrong
+          </h2>
+          <p style={{ color: '#6B5E63', fontSize: '0.9rem', margin: '0 0 1.5rem 0' }}>
+            This part of the store could not be displayed. Your account and cart
+            are safe — please try again.
+          </p>
+          <button type="button" className="tarika-btn-primary" onClick={this.handleRetry}>
+            <span>Try Again</span>
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function CustomerPortal() {
   useEffect(() => {
     document.title = 'TARIKA — Customer Portal';
@@ -63,7 +124,8 @@ export default function CustomerPortal() {
             boxSizing: 'border-box',
           }}
         >
-          <Routes>
+          <PortalErrorBoundary>
+            <Routes>
             <Route index element={<CustomerHome />} />
             <Route
               path="shop"
@@ -148,6 +210,7 @@ export default function CustomerPortal() {
             {/* Fallback to customer home */}
             <Route path="*" element={<Navigate to="/customer" replace />} />
           </Routes>
+          </PortalErrorBoundary>
         </main>
 
         {/* Global Product Detail Modal */}

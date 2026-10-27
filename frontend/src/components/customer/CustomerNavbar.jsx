@@ -86,7 +86,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
               </span>
               <span className="customer-marquee-separator">•</span>
               <span className="customer-marquee-item">
-                NEW DRESSES
+                NEW ARRIVALS
               </span>
               <span className="customer-marquee-separator">•</span>
               <span className="customer-marquee-item">
@@ -215,7 +215,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           >
             <input
               type="text"
-              placeholder="Search tops, dresses, coords..."
+              placeholder="Search for products..."
               value={localSearch}
               onChange={(e) => {
                 setLocalSearch(e.target.value);

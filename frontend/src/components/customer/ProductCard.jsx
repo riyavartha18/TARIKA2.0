@@ -5,7 +5,6 @@ import { getProductPricing } from '../../utils/pricing';
 
 function ProductCard({ product, onCardClick }) {
   const { isWishlisted, toggleWishlist, addToBag, openProductDetail } = useCustomer();
-  const [addingToBag, setAddingToBag] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
 
   if (!product) return null;
@@ -35,16 +34,14 @@ function ProductCard({ product, onCardClick }) {
 
   const handleQuickAdd = async (e) => {
     e.stopPropagation();
-    if (isOutOfStock || addingToBag) return;
+    if (isOutOfStock) return;
 
-    setAddingToBag(true);
-    const result = await addToBag(product, 1);
-    setAddingToBag(false);
-
-    if (result && result.success) {
-      setJustAdded(true);
-      setTimeout(() => setJustAdded(false), 1600);
-    }
+    // Optimistic feedback: the badge and this button respond in the same
+    // paint as the click, while CustomerContext confirms the row in Neon in
+    // the background and reverts + shows an error toast if the write fails.
+    setJustAdded(true);
+    setTimeout(() => setJustAdded(false), 1600);
+    addToBag(product, 1);
   };
 
   const handleOpenDetails = () => {
@@ -123,15 +120,12 @@ function ProductCard({ product, onCardClick }) {
             type="button"
             className="product-quick-add-btn"
             onClick={handleQuickAdd}
-            disabled={addingToBag}
           >
             {justAdded ? (
               <>
                 <Check size={14} color="#10B981" />
                 <span style={{ color: '#10B981' }}>Added to Bag!</span>
               </>
-            ) : addingToBag ? (
-              <span>Adding...</span>
             ) : (
               <>
                 <ShoppingBag size={14} />
