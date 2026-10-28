@@ -1,4 +1,5 @@
 from django.db.models import Count, Q, Sum, Case, When, Value, IntegerField
+from django.db import connection, transaction
 from catalog.models import Category, Product
 from .models import Order, Delivery, Return, Payment
 import datetime
@@ -26,6 +27,7 @@ class WarehouseService:
 
         products = (
             Product.objects
+            .filter(is_active=True)
             .only(*WarehouseService.GROUPED_PRODUCT_FIELDS)
             .order_by('main_category', 'product_name')
         )
@@ -79,6 +81,7 @@ class WarehouseService:
         'discount_price': 'discount_price',        # double precision
         'actual_price': 'actual_price_text',       # TEXT column, kept as text
         'available_quantity': 'available_quantity',  # double precision
+        'is_active': 'is_active',                  # soft-delete / archive flag
     }
 
     @staticmethod
@@ -120,6 +123,89 @@ class WarehouseService:
 
         # Re-read the row so the response reflects persisted database values.
         return Product.objects.get(product_id=product_id)
+
+    # Referencing tables that carry a real FK to products.product_key. A product
+    # still present in any of these is never hard-deleted: it is archived so the
+    # historical / live rows keep their foreign key and no business history is
+    # lost.
+    HISTORY_TABLES = ('orders', 'cart', 'wishlist')
+
+    # Replenishment purchase orders also reference the product (by product_key),
+    # but deliberately WITHOUT a foreign key so a purchase order survives product
+    # archiving. A product with any purchase-order row is therefore never
+    # hard-deleted either, so outstanding supplier orders are never orphaned.
+    PO_TABLE = 'replenishment_orders'
+
+    @staticmethod
+    def _count_product_references(product_id):
+        """Return (sales_refs, purchase_order_refs) for the product.
+
+        ``sales_refs`` counts live/historical rows in orders, cart and wishlist
+        (all keyed by ``product_id``). ``po_refs`` counts rows in
+        replenishment_orders (keyed by ``product_key``). A non-zero value in
+        either one blocks a hard DELETE.
+        """
+        sales_refs = 0
+        with connection.cursor() as cursor:
+            for table in WarehouseService.HISTORY_TABLES:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM public.{table} WHERE product_id = %s",
+                    [product_id],
+                )
+                sales_refs += int(cursor.fetchone()[0] or 0)
+            cursor.execute(
+                f"SELECT COUNT(*) FROM public.{WarehouseService.PO_TABLE} "
+                "WHERE product_key = %s",
+                [product_id],
+            )
+            po_refs = int(cursor.fetchone()[0] or 0)
+        return sales_refs, po_refs
+
+    @staticmethod
+    def delete_product(product_id):
+        """FK-safe product removal, persisted to the real database.
+
+        * No historical/live references -> hard ``DELETE`` of the product row
+          (the row and every storefront entry genuinely disappear).
+        * Referenced by an order, cart or wishlist -> archive instead
+          (``is_active = False``), so it vanishes from all listings while the
+          foreign keys and sales history stay intact.
+
+        Returns a dict describing what happened. Raises Product.DoesNotExist.
+        """
+        product = Product.objects.get(product_id=product_id)
+        sales_refs, po_refs = WarehouseService._count_product_references(product_id)
+        reference_count = sales_refs + po_refs
+
+        with transaction.atomic():
+            if reference_count == 0:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM public.products WHERE product_key = %s",
+                        [product_id],
+                    )
+                    deleted = cursor.rowcount
+                if not deleted:
+                    raise Product.DoesNotExist(f"Product '{product_id}' not found.")
+                return {
+                    'action': 'deleted',
+                    'product_id': product_id,
+                    'product_name': product.product_name,
+                    'reference_count': 0,
+                    'sales_refs': 0,
+                    'po_refs': 0,
+                }
+
+            product.is_active = False
+            product.save(update_fields=['is_active'])
+            return {
+                'action': 'archived',
+                'product_id': product_id,
+                'product_name': product.product_name,
+                'reference_count': reference_count,
+                'sales_refs': sales_refs,
+                'po_refs': po_refs,
+            }
 
     @staticmethod
     def get_orders(search=None, status=None, warehouse_id=None):

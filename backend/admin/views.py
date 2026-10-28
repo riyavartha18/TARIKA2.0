@@ -1,17 +1,24 @@
 from django.db.models import Sum, Count, Q
 from django.db.models.functions import Coalesce
+from django.db import connection, transaction
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
-from admin.serializers import AdminStaffCreateSerializer
+from admin.serializers import (
+    AdminStaffCreateSerializer,
+    AdminStaffUpdateSerializer,
+    normalize_role,
+    ALLOWED_ROLES,
+)
 
 import uuid
 import datetime
 
-from accounts.models import Employee, Customer, Role, Warehouse
+from accounts.models import Employee, Customer, Role, Warehouse, AppUser
 from catalog.models import Product, Inventory, Category, Manufacturer
+from catalog.cache import bump_catalog_version
 from catalog.serializers import CATEGORY_IMAGE_MAPPING
 from warehouse.models import Order, Delivery, Return
 from warehouse.services import WarehouseService
@@ -19,179 +26,206 @@ from warehouse.serializers import WarehouseOrderSerializer, WarehouseOrderDetail
 from warehouse.views import StandardWarehousePagination
 
 
+ROLE_LABELS = {
+    'admin': 'Admin',
+    'warehouse_manager': 'Warehouse Manager',
+    'delivery': 'Delivery Partner',
+}
+
+
+def _serialize_staff(row):
+    """row: dict of user_id/email/role/is_active/created_at/updated_at.
+
+    password_hash is deliberately never part of ``row`` and never returned.
+    """
+    role = str(row.get('role') or '')
+    created = row.get('created_at')
+    updated = row.get('updated_at')
+    return {
+        'user_id': row.get('user_id'),
+        'email': row.get('email'),
+        'role': role,
+        'role_label': ROLE_LABELS.get(role.lower(), role),
+        'is_active': bool(row.get('is_active')),
+        'created_at': created.isoformat() if hasattr(created, 'isoformat') else created,
+        'updated_at': updated.isoformat() if hasattr(updated, 'isoformat') else updated,
+    }
+
+
+def _active_admin_count():
+    return AppUser.objects.filter(role='admin', is_active=True).count()
+
+
+def _utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 class AdminCreateStaffView(APIView):
     """
-    Admin-only endpoint for provisioning staff members:
-    - WAREHOUSE_MANAGER (requires valid warehouse_id)
-    - DELIVERY_PARTNER (warehouse_id = NULL)
+    Admin-only endpoint that creates a staff account in the real
+    public.app_users table. Role is one of: admin / warehouse_manager /
+    delivery.
     
     Customers, Warehouse Managers, and Delivery Partners cannot access this endpoint (403 Forbidden).
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     def post(self, request):
-        serializer = AdminStaffCreateSerializer(
-            data=request.data,
-            context={'request': request}
-        )
-        if serializer.is_valid():
-            created_employee = serializer.save()
-            return Response({
-                "message": f"Staff account ({created_employee['role']}) created successfully.",
-                "employee": created_employee
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer = AdminStaffCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email']
+        password = serializer.validated_data['password']
+        role = serializer.validated_data['role']
+
+        # Reject duplicate accounts (case-insensitive email).
+        if AppUser.objects.filter(email__iexact=email).exists():
+            return Response(
+                {'errors': {'email': ['A staff account with this email already exists.']}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Password is stored ONLY as a pgcrypto bcrypt hash computed inside
+        # PostgreSQL; the plaintext never leaves this statement and the hash is
+        # never returned.
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO public.app_users
+                        (email, password_hash, role, is_active, created_at, updated_at)
+                    VALUES (%s, crypt(%s, gen_salt('bf', 12)), %s, TRUE, now(), now())
+                    RETURNING user_id, email, role, is_active, created_at, updated_at;
+                    """,
+                    [email, password, role],
+                )
+                cols = [c.name for c in cursor.description]
+                row = dict(zip(cols, cursor.fetchone()))
+        except Exception as exc:  # noqa: BLE001 - never report success on failure
+            return Response({'detail': f'Could not create staff account: {type(exc).__name__}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'message': f'Staff account ({ROLE_LABELS.get(role, role)}) created successfully.',
+            'staff': _serialize_staff(row),
+        }, status=status.HTTP_201_CREATED)
 
 
 class AdminDashboardStatsView(APIView):
     """
-    Admin-only endpoint for aggregating system-wide retail statistics:
-    - KPIs: Total Customers, Total Orders, Total Products, Total Revenue
-    - Order Overview: status counts (Pending, Processing, Delivered, Cancelled)
-    - Recent Orders: latest database order records
-    - Inventory Snapshot: warehouse count, stock total, low stock items
-    - Operational Alerts: pending returns, pending deliveries, low stock
-    - Recent Activity: aggregated timeline feed from latest DB events
+    Admin-only system overview.
+
+    Catalog and stock KPIs are computed from the real ``public.products`` schema
+    (``main_category`` for catalog, ``available_quantity`` for stock). Sections
+    that would require tables/columns absent from the inspected database —
+    order-status breakdowns, revenue, warehouse and delivery/return alerts (the
+    ``warehouses``, ``deliveries``, ``returns`` tables and ``orders.order_status``
+    / ``orders.total_amount`` columns do not exist) — are reported as
+    ``None`` / empty and listed under ``not_available`` instead of being
+    fabricated. The endpoint therefore always answers, and never invents data.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     def get(self, request):
-        # 1. KPIs
+        active_products = Product.objects.filter(is_active=True)
+
+        # ---- KPIs (schema-backed) --------------------------------------
         total_customers = Customer.objects.count()
-        total_orders = Order.objects.count()
-        total_products = Product.objects.count()
-        total_revenue_val = Order.objects.exclude(order_status__iexact='Cancelled').aggregate(
-            rev=Coalesce(Sum('total_amount'), 0.0)
-        )['rev'] or 0.0
+        total_products = active_products.count()
 
-        # 2. Order Breakdown
-        pending_orders = Order.objects.filter(order_status__iexact='Pending').count()
-        processing_orders = Order.objects.filter(order_status__iexact='Processing').count()
-        delivered_orders = Order.objects.filter(
-            Q(order_status__iexact='Delivered') | Q(order_status__iexact='Completed')
+        # Order count is available (the ``orders`` table exists); the richer
+        # order-status / revenue breakdown is not, so those stay unavailable.
+        try:
+            total_orders = Order.objects.count()
+        except Exception:  # pragma: no cover - defensive
+            total_orders = None
+
+        # ---- Catalog / stock snapshot from products --------------------
+        from django.db.models import Sum as _Sum
+        stock_total = active_products.aggregate(
+            total=_Sum('available_quantity')
+        )['total']
+        total_stock_units = int(stock_total) if stock_total is not None else 0
+        low_stock_count = active_products.filter(
+            available_quantity__gt=0, available_quantity__lte=5
         ).count()
-        cancelled_orders = Order.objects.filter(order_status__iexact='Cancelled').count()
-
-        # 3. Recent Orders (limit 6)
-        recent_orders_qs = Order.objects.select_related('customer', 'warehouse').all()[:6]
-        recent_orders = []
-        for o in recent_orders_qs:
-            recent_orders.append({
-                'order_id': o.order_id,
-                'customer_name': o.customer.full_name if o.customer else 'Registered Customer',
-                'customer_email': o.customer.email if o.customer else None,
-                'order_date': o.order_date or o.created_at or 'N/A',
-                'total_amount': o.total_amount or 0.0,
-                'order_status': o.order_status or 'Confirmed',
-                'warehouse_name': o.warehouse.warehouse_name if o.warehouse else 'Fulfillment Center'
-            })
-
-        # 4. Inventory Snapshot
-        total_warehouses = Warehouse.objects.count()
-        total_stock_units = Inventory.objects.aggregate(
-            total=Coalesce(Sum('stock_quantity'), 0)
-        )['total'] or 0
-        low_stock_count = Inventory.objects.filter(stock_quantity__lte=5).count()
-
-        warehouses_qs = Warehouse.objects.all()[:6]
-        warehouses_list = []
-        for w in warehouses_qs:
-            warehouses_list.append({
-                'warehouse_id': w.warehouse_id,
-                'warehouse_name': w.warehouse_name or w.warehouse_id,
-                'city': w.city or 'N/A',
-                'capacity': w.capacity or 0,
-                'manager_name': w.manager_name or 'Assigned Manager'
-            })
-
-        # 5. Operational Alerts
-        pending_returns = Return.objects.filter(return_status__iexact='Requested').count()
-        pending_deliveries = Delivery.objects.filter(
-            Q(delivery_status__iexact='Pending') |
-            Q(delivery_status__iexact='Dispatched') |
-            Q(delivery_status__iexact='In Transit')
+        in_stock_count = active_products.filter(available_quantity__gt=0).count()
+        out_of_stock_count = active_products.filter(
+            Q(available_quantity__lte=0) | Q(available_quantity__isnull=True)
         ).count()
 
-        # 6. Recent Activity Feed
-        recent_activity = []
-        for o in recent_orders_qs[:3]:
-            recent_activity.append({
-                'id': f'order-{o.order_id}',
-                'type': 'ORDER',
-                'title': f'Order #{o.order_id}',
-                'subtitle': f'{o.customer.full_name if o.customer else "Customer"} • ₹{int(o.total_amount or 0):,}',
-                'timestamp': o.order_date or 'Recent',
-                'status': o.order_status or 'Confirmed'
-            })
-
-        for r in Return.objects.select_related('customer').all()[:2]:
-            recent_activity.append({
-                'id': f'return-{r.return_id}',
-                'type': 'RETURN',
-                'title': f'Return Request #{r.return_id}',
-                'subtitle': f'{r.customer.full_name if r.customer else "Customer"} • {r.return_reason or "Return"}',
-                'timestamp': r.return_date or 'Recent',
-                'status': r.return_status or 'Requested'
-            })
-
-        for d in Delivery.objects.select_related('order__customer').all()[:2]:
-            recent_activity.append({
-                'id': f'delivery-{d.delivery_id}',
-                'type': 'DELIVERY',
-                'title': f'Delivery #{d.delivery_id}',
-                'subtitle': f'{d.delivery_partner or "Partner"} • Order #{d.order_id}',
-                'timestamp': d.dispatch_date or 'Recent',
-                'status': d.delivery_status or 'In Transit'
-            })
+        not_available = [
+            'order_status_breakdown',
+            'total_revenue',
+            'recent_orders',
+            'warehouses',
+            'pending_returns',
+            'pending_deliveries',
+            'recent_activity',
+        ]
 
         return Response({
             'kpis': {
                 'total_customers': total_customers,
                 'total_orders': total_orders,
                 'total_products': total_products,
-                'total_revenue': total_revenue_val,
+                'total_revenue': None,
             },
             'order_overview': {
                 'total': total_orders,
-                'pending': pending_orders,
-                'processing': processing_orders,
-                'delivered': delivered_orders,
-                'cancelled': cancelled_orders,
+                'pending': None,
+                'processing': None,
+                'delivered': None,
+                'cancelled': None,
             },
-            'recent_orders': recent_orders,
+            'recent_orders': [],
             'inventory_snapshot': {
-                'total_warehouses': total_warehouses,
+                'source': 'products.available_quantity',
+                'total_warehouses': None,
                 'total_stock_units': total_stock_units,
                 'low_stock_count': low_stock_count,
-                'warehouses': warehouses_list,
+                'in_stock_products': in_stock_count,
+                'out_of_stock_products': out_of_stock_count,
+                'warehouses': [],
             },
             'operational_alerts': {
-                'pending_returns': pending_returns,
-                'pending_deliveries': pending_deliveries,
+                'pending_returns': None,
+                'pending_deliveries': None,
                 'low_stock_products': low_stock_count,
-                'cancelled_orders': cancelled_orders,
+                'cancelled_orders': None,
             },
-            'recent_activity': recent_activity,
+            'recent_activity': [],
+            'not_available': not_available,
+            'note': (
+                'Order-status, revenue, warehouse and delivery/return metrics '
+                'are unavailable because those tables/columns are not present in '
+                'the connected database. Catalog and stock metrics are computed '
+                'from public.products.'
+            ),
         }, status=status.HTTP_200_OK)
 
 
 class AdminStaffListView(APIView):
     """
-    Admin-only endpoint for querying staff members, summary KPI counts,
-    and available warehouses for staff creation.
-    Supports search (name, email, phone), role filtering, and status filtering.
+    Admin-only list of staff from the real public.app_users table.
+
+    Supports search (email/role), role + status filters and server-side
+    pagination. Only the non-secret columns are read, so password_hash is never
+    fetched or returned.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     def get(self, request):
-        search = request.query_params.get('search')
-        role = request.query_params.get('role')
-        status_param = request.query_params.get('status')
+        search = (request.query_params.get('search') or '').strip()
+        role = (request.query_params.get('role') or '').strip()
+        status_param = (request.query_params.get('status') or '').strip()
 
-        qs = Employee.objects.select_related('warehouse').all()
+        qs = AppUser.objects.all()
 
         if role and role.upper() != 'ALL':
-            qs = qs.filter(role__iexact=role)
+            canon = normalize_role(role)
+            qs = qs.filter(role=canon) if canon else qs.none()
 
         if status_param and status_param.upper() != 'ALL':
             if status_param.lower() in ('active', 'true', '1'):
@@ -200,97 +234,138 @@ class AdminStaffListView(APIView):
                 qs = qs.filter(is_active=False)
 
         if search:
-            q = search.strip()
-            qs = qs.filter(
-                Q(full_name__icontains=q) |
-                Q(email__icontains=q) |
-                Q(phone__icontains=q)
-            )
+            qs = qs.filter(Q(email__icontains=search) | Q(role__icontains=search))
 
-        employees_list = []
-        for emp in qs.order_by('-created_at', 'full_name'):
-            employees_list.append({
-                'employee_id': emp.employee_id,
-                'auth_user_id': str(emp.auth_user_id),
-                'full_name': emp.full_name,
-                'email': emp.email,
-                'phone': emp.phone,
-                'role': emp.role,
-                'warehouse_id': emp.warehouse_id,
-                'warehouse_name': emp.warehouse.warehouse_name if emp.warehouse else None,
-                'is_active': emp.is_active,
-                'created_at': emp.created_at.strftime('%Y-%m-%d') if emp.created_at else None,
-            })
+        try:
+            page = max(1, int(request.query_params.get('page', 1) or 1))
+            page_size = int(request.query_params.get('page_size', 25) or 25)
+        except (TypeError, ValueError):
+            page, page_size = 1, 25
+        page_size = min(max(page_size, 1), 200)
 
-        # Summary KPIs
-        total_staff = Employee.objects.count()
-        warehouse_managers = Employee.objects.filter(role='WAREHOUSE_MANAGER').count()
-        delivery_partners = Employee.objects.filter(role='DELIVERY_PARTNER').count()
-        active_staff = Employee.objects.filter(is_active=True).count()
+        total = qs.count()
+        start = (page - 1) * page_size
+        rows = list(
+            qs.order_by('-created_at', 'user_id')
+            .values('user_id', 'email', 'role', 'is_active', 'created_at', 'updated_at')[start:start + page_size]
+        )
 
-        # Warehouse options for Create Staff dropdown
-        warehouses_qs = Warehouse.objects.all().order_by('warehouse_name')
-        warehouse_options = []
-        for w in warehouses_qs:
-            warehouse_options.append({
-                'warehouse_id': w.warehouse_id,
-                'warehouse_name': w.warehouse_name or w.warehouse_id,
-                'city': w.city or '',
-            })
+        summary = {
+            'total_staff': AppUser.objects.count(),
+            'admins': AppUser.objects.filter(role='admin').count(),
+            'warehouse_managers': AppUser.objects.filter(role='warehouse_manager').count(),
+            'delivery_partners': AppUser.objects.filter(role='delivery').count(),
+            'active_staff': AppUser.objects.filter(is_active=True).count(),
+        }
 
         return Response({
-            'summary': {
-                'total_staff': total_staff,
-                'warehouse_managers': warehouse_managers,
-                'delivery_partners': delivery_partners,
-                'active_staff': active_staff,
+            'summary': summary,
+            'roles': list(ALLOWED_ROLES),
+            'staff': [_serialize_staff(r) for r in rows],
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': (total + page_size - 1) // page_size if page_size else 1,
             },
-            'warehouses': warehouse_options,
-            'employees': employees_list,
         }, status=status.HTTP_200_OK)
 
 
 class AdminStaffToggleStatusView(APIView):
     """
-    Admin-only endpoint for toggling an employee's active status (activate/deactivate).
-    Prevents admins from deactivating their own admin account.
+    Activate / deactivate a staff account in public.app_users.
+
+    Guards: an admin cannot deactivate their own account, and the last active
+    administrator can never be deactivated (prevents locking everyone out).
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
-    def patch(self, request, employee_id):
-        try:
-            employee = Employee.objects.get(employee_id=employee_id)
-        except Employee.DoesNotExist:
-            return Response(
-                {'detail': f'Employee with ID "{employee_id}" not found.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+    def patch(self, request, user_id):
+        target = AppUser.objects.defer('password_hash').filter(user_id=user_id).first()
+        if not target:
+            return Response({'detail': 'Staff member not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
 
-        # Prevent admin from deactivating their own account
-        if str(employee.auth_user_id) == str(request.user.auth_user_id):
-            return Response(
-                {'detail': 'You cannot deactivate your own active Administrator account.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        requested = request.data.get('is_active')
+        new_active = (not target.is_active) if requested is None else bool(requested)
 
-        # Explicitly set status if provided, else toggle
-        target_status = request.data.get('is_active')
-        if target_status is not None:
-            employee.is_active = bool(target_status)
-        else:
-            employee.is_active = not employee.is_active
+        if not new_active:
+            if str(user_id) == str(getattr(request.user, 'auth_user_id', '')):
+                return Response({'detail': 'You cannot deactivate your own account.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if str(target.role).lower() == 'admin' and _active_admin_count() <= 1:
+                return Response({'detail': 'Cannot deactivate the last active administrator.'},
+                                status=status.HTTP_400_BAD_REQUEST)
 
-        employee.save(update_fields=['is_active'])
+        target.is_active = new_active
+        target.updated_at = _utcnow()
+        target.save(update_fields=['is_active', 'updated_at'])
 
         return Response({
-            'message': f'Staff member "{employee.full_name}" is now {"Active" if employee.is_active else "Inactive"}.',
-            'employee': {
-                'employee_id': employee.employee_id,
-                'full_name': employee.full_name,
-                'email': employee.email,
-                'role': employee.role,
-                'is_active': employee.is_active,
-            }
+            'message': f'Staff member is now {"Active" if new_active else "Inactive"}.',
+            'staff': _serialize_staff({
+                'user_id': target.user_id, 'email': target.email, 'role': target.role,
+                'is_active': target.is_active, 'created_at': target.created_at,
+                'updated_at': target.updated_at,
+            }),
+        }, status=status.HTTP_200_OK)
+
+
+class AdminStaffUpdateView(APIView):
+    """
+    Edit a staff account (role, active flag, optional password reset) in
+    public.app_users. Every accepted change is persisted atomically; password
+    is rehashed with pgcrypto and never returned. Self-demotion and removal of
+    the last active administrator are refused.
+    """
+    permission_classes = [IsAuthenticatedUser, IsAdmin]
+
+    def put(self, request, user_id):
+        serializer = AdminStaffUpdateSerializer(data=request.data or {})
+        if not serializer.is_valid():
+            return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        target = AppUser.objects.defer('password_hash').filter(user_id=user_id).first()
+        if not target:
+            return Response({'detail': 'Staff member not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        data = serializer.validated_data
+        new_role = data.get('role', target.role)
+        new_active = data.get('is_active', target.is_active)
+        was_admin = str(target.role).lower() == 'admin'
+        stops_being_admin = was_admin and (str(new_role).lower() != 'admin' or not new_active)
+
+        if stops_being_admin and _active_admin_count() <= 1:
+            return Response(
+                {'detail': 'Cannot demote or deactivate the last active administrator.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not new_active and str(user_id) == str(getattr(request.user, 'auth_user_id', '')):
+            return Response({'detail': 'You cannot deactivate your own account.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            target.role = new_role
+            target.is_active = bool(new_active)
+            target.updated_at = _utcnow()
+            target.save(update_fields=['role', 'is_active', 'updated_at'])
+
+            if data.get('password'):
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE public.app_users SET password_hash = crypt(%s, gen_salt('bf', 12)) "
+                        "WHERE user_id = %s",
+                        [data['password'], target.user_id],
+                    )
+
+        return Response({
+            'message': 'Staff account updated.',
+            'staff': _serialize_staff({
+                'user_id': target.user_id, 'email': target.email, 'role': target.role,
+                'is_active': target.is_active, 'created_at': target.created_at,
+                'updated_at': target.updated_at,
+            }),
         }, status=status.HTTP_200_OK)
 
 
@@ -395,237 +470,217 @@ class AdminWarehouseListView(APIView):
 
 class AdminProductListView(APIView):
     """
-    Admin-only endpoint for product catalog management:
-    - Real DB summary metrics: Total Products, Total Categories, In-Stock Products, Low-Stock Products
-    - Live search by product_name, sku, category_name, description, color, material
-    - Category filter dynamically using existing Category records
-    - Stock status filter (ALL, IN_STOCK, LOW_STOCK, OUT_OF_STOCK)
-    - Detailed product listing with inventory stock, warehouse breakdown, image URL
+    Admin-only product catalog overview, read straight from the real
+    ``public.products`` schema.
+
+    Only columns that actually exist are used:
+      * catalog grouping  -> ``main_category`` (there is no ``categories`` table)
+      * stock             -> ``available_quantity`` (there is no ``inventory`` table)
+      * price             -> ``discount_price`` / ``actual_price`` (TEXT)
+
+    Legacy fields that the old form assumed (``sku``, ``description``, ``color``,
+    ``size``, ``material``, ``gender``, per-warehouse ``inventory``) are NOT part
+    of this schema, so they are intentionally absent rather than fabricated.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
+    LIST_LIMIT = 500
+
     def get(self, request):
-        search = request.query_params.get('search')
-        category_filter = request.query_params.get('category')
-        stock_filter = request.query_params.get('stock_status')
+        search = (request.query_params.get('search') or '').strip()
+        category_filter = (request.query_params.get('category') or '').strip()
+        stock_filter = (request.query_params.get('stock_status') or '').strip().upper()
 
-        # Real DB KPIs
-        total_products = Product.objects.count()
-        total_categories = Category.objects.count()
+        active_qs = Product.objects.filter(is_active=True)
 
-        # Prefetch categories list for dropdown filter
-        categories_qs = Category.objects.all().order_by('category_name')
+        total_products = active_qs.count()
+
+        # Distinct catalog categories come from products.main_category directly.
+        category_names = list(
+            active_qs
+            .exclude(main_category__isnull=True)
+            .exclude(main_category='')
+            .values_list('main_category', flat=True)
+            .distinct()
+            .order_by('main_category')
+        )
         categories_list = [
-            {
-                'category_id': c.category_id,
-                'category_name': c.category_name or c.category_id
-            }
-            for c in categories_qs
+            {'category_id': name, 'category_name': name} for name in category_names
         ]
 
-        # Query all products annotated with aggregate inventory stock
-        products_qs = Product.objects.select_related('category', 'manufacturer').prefetch_related('inventory_items__warehouse').annotate(
-            total_stock_annotated=Coalesce(Sum('inventory_items__stock_quantity'), 0)
-        )
+        in_stock_products = active_qs.filter(available_quantity__gt=0).count()
+        low_stock_products = active_qs.filter(
+            available_quantity__gt=0, available_quantity__lte=5
+        ).count()
 
-        # System-wide KPI stock calculations
-        all_annotated = Product.objects.annotate(
-            total_stock_annotated=Coalesce(Sum('inventory_items__stock_quantity'), 0)
-        )
-        in_stock_products = all_annotated.filter(total_stock_annotated__gt=0).count()
-        low_stock_products = all_annotated.filter(total_stock_annotated__gt=0, total_stock_annotated__lte=5).count()
-
-        # Search filtering
+        products_qs = active_qs
         if search:
-            q = search.strip()
             products_qs = products_qs.filter(
-                Q(product_name__icontains=q) |
-                Q(sku__icontains=q) |
-                Q(category__category_name__icontains=q) |
-                Q(description__icontains=q) |
-                Q(color__icontains=q) |
-                Q(material__icontains=q)
+                Q(product_name__icontains=search) |
+                Q(main_category__icontains=search) |
+                Q(sub_category__icontains=search)
             )
-
-        # Category filtering
-        if category_filter:
-            c_val = category_filter.strip()
+        if category_filter and category_filter.upper() != 'ALL':
+            products_qs = products_qs.filter(main_category__iexact=category_filter)
+        if stock_filter == 'IN_STOCK':
+            products_qs = products_qs.filter(available_quantity__gt=0)
+        elif stock_filter == 'LOW_STOCK':
             products_qs = products_qs.filter(
-                Q(category__category_id=c_val) | Q(category__category_name__iexact=c_val)
+                available_quantity__gt=0, available_quantity__lte=5
             )
-
-        # Stock status filtering
-        if stock_filter:
-            st = stock_filter.strip().upper()
-            if st == 'IN_STOCK':
-                products_qs = products_qs.filter(total_stock_annotated__gt=0)
-            elif st == 'LOW_STOCK':
-                products_qs = products_qs.filter(total_stock_annotated__gt=0, total_stock_annotated__lte=5)
-            elif st == 'OUT_OF_STOCK':
-                products_qs = products_qs.filter(total_stock_annotated=0)
+        elif stock_filter == 'OUT_OF_STOCK':
+            products_qs = products_qs.filter(
+                Q(available_quantity__lte=0) | Q(available_quantity__isnull=True)
+            )
 
         products_list = []
-        for p in products_qs.order_by('-created_at', 'product_name'):
-            cat_name = p.category.category_name if p.category else ''
-            cat_name_lower = (cat_name or '').strip().lower()
-            img_url = CATEGORY_IMAGE_MAPPING.get(cat_name_lower, None)
-
-            tot_stock = int(getattr(p, 'total_stock_annotated', 0) or 0)
-            is_low = (0 < tot_stock <= 5)
-
-            # Warehouse stock breakdown
-            wh_breakdown = []
-            for inv in p.inventory_items.all():
-                if inv.warehouse:
-                    wh_breakdown.append({
-                        'warehouse_id': inv.warehouse_id,
-                        'warehouse_name': inv.warehouse.warehouse_name or inv.warehouse_id,
-                        'stock_quantity': inv.stock_quantity or 0,
-                        'reorder_level': inv.reorder_level or 5
-                    })
-
+        for p in products_qs.order_by('product_name', 'product_id')[:self.LIST_LIMIT]:
+            qty = p.available_quantity
+            cat_name = (p.main_category or '').strip()
+            img_url = p.image or CATEGORY_IMAGE_MAPPING.get(cat_name.lower(), None)
             products_list.append({
                 'product_id': p.product_id,
                 'product_name': p.product_name or 'Unnamed Product',
-                'category_id': p.category_id,
+                'main_category': p.main_category,
+                'sub_category': p.sub_category,
                 'category_name': cat_name or 'Uncategorized',
-                'sku': p.sku or 'N/A',
-                'description': p.description or '',
-                'gender': p.gender or 'Unisex',
-                'color': p.color or '',
-                'size': p.size or '',
-                'material': p.material or '',
-                'base_price': p.base_price or p.selling_price or 0,
-                'selling_price': p.selling_price or 0,
-                'cost_price': p.cost_price or 0,
-                'is_active': p.is_active if p.is_active is not None else True,
-                'launch_date': p.launch_date or '',
-                'total_stock': tot_stock,
-                'in_stock': tot_stock > 0,
-                'is_low_stock': is_low,
                 'image': img_url,
-                'warehouse_inventory': wh_breakdown
+                'link': p.link,
+                'discount_price': p.discount_price,
+                'selling_price': p.selling_price,
+                'base_price': p.base_price,
+                'actual_price': p.actual_price_text,
+                'available_quantity': qty,
+                'total_stock': (int(qty) if qty is not None else None),
+                'in_stock': (qty or 0) > 0,
+                'is_low_stock': (qty is not None and 0 < qty <= 5),
+                'is_active': p.is_active,
             })
 
         return Response({
             'metrics': {
                 'total_products': total_products,
-                'total_categories': total_categories,
+                'total_categories': len(categories_list),
                 'in_stock_products': in_stock_products,
                 'low_stock_products': low_stock_products,
             },
             'categories': categories_list,
             'products': products_list,
+            'truncated': products_qs.count() > self.LIST_LIMIT,
         }, status=status.HTTP_200_OK)
 
 
 class AdminProductCreateView(APIView):
     """
-    Admin-only endpoint to create a new retail product in the catalog:
-    - Validates product attributes (name, category, price)
-    - Persists product to real database table (`products`)
-    - Provisions initial inventory record in real database table (`inventory`)
+    Admin-only endpoint to create a new catalog product directly in the real
+    ``public.products`` table. Only supported columns are written; a product_key
+    is generated (unique) and stock is seeded from ``available_quantity``. There
+    is no ``inventory`` / ``categories`` table, so no related rows are created.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
+    SUPPORTED_FIELDS = {
+        'product_name', 'main_category', 'sub_category', 'image', 'link',
+        'discount_price', 'actual_price', 'available_quantity',
+    }
+
+    def _generate_product_key(self):
+        for _ in range(5):
+            candidate = f"P{uuid.uuid4().hex[:12].upper()}"
+            if not Product.objects.filter(product_id=candidate).exists():
+                return candidate
+        return f"P{uuid.uuid4().hex}"
+
     def post(self, request):
-        data = request.data
-        product_name = (data.get('product_name') or '').strip()
-        category_id = (data.get('category_id') or '').strip()
-        selling_price_raw = data.get('selling_price')
+        data = request.data or {}
+
+        # Reject unknown fields instead of silently dropping them.
+        unknown = sorted(set(data.keys()) - self.SUPPORTED_FIELDS - {'product_key'})
+        if unknown:
+            return Response(
+                {'errors': {f: ['This field is not supported by the product schema.']
+                            for f in unknown}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         errors = {}
+        product_name = (data.get('product_name') or '').strip()
+        main_category = (data.get('main_category') or '').strip()
 
-        if not product_name:
-            errors['product_name'] = ['Product name is required.']
-        elif len(product_name) < 2:
+        if not product_name or len(product_name) < 2:
             errors['product_name'] = ['Product name must be at least 2 characters.']
+        if not main_category:
+            errors['main_category'] = ['A main category is required.']
 
-        if not category_id:
-            errors['category_id'] = ['Category is required.']
-        else:
+        def _whole_non_negative(field, label, required=False, default=None):
+            raw = data.get(field)
+            if raw is None or raw == '':
+                if required:
+                    errors[field] = [f'{label} is required.']
+                return default
             try:
-                category_obj = Category.objects.get(category_id=category_id)
-            except Category.DoesNotExist:
-                errors['category_id'] = [f'Category with ID "{category_id}" does not exist.']
+                val = float(raw)
+            except (TypeError, ValueError):
+                errors[field] = [f'{label} must be a number.']
+                return default
+            if val < 0:
+                errors[field] = [f'{label} cannot be negative.']
+                return default
+            if val != int(val):
+                errors[field] = [f'{label} must be a whole number.']
+                return default
+            return val
 
-        if selling_price_raw is None or selling_price_raw == '':
-            errors['selling_price'] = ['Selling price is required.']
-        else:
-            try:
-                selling_price = float(selling_price_raw)
-                if selling_price < 0:
-                    errors['selling_price'] = ['Selling price cannot be negative.']
-            except ValueError:
-                errors['selling_price'] = ['Selling price must be a valid number.']
+        discount_price = _whole_non_negative('discount_price', 'Selling price', required=True)
+        available_quantity = _whole_non_negative(
+            'available_quantity', 'Available quantity', default=0.0
+        )
 
         if errors:
             return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        category_obj = Category.objects.get(category_id=category_id)
-        base_price_val = data.get('base_price') or selling_price_raw
-        cost_price_val = data.get('cost_price') or 0
-        sku_val = (data.get('sku') or '').strip() or f"SKU-{uuid.uuid4().hex[:8].upper()}"
-
-        new_product_id = str(uuid.uuid4())
-        now_str = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-
-        new_product = Product.objects.create(
-            product_id=new_product_id,
-            product_name=product_name,
-            category=category_obj,
-            sku=sku_val,
-            description=(data.get('description') or '').strip(),
-            gender=(data.get('gender') or 'Unisex').strip(),
-            color=(data.get('color') or '').strip(),
-            size=(data.get('size') or '').strip(),
-            material=(data.get('material') or '').strip(),
-            base_price=int(float(base_price_val)),
-            selling_price=int(float(selling_price_raw)),
-            cost_price=int(float(cost_price_val)),
-            is_active=bool(data.get('is_active', True)),
-            created_at=now_str,
-            updated_at=now_str,
-            launch_date=now_str[:10]
-        )
-
-        # Initial inventory provisioning
-        initial_stock = int(data.get('initial_stock') or 10)
-        warehouse_id_val = data.get('warehouse_id')
-
-        warehouse_obj = None
-        if warehouse_id_val:
-            warehouse_obj = Warehouse.objects.filter(warehouse_id=warehouse_id_val).first()
-        if not warehouse_obj:
-            warehouse_obj = Warehouse.objects.first()
-
-        if warehouse_obj and initial_stock >= 0:
-            inv_id = str(uuid.uuid4())
-            Inventory.objects.create(
-                inventory_id=inv_id,
-                product=new_product,
-                warehouse=warehouse_obj,
-                stock_quantity=initial_stock,
-                reorder_level=5,
-                last_restock_date=now_str[:10]
+        product_key = (data.get('product_key') or '').strip() or self._generate_product_key()
+        if Product.objects.filter(product_id=product_key).exists():
+            return Response(
+                {'errors': {'product_key': ['A product with this key already exists.']}},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        cat_name = category_obj.category_name or ''
-        img_url = CATEGORY_IMAGE_MAPPING.get(cat_name.strip().lower(), None)
+        actual_price_raw = data.get('actual_price')
+        product = Product.objects.create(
+            product_id=product_key,
+            product_name=product_name,
+            main_category=main_category,
+            sub_category=(data.get('sub_category') or '').strip() or None,
+            image=(data.get('image') or '').strip() or None,
+            link=(data.get('link') or '').strip() or None,
+            discount_price=discount_price,
+            actual_price_text=(str(actual_price_raw).strip() if actual_price_raw not in (None, '') else None),
+            available_quantity=available_quantity,
+            is_active=True,
+        )
+
+        # A brand-new catalog item changes every cached listing / category rail.
+        bump_catalog_version()
 
         return Response({
             'message': 'Product created successfully.',
             'product': {
-                'product_id': new_product.product_id,
-                'product_name': new_product.product_name,
-                'category_id': category_obj.category_id,
-                'category_name': cat_name,
-                'sku': new_product.sku,
-                'selling_price': new_product.selling_price,
-                'base_price': new_product.base_price,
-                'total_stock': initial_stock,
-                'is_active': new_product.is_active,
-                'image': img_url
+                'product_id': product.product_id,
+                'product_name': product.product_name,
+                'main_category': product.main_category,
+                'sub_category': product.sub_category,
+                'category_name': product.main_category,
+                'image': product.image,
+                'link': product.link,
+                'discount_price': product.discount_price,
+                'selling_price': product.selling_price,
+                'base_price': product.base_price,
+                'actual_price': product.actual_price_text,
+                'available_quantity': product.available_quantity,
+                'total_stock': (int(product.available_quantity)
+                                if product.available_quantity is not None else None),
+                'is_active': product.is_active,
             }
         }, status=status.HTTP_201_CREATED)
 

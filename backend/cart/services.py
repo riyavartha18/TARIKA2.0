@@ -1,4 +1,5 @@
 import logging
+import math
 
 from django.db import connection, transaction, DatabaseError, IntegrityError
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError, NotFound
@@ -107,13 +108,14 @@ class CustomerResolver:
 def _get_active_product(product_id):
     """Load a product by its real key, or raise 404.
 
-    `public.products` has no active flag, so a row's existence is the only
-    availability signal the schema provides; stock is checked separately.
+    Archived (soft-deleted) products are treated as not found: the row still
+    exists to preserve historical orders, but it can no longer be added to a
+    cart or wishlist. Stock is checked separately.
     """
     cleaned = str(product_id or '').strip()
     if not cleaned:
         raise ValidationError({"product_id": "A product id is required."})
-    product = Product.objects.filter(product_id=cleaned).first()
+    product = Product.objects.filter(product_id=cleaned, is_active=True).first()
     if not product:
         raise NotFound("Product not found.")
     return product
@@ -182,22 +184,26 @@ class CartService:
     def get_available_stock(product):
         """Stock carried on the product row (`available_quantity`).
 
-        There is no separate inventory table in this database. A missing value
-        is treated as unknown stock rather than zero, so products without
-        recorded quantities are not blocked at the cart level.
+        Unified null-stock policy: a missing (NULL) value means the quantity is
+        unknown and is treated as 0 (not available). This matches the catalog
+        in-stock filter (``available_quantity > 0``), the Stock-to-Be-Ordered /
+        demand forecast (``COALESCE(available_quantity, 0)``) and the warehouse
+        availability label, so a product whose stock cannot be confirmed is
+        never silently sold. The value is floored (never rounded up) so a stray
+        fractional figure can only ever lower, not raise, the sellable limit.
         """
         quantity = getattr(product, 'available_quantity', None)
         if quantity is None:
-            return None
+            return 0
         try:
-            return int(quantity)
+            return math.floor(float(quantity))
         except (TypeError, ValueError):
-            return None
+            return 0
 
     @classmethod
     def _guard_quantity(cls, product, quantity, current_in_cart=0):
         available = cls.get_available_stock(product)
-        if available is not None and quantity > available:
+        if quantity > available:
             raise ValidationError(
                 f"Only {available} unit(s) of '{product.product_name}' are in stock "
                 f"(you have {current_in_cart} in your bag)."
@@ -253,7 +259,7 @@ class CartService:
             raise ValidationError({"quantity": "Quantity must be at least 1."})
 
         available = cls.get_available_stock(product)
-        if available is not None and available <= 0:
+        if available <= 0:
             raise ValidationError(f"'{product.product_name}' is currently out of stock.")
 
         try:

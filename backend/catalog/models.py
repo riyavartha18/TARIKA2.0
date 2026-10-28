@@ -80,6 +80,12 @@ class Product(models.Model):
     # There is no separate inventory table in this database; availability is
     # carried directly on the product row as a numeric quantity.
     available_quantity = models.FloatField(blank=True, null=True, db_column='available_quantity')
+    # Soft-delete / archive flag added by `ensure_inventory_schema`. A product
+    # that still has order/cart/wishlist history is archived (is_active=False)
+    # instead of hard-deleted, so it disappears from every storefront while the
+    # historical rows keep their foreign key. Default TRUE keeps existing rows
+    # active.
+    is_active = models.BooleanField(default=True, db_column='is_active')
 
     class Meta:
         db_table = 'products'

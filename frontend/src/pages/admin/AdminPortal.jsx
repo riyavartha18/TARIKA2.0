@@ -4,7 +4,6 @@ import AdminSidebar, { ADMIN_NAV_ITEMS } from './AdminSidebar';
 import AdminHeader from './AdminHeader';
 import AdminDashboardView from './AdminDashboardView';
 import AdminStaffView from './AdminStaffView';
-import AdminWarehouseView from './AdminWarehouseView';
 import AdminProductView from './AdminProductView';
 import AdminAnalyticsView from './AdminAnalyticsView';
 import AdminSectionPlaceholder from './AdminSectionPlaceholder';
@@ -76,12 +75,11 @@ export default function AdminPortal() {
             <Route index element={<AdminDashboardView />} />
             <Route path="dashboard" element={<AdminDashboardView />} />
             <Route path="staff" element={<AdminStaffView />} />
-            <Route path="warehouses" element={<AdminWarehouseView />} />
             <Route path="products" element={<AdminProductView />} />
             <Route path="analytics" element={<AdminAnalyticsView />} />
             <Route path="analysis" element={<AdminAnalyticsView />} />
             {ADMIN_NAV_ITEMS.filter(
-              (item) => !['dashboard', 'staff', 'warehouses', 'products', 'analytics', 'analysis'].includes(item.id)
+              (item) => !['dashboard', 'staff', 'products', 'analytics', 'analysis'].includes(item.id)
             ).map((item) => (
               <Route
                 key={item.id}

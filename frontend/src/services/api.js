@@ -1032,7 +1032,28 @@ export async function getAdminDashboardStats(token) {
 }
 
 /**
- * Fetch system staff members (Warehouse Managers, Delivery Partners) with filters.
+ * Fetch the aggregated sales history (units sold over time) for ONE product,
+ * from real delivered orders. granularity: 'day' | 'week' | 'month'.
+ */
+export async function getProductSalesHistory(token, productKey, granularity = 'month') {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const params = new URLSearchParams({ product_key: productKey, granularity });
+    const response = await fetch(`${API_BASE_URL}/api/demand-prediction/history/?${params.toString()}`, { headers });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to load sales history.' };
+    }
+    return { success: true, points: data.points || [], totalUnits: data.total_units || 0, granularity: data.granularity };
+  } catch (err) {
+    return { success: false, error: 'Network error loading sales history.' };
+  }
+}
+
+/**
+ * Fetch staff members from the backend (public.app_users). Supports search,
+ * role + status filters and server-side pagination.
  */
 export async function getStaffList(token, params = {}) {
   try {
@@ -1043,6 +1064,8 @@ export async function getStaffList(token, params = {}) {
     if (params.search) query.append('search', params.search);
     if (params.role && params.role !== 'ALL') query.append('role', params.role);
     if (params.status && params.status !== 'ALL') query.append('status', params.status);
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
 
     const qs = query.toString();
     const url = `${API_BASE_URL}/api/admin/staff/${qs ? '?' + qs : ''}`;
@@ -1054,8 +1077,9 @@ export async function getStaffList(token, params = {}) {
     return {
       success: true,
       summary: data.summary || {},
-      employees: data.employees || [],
-      warehouses: data.warehouses || [],
+      staff: data.staff || [],
+      roles: data.roles || [],
+      pagination: data.pagination || {},
     };
   } catch (err) {
     return { success: false, error: 'Network error fetching staff list.' };
@@ -1063,7 +1087,7 @@ export async function getStaffList(token, params = {}) {
 }
 
 /**
- * Create a new staff member (Warehouse Manager or Delivery Partner).
+ * Create a staff account in public.app_users (password hashed server-side).
  */
 export async function createStaffMember(token, payload) {
   try {
@@ -1078,27 +1102,53 @@ export async function createStaffMember(token, payload) {
     const data = await response.json();
     if (!response.ok) {
       const errorMsg = data.errors
-        ? Object.entries(data.errors).map(([f, m]) => `${f}: ${m}`).join(', ')
-        : (data.detail || (typeof data === 'object' && Object.values(data)[0] && (Array.isArray(Object.values(data)[0]) ? Object.values(data)[0][0] : Object.values(data)[0])) || 'Failed to create staff member.');
+        ? Object.values(data.errors).flat().join(', ')
+        : (data.detail || 'Failed to create staff member.');
       return { success: false, error: errorMsg };
     }
-    return { success: true, message: data.message, employee: data.employee };
+    return { success: true, message: data.message, staff: data.staff };
   } catch (err) {
     return { success: false, error: 'Network error creating staff member.' };
   }
 }
 
 /**
+ * Edit a staff account (role / active / optional password reset).
+ */
+export async function updateStaffMember(token, userId, payload) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/admin/staff/${userId}/`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const errorMsg = data.errors
+        ? Object.values(data.errors).flat().join(', ')
+        : (data.detail || 'Failed to update staff member.');
+      return { success: false, error: errorMsg };
+    }
+    return { success: true, message: data.message, staff: data.staff };
+  } catch (err) {
+    return { success: false, error: 'Network error updating staff member.' };
+  }
+}
+
+/**
  * Toggle staff active status (activate / deactivate).
  */
-export async function toggleStaffStatus(token, employeeId, targetStatus = null) {
+export async function toggleStaffStatus(token, userId, targetStatus = null) {
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const body = targetStatus !== null ? JSON.stringify({ is_active: targetStatus }) : undefined;
 
-    const response = await fetch(`${API_BASE_URL}/api/admin/staff/${employeeId}/toggle-status/`, {
+    const response = await fetch(`${API_BASE_URL}/api/admin/staff/${userId}/toggle-status/`, {
       method: 'PATCH',
       headers,
       body,
@@ -1107,7 +1157,7 @@ export async function toggleStaffStatus(token, employeeId, targetStatus = null) 
     if (!response.ok) {
       return { success: false, error: data.detail || 'Failed to toggle staff status.' };
     }
-    return { success: true, message: data.message, employee: data.employee };
+    return { success: true, message: data.message, staff: data.staff };
   } catch (err) {
     return { success: false, error: 'Network error toggling staff status.' };
   }
@@ -1442,6 +1492,191 @@ export async function getStockCategories(token) {
     return { success: true, categories: data.categories || [] };
   } catch (err) {
     return { success: false, error: 'Network error fetching stock categories.' };
+  }
+}
+
+/* ==========================================================================
+   WAREHOUSE DELETE + REPLENISHMENT ORDERING API HELPERS
+   ========================================================================== */
+
+/**
+ * Permanently remove (or archive, if it has history) a product via Warehouse.
+ * Django authenticates the Bearer token, enforces the warehouse role and chooses
+ * hard-delete vs archive based on foreign-key references. Invalidates the
+ * cached category list so the storefront refreshes.
+ */
+export async function deleteWarehouseProduct(productId, token = null) {
+  try {
+    const authToken = token || localStorage.getItem('iras_token');
+    const headers = {};
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/warehouse/products/${encodeURIComponent(productId)}/`, {
+      method: 'DELETE',
+      headers,
+    });
+    const data = await response.json();
+    if (response.status === 401 || response.status === 403) {
+      return { success: false, error: data.detail || 'You are not authorised to delete products.' };
+    }
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to delete product.' };
+    }
+    invalidateCategoriesCache();
+    return { success: true, message: data.message, action: data.action };
+  } catch (err) {
+    return { success: false, error: 'Network error deleting product' };
+  }
+}
+
+/** Place a single-product replenishment (restock) order. */
+export async function createReplenishmentOrder(token, productKey, quantity) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/order/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ product_key: productKey, quantity }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const err = data.detail || (data.errors && Object.values(data.errors).flat()[0]) || 'Failed to place order.';
+      return { success: false, error: err };
+    }
+    // The reorder committed a stock increment, so drop the cached catalog so the
+    // Warehouse inventory re-reads the new available_quantity (no full reload).
+    invalidateCategoriesCache();
+    return {
+      success: true,
+      message: data.message,
+      order: data.order,
+      availableQuantity: data.available_quantity,
+      addedQuantity: data.added_quantity,
+    };
+  } catch (err) {
+    return { success: false, error: 'Network error placing replenishment order.' };
+  }
+}
+
+/** Preview which products a bulk “Order All <tier> Demand Products” action would order. */
+export async function getDemandPreview(token, tier = 'High') {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/demand-preview/?tier=${encodeURIComponent(tier)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to load demand products.' };
+    }
+    return { success: true, items: data.items || [], productCount: data.product_count, totalQuantity: data.total_quantity };
+  } catch (err) {
+    return { success: false, error: 'Network error loading bulk-order preview.' };
+  }
+}
+
+/** Confirm a bulk replenishment order for a demand tier, optionally only the
+ *  reviewed product subset (staff can deselect individual products). */
+export async function orderAllDemand(token, tier = 'High', productKeys = null) {
+  try {
+    const body = { tier };
+    if (Array.isArray(productKeys)) body.product_keys = productKeys;
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/demand-order/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to place bulk order.' };
+    }
+    return {
+      success: true,
+      message: data.message,
+      createdCount: data.created_count,
+      skippedCount: data.skipped_count,
+      failedCount: data.failed_count,
+      totalQuantity: data.total_quantity,
+      orders: data.orders || [],
+      failures: data.failures || [],
+    };
+  } catch (err) {
+    return { success: false, error: 'Network error placing bulk order.' };
+  }
+}
+
+/** Record that a replenishment order's goods were received (adds to stock). */
+export async function receiveReplenishmentOrder(token, poKey, quantityReceived = null) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/orders/${encodeURIComponent(poKey)}/receive/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(quantityReceived == null ? {} : { quantity_received: quantityReceived }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const err = data.detail || (data.errors && Object.values(data.errors).flat()[0]) || 'Failed to record receipt.';
+      return { success: false, error: err };
+    }
+    invalidateCategoriesCache();
+    return { success: true, message: data.message, addedQuantity: data.added_quantity, availableQuantity: data.available_quantity };
+  } catch (err) {
+    return { success: false, error: 'Network error recording receipt.' };
+  }
+}
+
+/** Edit the proposed supplier quantity of a Pending purchase order.
+ *  Persisted through Django into Neon; never changes available stock. */
+export async function updateReplenishmentOrder(token, poKey, quantity) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/orders/${encodeURIComponent(poKey)}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ quantity }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const err = data.detail || (data.errors && Object.values(data.errors).flat()[0]) || 'Failed to update order quantity.';
+      return { success: false, error: err };
+    }
+    return { success: true, message: data.message, order: data.order };
+  } catch (err) {
+    return { success: false, error: 'Network error updating replenishment order.' };
+  }
+}
+
+/** Cancel a Pending supplier purchase order (stock is never affected). */
+export async function cancelReplenishmentOrder(token, poKey) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/orders/${encodeURIComponent(poKey)}/`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to cancel order.' };
+    }
+    return { success: true, message: data.message, order: data.order };
+  } catch (err) {
+    return { success: false, error: 'Network error cancelling replenishment order.' };
+  }
+}
+
+/** List replenishment purchase orders (optionally by status / product). */
+export async function getReplenishmentOrders(token, params = {}) {
+  try {
+    const query = new URLSearchParams();
+    if (params.status && params.status !== 'ALL') query.append('status', params.status);
+    if (params.productKey) query.append('product_key', params.productKey);
+    const qs = query.toString();
+    const response = await fetch(`${API_BASE_URL}/api/stock-to-be-ordered/orders/${qs ? '?' + qs : ''}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to fetch purchase orders.' };
+    }
+    return { success: true, orders: data.orders || [], count: data.count };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching purchase orders.' };
   }
 }
 

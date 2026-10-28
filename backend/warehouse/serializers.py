@@ -112,6 +112,7 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     availability_label = serializers.SerializerMethodField()
+    is_active = serializers.BooleanField(read_only=True)
     image = serializers.SerializerMethodField()
 
     class Meta:
@@ -135,6 +136,7 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
             'in_stock',
             'total_stock',
             'availability_label',
+            'is_active',
             'image',
         ]
 
@@ -180,8 +182,11 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     Write serializer for PUT /api/warehouse/products/<product_key>/.
     Validates exactly the editable columns of the real `public.products`
     schema — all business rules are enforced here in Django, not in React.
-    `discount_price` and `available_quantity` are double precision numbers;
-    `actual_price` is TEXT in the database and stays text here.
+    `discount_price` is a double precision number; `actual_price` is TEXT in
+    the database and stays text here; `available_quantity` is a whole-unit,
+    non-negative stock count. Any field that is not a real, supported column is
+    rejected outright (never silently ignored), so a stale legacy payload from
+    the admin editor fails loudly instead of quietly persisting nothing.
     """
     product_name = serializers.CharField(max_length=1000)
     main_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
@@ -191,6 +196,7 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     discount_price = serializers.FloatField(required=False, allow_null=True)
     actual_price = serializers.CharField(max_length=255, allow_blank=True, required=False, allow_null=True)
     available_quantity = serializers.FloatField(required=False, allow_null=True)
+    is_active = serializers.BooleanField(required=False)
 
     @staticmethod
     def _clean_number(value, field_label):
@@ -224,11 +230,31 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
         return value
 
     def validate_available_quantity(self, value):
-        """Available stock must be a finite, non-negative number if provided."""
+        """Stock must be a finite, non-negative WHOLE number when provided.
+
+        Fractional values are rejected outright rather than silently truncated
+        with int(), so a caller can never lose (or invent) stock through a
+        rounding side-effect. A null value is preserved (see the null-stock
+        policy) and means 'stock unknown'."""
         value = self._clean_number(value, 'Available quantity')
-        if value is not None and value < 0:
+        if value is None:
+            return None
+        if value < 0:
             raise serializers.ValidationError('Available quantity cannot be negative.')
-        return value
+        if value != int(value):
+            raise serializers.ValidationError('Available quantity must be a whole number of units.')
+        return float(int(value))
+
+    def validate(self, attrs):
+        # Reject any key the real `products` schema does not support instead of
+        # silently dropping it (legacy editors sent description/sku/color/...).
+        unknown = sorted(set(self.initial_data or {}) - set(self.fields.keys()))
+        if unknown:
+            raise serializers.ValidationError({
+                field: ['This field is not supported by the product schema.']
+                for field in unknown
+            })
+        return attrs
 
 
 class WarehouseOrderSerializer(serializers.ModelSerializer):

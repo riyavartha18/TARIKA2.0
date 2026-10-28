@@ -11,6 +11,7 @@ from admin.views import (
     AdminProductListView,
     AdminStaffListView,
     AdminStaffToggleStatusView,
+    AdminStaffUpdateView,
     AdminWarehouseListView,
 )
 
@@ -20,7 +21,8 @@ urlpatterns = [
     path('dashboard/', AdminDashboardStatsView.as_view(), name='dashboard'),
     path('staff/', AdminStaffListView.as_view(), name='staff-list'),
     path('staff/create/', AdminCreateStaffView.as_view(), name='staff-create'),
-    path('staff/<int:employee_id>/toggle-status/', AdminStaffToggleStatusView.as_view(), name='staff-toggle-status'),
+    path('staff/<int:user_id>/', AdminStaffUpdateView.as_view(), name='staff-update'),
+    path('staff/<int:user_id>/toggle-status/', AdminStaffToggleStatusView.as_view(), name='staff-toggle-status'),
     path('warehouses/', AdminWarehouseListView.as_view(), name='warehouses'),
     path('products/', AdminProductListView.as_view(), name='products'),
     path('products/create/', AdminProductCreateView.as_view(), name='products-create'),

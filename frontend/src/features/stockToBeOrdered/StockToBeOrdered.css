@@ -14,17 +14,25 @@
 }
 
 /* ── Page Header ─────────────────────────────────────── */
+/* ── Premium glass header (translucent blush-white toolbar) ── */
 .stbo-page-header {
-  background: #FFFFFF;
-  border-radius: 20px;
-  padding: 1.75rem 2rem;
-  border: 1px solid #F0E2E0;
-  box-shadow: 0 8px 30px rgba(184, 80, 94, 0.04);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 18px;
+  padding: 1.1rem 1.5rem;
+  border: 1px solid rgba(216, 114, 126, 0.22);
+  box-shadow: 0 10px 28px rgba(31, 25, 27, 0.06);
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 1.25rem;
+  gap: 1rem;
+}
+
+/* Readable fallback where backdrop-filter is unsupported. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .stbo-page-header { background: rgba(255, 255, 255, 0.96); }
 }
 
 .stbo-page-header-left {
@@ -34,10 +42,11 @@
 }
 
 .stbo-header-icon-wrap {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: rgba(216, 114, 126, 0.1);
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: rgba(216, 114, 126, 0.12);
+  border: 1px solid rgba(216, 114, 126, 0.18);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -45,26 +54,38 @@
 }
 
 .stbo-header-icon {
-  font-size: 1.6rem;
+  font-size: 1.4rem;
 }
 
 .stbo-title {
-  font-size: 1.55rem;
+  font-size: 1.45rem;
   font-weight: 700;
   color: #1F191B;
-  margin: 0 0 4px;
+  margin: 0 0 3px;
   font-family: 'Playfair Display', Georgia, serif;
+  line-height: 1.25;
 }
 
 .stbo-subtitle {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: #6B5E63;
   margin: 0;
+  line-height: 1.5;
 }
 
+/* "Live demand snapshot" as a compact accent pill in the existing theme. */
 .stbo-forecast-month {
+  display: inline-block;
   color: #B8505E;
   font-weight: 700;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  background: rgba(216, 114, 126, 0.12);
+  border: 1px solid rgba(216, 114, 126, 0.28);
+  border-radius: 9999px;
+  padding: 0.08rem 0.6rem;
+  vertical-align: 1px;
+  white-space: nowrap;
 }
 
 /* ── Search ──────────────────────────────────────────── */
@@ -87,21 +108,23 @@
 
 .stbo-search-input {
   width: 100%;
-  padding: 9px 14px 9px 36px;
+  height: 40px;
+  padding: 0 14px 0 36px;
   border-radius: 9999px;
-  border: 1px solid #F0E2E0;
-  background: #FAF7F5;
+  border: 1px solid rgba(216, 114, 126, 0.25);
+  background: rgba(255, 255, 255, 0.6);
   color: #1F191B;
   font-size: 0.85rem;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
   box-sizing: border-box;
   font-family: inherit;
 }
 
 .stbo-search-input:focus {
+  background: rgba(255, 255, 255, 0.88);
   border-color: #D8727E;
-  box-shadow: 0 0 0 3px rgba(216, 114, 126, 0.1);
+  box-shadow: 0 0 0 3px rgba(216, 114, 126, 0.14);
 }
 
 .stbo-search-input::placeholder {
@@ -698,3 +721,279 @@
   }
 }
 
+
+
+/* ── Bulk action buttons (glass toolbar) ────────────── */
+/* All three tier actions are pixel-identical: same height, padding, radius,
+   typography and icon alignment; only the icon + label differentiate them.
+   Translucent blush surface keeps them lightweight against the glass header. */
+.stbo-bulk-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  height: 40px;
+  padding: 0 1.05rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1;
+  font-family: inherit;
+  white-space: nowrap;
+  border-radius: 10px;
+  color: #8E3642;
+  background: linear-gradient(135deg, rgba(216, 114, 126, 0.14) 0%, rgba(184, 80, 94, 0.2) 100%);
+  border: 1px solid rgba(216, 114, 126, 0.32);
+  box-shadow: 0 4px 14px rgba(184, 80, 94, 0.1);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.stbo-bulk-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(216, 114, 126, 0.24) 0%, rgba(184, 80, 94, 0.32) 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(184, 80, 94, 0.16);
+}
+.stbo-bulk-btn:focus-visible {
+  outline: 2px solid rgba(184, 80, 94, 0.55);
+  outline-offset: 2px;
+}
+.stbo-bulk-btn:active:not(:disabled) {
+  transform: translateY(1px) scale(0.99);
+  box-shadow: none;
+}
+.stbo-bulk-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+  box-shadow: none;
+}
+
+.stbo-bulk-btns { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+@media (max-width: 1200px) {
+  .stbo-bulk-btn { height: 38px; padding: 0 0.85rem; font-size: 0.78rem; }
+}
+@media (max-width: 900px) {
+  /* Compact, shrinkable row instead of full-width stretched blocks. */
+  .stbo-bulk-btns { width: 100%; flex-wrap: nowrap; }
+  .stbo-bulk-btns .stbo-bulk-btn { flex: 0 1 auto; min-width: 0; height: 36px; padding: 0 0.6rem; font-size: 0.72rem; }
+}
+@media (max-width: 768px) {
+  /* Very narrow: allow a clean two-line toolbar instead of overflow. */
+  .stbo-bulk-btns { flex-wrap: wrap; }
+  .stbo-bulk-btns .stbo-bulk-btn { flex: 1 1 auto; }
+}
+
+/* ── Card exit after a fully covering supplier order ────────
+   Subtle success highlight → smooth fade → height/spacing collapse.
+   Pure CSS transitions; the node is removed when the animation ends. */
+.stbo-card-exit {
+  animation: stboCardExit 0.85s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  pointer-events: none;
+}
+@keyframes stboCardExit {
+  0%   { opacity: 1; transform: translateY(0) scale(1); box-shadow: 0 4px 15px rgba(184, 80, 94, 0.03); }
+  20%  { opacity: 1; background: #F3FCF8; box-shadow: 0 0 0 2px rgba(5, 150, 105, 0.45), 0 8px 24px rgba(5, 150, 105, 0.14); }
+  55%  { opacity: 0.85; transform: scale(0.97); }
+  100% { opacity: 0; transform: scale(0.92); max-height: 0; min-height: 0; height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; border-width: 0; overflow: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stbo-card-exit { animation: none; opacity: 0; transition: opacity 0.15s ease; }
+}
+
+/* ── Flash banner ────────────────────────────────────── */
+.stbo-flash {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1.1rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: #ECFDF5;
+  border: 1px solid #A7F3D0;
+  color: #059669;
+}
+.stbo-flash[data-type="err"] {
+  background: #FEF2F2;
+  border-color: #FCA5A5;
+  color: #B42318;
+}
+
+/* ── Card order / receive actions ────────────────────── */
+.stbo-order-actions {
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed #F0E2E0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.stbo-qty-input {
+  width: 90px;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #F0E2E0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: #1F191B;
+}
+.stbo-order-btn {
+  background: #059669;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+.stbo-order-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.stbo-receive-btn {
+  background: #D97706;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.stbo-receive-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.stbo-pending-tag {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #D97706;
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem;
+}
+.stbo-ok-note { font-size: 0.82rem; color: #059669; font-weight: 600; }
+/* Edit pending supplier order — outline style matching the card action row. */
+.stbo-edit-btn {
+  background: #FFFFFF;
+  color: #B8505E;
+  border: 1px solid var(--tarika-border, #F0E2E0);
+  border-radius: 8px;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.stbo-edit-btn:hover:not(:disabled) { border-color: rgba(216, 114, 126, 0.45); background: #FBF1F0; }
+.stbo-edit-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ── Bulk confirmation modal ─────────────────────────── */
+.stbo-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 25, 27, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 1200;
+}
+.stbo-modal {
+  background: #FFFFFF;
+  border-radius: 18px;
+  padding: 1.75rem;
+  width: min(560px, 100%);
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(31, 25, 27, 0.25);
+}
+.stbo-modal-title { margin: 0 0 1rem; font-size: 1.2rem; font-weight: 800; color: #1F191B; }
+.stbo-modal-summary { font-size: 0.9rem; color: #1F191B; margin: 0 0 1rem; line-height: 1.5; }
+.stbo-modal-hint {
+  font-size: 0.82rem;
+  color: #6B5E63;
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  border-radius: 10px;
+  padding: 0.6rem 0.85rem;
+  margin: 0 0 1rem;
+  line-height: 1.45;
+}
+.stbo-modal-hint strong { color: #B8505E; }
+.stbo-modal-toggle-all {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #6B5E63;
+  margin: 0 0 0.5rem;
+  cursor: pointer;
+}
+.stbo-modal-check-row { cursor: pointer; align-items: center; }
+.stbo-modal-check-row input[type='checkbox'] { accent-color: #B8505E; width: 15px; height: 15px; flex-shrink: 0; cursor: pointer; }
+.stbo-modal-fail { color: #B42318; font-size: 0.78rem; font-weight: 600; flex-shrink: 0; max-width: 55%; text-align: right; }
+/* Supplier-order edit facts (read-only context above the editable quantity). */
+.stbo-modal-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+.stbo-modal-facts > div {
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  border-radius: 10px;
+  padding: 0.6rem 0.75rem;
+}
+.stbo-modal-facts span { display: block; font-size: 0.72rem; color: #6B5E63; font-weight: 600; margin-bottom: 0.15rem; }
+.stbo-modal-facts strong { font-size: 0.86rem; color: #1F191B; }
+.stbo-modal-field {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #1F191B;
+  margin-bottom: 1rem;
+}
+.stbo-modal-qty-input { width: 140px; display: block; margin-top: 0.35rem; }
+.stbo-modal-muted { font-size: 0.85rem; color: #6B5E63; margin: 0.4rem 0; }
+.stbo-modal-error { font-size: 0.85rem; color: #B42318; margin: 0.4rem 0; font-weight: 600; }
+.stbo-modal-list {
+  border: 1px solid #F0E2E0;
+  border-radius: 12px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1.25rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.stbo-modal-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #FBF1F0;
+  font-size: 0.84rem;
+}
+.stbo-modal-row:last-child { border-bottom: none; }
+.stbo-modal-name { color: #1F191B; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stbo-modal-qty { color: #059669; font-weight: 700; flex-shrink: 0; }
+.stbo-modal-actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
+.stbo-modal-cancel, .stbo-modal-close {
+  background: #FAF7F5;
+  border: 1px solid #F0E2E0;
+  color: #6B5E63;
+  border-radius: 10px;
+  padding: 0.6rem 1.2rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.stbo-modal-confirm {
+  background: linear-gradient(135deg, #D8727E 0%, #B8505E 100%);
+  border: none;
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.6rem 1.3rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.stbo-modal-confirm:disabled { opacity: 0.6; cursor: not-allowed; }

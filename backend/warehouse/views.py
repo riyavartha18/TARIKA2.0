@@ -8,6 +8,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from accounts.permissions import IsAuthenticatedUser, IsWarehouseManager
 from accounts.authentication import SupabaseAuthentication
+from catalog.cache import bump_catalog_version
 from .services import WarehouseService
 from .serializers import (
     WarehouseCategoryGroupedSerializer,
@@ -83,12 +84,12 @@ class WarehouseProductDetailView(APIView):
     authentication_classes = []
 
     def get_authenticators(self):
-        if self.request.method.lower() == 'put':
+        if self.request.method.lower() in ('put', 'delete'):
             return [SupabaseAuthentication()]
         return super().get_authenticators()
 
     def get_permissions(self):
-        if self.request.method.lower() == 'put':
+        if self.request.method.lower() in ('put', 'delete'):
             return [IsAuthenticatedUser(), IsWarehouseManager()]
         return super().get_permissions()
 
@@ -133,15 +134,53 @@ class WarehouseProductDetailView(APIView):
             )
 
         # 4. Serialise and return the updated product (with fresh inventory stock)
-        # A category edit changes the derived customer category list, so bust the
-        # cached /api/catalog/categories/ aggregate on the next request.
-        cache.delete('catalog:categories:v1')
+        # Any edit (price, stock, category) changes customer-facing listings and
+        # the derived category / curated caches, so refresh the whole catalog.
+        bump_catalog_version()
         read_serializer = WarehouseProductDetailSerializer(updated_product)
         return Response(
             {
                 'message': 'Product updated successfully.',
                 'product': read_serializer.data,
             },
+            status=status.HTTP_200_OK
+        )
+
+    def delete(self, request, product_id):
+        """DELETE /api/warehouse/products/<product_key>/
+
+        Requires an authenticated Warehouse Manager. The product is removed from
+        the real database: hard-deleted when nothing references it, or archived
+        (soft-deleted) when orders / cart / wishlist history still points at it,
+        so no business history is ever cascade-deleted."""
+        try:
+            result = WarehouseService.delete_product(product_id)
+        except Product.DoesNotExist:
+            return Response(
+                {'detail': f'Product "{product_id}" not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {'detail': f'Database error: {str(exc)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Product gone (deleted or archived): refresh every cached listing.
+        bump_catalog_version()
+
+        if result['action'] == 'deleted':
+            message = f'Product "{result["product_name"]}" was permanently deleted.'
+        else:
+            refs = result['reference_count']
+            message = (
+                f'Product "{result["product_name"]}" was archived. It no longer appears in '
+                f'any listing, but {refs} existing order/cart/wishlist/purchase-order '
+                'reference(s) were preserved, so no sales history or outstanding '
+                'supplier order was deleted.'
+            )
+        return Response(
+            {'message': message, 'action': result['action']},
             status=status.HTTP_200_OK
         )
 

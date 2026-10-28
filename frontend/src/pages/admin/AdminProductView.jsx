@@ -697,61 +697,12 @@ export default function AdminProductView() {
                   </p>
                 </div>
               )}
-
-              {/* Warehouse Inventory Breakdown */}
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyBetween: 'space-between', marginBottom: '0.5rem' }}>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#8E3642', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Warehouse Inventory Breakdown
-                  </span>
-                  <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#1F191B' }}>
-                    Total: {selectedProduct.total_stock} units
-                  </span>
-                </div>
-
-                {selectedProduct.warehouse_inventory && selectedProduct.warehouse_inventory.length > 0 ? (
-                  <div style={{ border: '1px solid #F0E2E0', borderRadius: '12px', overflow: 'hidden' }}>
-                    <table className="admin-table" style={{ fontSize: '0.8rem' }}>
-                      <thead>
-                        <tr>
-                          <th>Warehouse Facility</th>
-                          <th style={{ textAlign: 'right' }}>Stock Qty</th>
-                          <th style={{ textAlign: 'right' }}>Reorder Level</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {selectedProduct.warehouse_inventory.map((wh, idx) => (
-                          <tr key={idx}>
-                            <td style={{ fontWeight: 700 }}>{wh.warehouse_name}</td>
-                            <td style={{ textAlign: 'right', fontWeight: 800 }}>{wh.stock_quantity}</td>
-                            <td style={{ textAlign: 'right', color: '#6B5E63' }}>{wh.reorder_level}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p style={{ margin: 0, padding: '0.85rem', backgroundColor: '#FAF7F5', borderRadius: '12px', border: '1px solid #F0E2E0', fontSize: '0.8rem', color: '#6B5E63', fontStyle: 'italic' }}>
-                    No warehouse inventory allocation rows recorded for this product yet.
-                  </p>
-                )}
-              </div>
             </div>
 
             <div style={{ padding: '1.25rem 1.5rem', backgroundColor: '#FAF7F5', borderTop: '1px solid #F0E2E0', display: 'flex', justifyBetween: 'space-between', gap: '0.75rem' }}>
               <button
-                onClick={() => {
-                  const p = selectedProduct;
-                  setSelectedProduct(null);
-                  handleOpenEdit(p);
-                }}
-                style={{ flex: 1, padding: '0.65rem', borderRadius: '10px', border: 'none', backgroundColor: '#8E3642', color: '#FFFFFF', fontWeight: 700, cursor: 'pointer', fontSize: '0.85rem' }}
-              >
-                Edit Product
-              </button>
-              <button
                 onClick={() => setSelectedProduct(null)}
-                style={{ padding: '0.65rem 1.25rem', borderRadius: '10px', border: '1px solid #F0E2E0', backgroundColor: '#FFFFFF', color: '#1F191B', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
+                style={{ flex: 1, padding: '0.65rem 1.25rem', borderRadius: '10px', border: '1px solid #F0E2E0', backgroundColor: '#FFFFFF', color: '#1F191B', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
               >
                 Close
               </button>

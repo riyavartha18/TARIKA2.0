@@ -2,7 +2,6 @@ import React from 'react';
 import {
   LayoutDashboard,
   Users,
-  Building2,
   Package,
   BarChart3,
   ShieldCheck,
@@ -13,7 +12,6 @@ import {
 export const ADMIN_NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'staff', label: 'Staff Management', icon: Users },
-  { id: 'warehouses', label: 'Warehouses', icon: Building2 },
   { id: 'products', label: 'Products', icon: Package },
   { id: 'analytics', label: 'Admin Analysis', icon: BarChart3 },
 ];

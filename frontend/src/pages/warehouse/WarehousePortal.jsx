@@ -12,6 +12,7 @@ import {
   getWarehouseReturns,
   getWarehouseProductDetail,
   updateWarehouseProduct,
+  deleteWarehouseProduct,
   acceptWarehouseReturn,
   rejectWarehouseReturn,
   assignWarehouseReturnPickup,
@@ -54,6 +55,7 @@ import {
   Edit2,
   X,
   Save,
+  Trash2,
   Eye,
   Package2,
   Info,
@@ -271,14 +273,6 @@ function WarehouseProductCard({ product, onCardClick }) {
                 ₹{basePrice.toLocaleString('en-IN')}
               </span>
             )}
-          </div>
-
-          {/* Footer Bar: SKU & Stock badge */}
-          <div style={{ paddingTop: '0.5rem', borderTop: '1px solid var(--tarika-border, #F0E2E0)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.72rem', color: '#6B5E63' }}>
-            <code style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1F191B', background: '#FAF7F5', padding: '0.15rem 0.45rem', borderRadius: '4px', border: '1px solid #F0E2E0' }}>
-              {product.sku || 'SKU-KAT'}
-            </code>
-            <span>Stock: <strong style={{ color: isOutOfStock ? '#DC2626' : '#1F191B' }}>{isStockUnknown ? 'Data unavailable' : `${totalStock} units`}</strong></span>
           </div>
 
         </div>
@@ -810,7 +804,7 @@ function OrderDetailModal({ orderId, onClose, onOrderUpdated }) {
    On save, sends PUT request; Django validates and persists; modal refreshes.
    availability_label / in_stock / total_stock all come from Django — not React.
    ========================================================================== */
-function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token }) {
+function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDeleted, token }) {
   // Full product data fetched from Django (has stock, availability_label, etc.)
   const [product, setProduct] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -823,6 +817,11 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState(null);
   const [saveSuccess, setSaveSuccess] = React.useState(false);
+
+  // Delete state
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState(null);
 
   // Build an editable form object from a Django product payload.
   // null stock stays '' (unavailable) — never converted to an invented 0.
@@ -933,6 +932,22 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
       setSaveError(res.error || 'Failed to save changes. Please try again.');
     }
     setSaving(false);
+  };
+
+  const handleDelete = async () => {
+    if (!product?.product_id || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    const res = await deleteWarehouseProduct(product.product_id, token);
+    if (res.success) {
+      // Close the panel and let the parent refresh listings + counts.
+      if (onDeleted) onDeleted({ productId: product.product_id, action: res.action });
+      onClose();
+    } else {
+      setDeleteError(res.error || 'Failed to delete product. Please try again.');
+      setConfirmDelete(false);
+      setDeleting(false);
+    }
   };
 
   // Availability data comes exclusively from Django; a real 0 stays
@@ -1246,14 +1261,56 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
               </div>
             )}
 
+            {deleteError && (
+              <div style={{ margin: '0 1.5rem', padding: '0.8rem 1rem', borderRadius: '10px', background: '#FEF2F2', border: '1px solid #FCA5A5', color: '#B42318', fontSize: '0.82rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                <span>{deleteError}</span>
+              </div>
+            )}
+
             {/* Sticky Footer Actions */}
             <div style={{
               position: 'sticky', bottom: 0,
               backgroundColor: 'rgba(255, 255, 255, 0.97)',
               borderTop: '1px solid var(--tarika-border, #F0E2E0)',
               padding: '1rem 1.5rem',
-              display: 'flex', gap: '0.75rem', justifyContent: 'flex-end',
+              display: 'flex', gap: '0.75rem', justifyContent: 'space-between', alignItems: 'center',
             }}>
+              {/* Delete action (left) */}
+              {confirmDelete ? (
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '0.82rem', color: '#B42318', fontWeight: 600 }}>
+                    Delete “{product?.product_name}”? This removes it from the store.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    disabled={deleting}
+                    style={{ padding: '0.55rem 1rem', borderRadius: '10px', border: 'none', background: deleting ? 'rgba(180,35,24,0.5)' : '#B42318', color: '#fff', fontSize: '0.82rem', fontWeight: 700, cursor: deleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                  >
+                    {deleting ? 'Deleting…' : (<><Trash2 size={14} /> Confirm Delete</>)}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setConfirmDelete(false); setDeleteError(null); }}
+                    disabled={deleting}
+                    style={{ padding: '0.55rem 1rem', borderRadius: '10px', border: '1px solid var(--tarika-border, #F0E2E0)', background: '#FAF7F5', color: '#6B5E63', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    Keep Product
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={saving || deleting}
+                  style={{ padding: '0.65rem 1.2rem', borderRadius: '10px', border: '1px solid #FCA5A5', background: '#fff', color: '#B42318', fontSize: '0.85rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.45rem' }}
+                >
+                  <Trash2 size={15} /> Delete Product
+                </button>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
               <button
                 type="button"
                 onClick={onClose}
@@ -1299,6 +1356,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
                   </>
                 )}
               </button>
+              </div>
             </div>
           </div>
         )}
@@ -3597,6 +3655,12 @@ export default function WarehousePortal() {
             // The edit can change filter membership, category grouping, sort
             // position, and page counts, so refresh the current query from page 1.
             // Category names/counts may have changed — invalidate the cache.
+            invalidateCategoriesCache();
+            loadCategories();
+            fetchProducts(1);
+          }}
+          onDeleted={() => {
+            // Product deleted/archived: drop it from the list + counts everywhere.
             invalidateCategoriesCache();
             loadCategories();
             fetchProducts(1);

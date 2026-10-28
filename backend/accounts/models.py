@@ -64,6 +64,35 @@ class Customer(models.Model):
         return f"{self.customer_name or 'Customer'} ({self.email})"
 
 
+class AppUser(models.Model):
+    """Maps the real `public.app_users` staff table (managed=False).
+
+    This is the authoritative source for Admin Staff Management. It holds only
+    email / role / status / timestamps -- there is no full_name, phone or
+    warehouse column, so the Staff UI is scoped to exactly these fields.
+
+    `password_hash` is mapped so Django can create/rotate it via pgcrypto
+    `crypt()` in SQL, but it is NEVER selected into a response: the staff list /
+    serializers read explicit columns only (see admin/views.py), so the hash is
+    never returned to the browser or logged.
+    """
+    user_id = models.BigIntegerField(primary_key=True)
+    email = models.CharField(max_length=255)
+    password_hash = models.TextField(blank=True, null=True)
+    role = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'app_users'
+        managed = False
+        ordering = ['-created_at', 'user_id']
+
+    def __str__(self):
+        return f"{self.email} ({self.role})"
+
+
 class Employee(models.Model):
     employee_id = models.BigAutoField(primary_key=True)
     auth_user_id = models.UUIDField(unique=True)

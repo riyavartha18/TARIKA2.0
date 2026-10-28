@@ -9,7 +9,7 @@ no hardcoded predictions.
 Two things were updated to match the real Supabase data warehouse:
 
   * Source tables are now ``public.fact_product_analysis`` (metrics) joined to
-    ``public.dim_product`` (details/stock) on ``product_key``. The previous
+    ``public.products`` (details/stock) on ``product_key``. The previous
     ``fact_demand`` / ``dim_time`` time-series schema no longer exists.
   * The dataset is a single snapshot (one row per product) rather than monthly
     observations, so the model is trained on a *weighted frequency table*
@@ -19,11 +19,13 @@ Two things were updated to match the real Supabase data warehouse:
     training on all ~90k raw rows -- while transferring ~7k rows instead of 90k.
 
 Demand indicators used as features (what the customer does):
-    wishlist_count, cart_count, purchase_count
+    wishlist_count, cart_count
 Target (demand strength) is derived from ``units_sold`` using data-driven
 tercile cut-offs -- ``units_sold`` is the outcome being predicted, so it is
 never a feature. ``total_sales`` and ``available_quantity`` are shown as
 evidence / stock and are deliberately NOT demand features.
+(purchase_count was consolidated into the single authoritative units_sold
+metric and removed from fact_product_analysis.)
 """
 import math
 import threading
@@ -49,7 +51,7 @@ class DecisionTreeEngine:
     # indicators with low cardinality (kept the frequency-table training path
     # compact). total_sales/units_sold are intentionally excluded (see module
     # docstring) -- units_sold is the target, and available_quantity is stock.
-    FEATURE_NAMES = ['wishlist_count', 'cart_count', 'purchase_count']
+    FEATURE_NAMES = ['wishlist_count', 'cart_count']
 
     CLASS_ORDER = ['Low', 'Medium', 'High']
 
@@ -402,7 +404,6 @@ def load_training_frequency(low_max, medium_max):
         SELECT
             COALESCE(wishlist_count, 0)::int,
             COALESCE(cart_count, 0)::int,
-            COALESCE(purchase_count, 0)::int,
             CASE
                 WHEN COALESCE(units_sold, 0) <= %s THEN 'Low'
                 WHEN COALESCE(units_sold, 0) <= %s THEN 'Medium'
@@ -410,18 +411,17 @@ def load_training_frequency(low_max, medium_max):
             END,
             COUNT(*)::int
         FROM fact_product_analysis
-        GROUP BY 1, 2, 3, 4
+        GROUP BY 1, 2, 3
     """
     with connection.cursor() as cursor:
         cursor.execute(query, [low_max, medium_max])
         rows = cursor.fetchall()
 
     dataset = []
-    for wl, cart, purch, target, count in rows:
+    for wl, cart, target, count in rows:
         dataset.append({
             'wishlist_count': float(wl or 0),
             'cart_count': float(cart or 0),
-            'purchase_count': float(purch or 0),
             'target': target,
             'count': int(count or 0),
         })
@@ -461,14 +461,16 @@ def _build_model():
         ),
     }
 
-    # Precompute exact per-product distributions from the weighted table so no
-    # further 90k-row fetch or repeat calculation is needed to serve the page.
-    predicted_dist = {'High': 0, 'Medium': 0, 'Low': 0}
+    # Precompute the authoritative demand distribution. The served demand tier
+    # is the sales-derived units_sold tercile (the model's own target): the
+    # engagement-features ID3 tree is non-predictive on this dataset (feature
+    # information gain ~ 0 -> it collapses to a single leaf), so it is not used
+    # as the per-product label. The tree is still trained for the analytics
+    # explanation (entropy / information gain / best split).
     actual_dist = {label: 0 for label in DecisionTreeEngine.CLASS_ORDER}
     for combo in dataset:
-        sample = {f: combo[f] for f in DecisionTreeEngine.FEATURE_NAMES}
-        predicted_dist[_engine.predict_sample(tree, sample)] += combo['count']
         actual_dist[combo['target']] = actual_dist.get(combo['target'], 0) + combo['count']
+    predicted_dist = {label: actual_dist.get(label, 0) for label in DecisionTreeEngine.CLASS_ORDER}
 
     t_done = time.perf_counter()
     return {
@@ -523,7 +525,7 @@ def build_analytics_summary(force_refresh=False):
             'algorithm': 'Manual ID3 Decision Tree Classifier (Entropy & Information Gain)',
             'features': DecisionTreeEngine.FEATURE_NAMES,
             'target': 'units_sold tercile demand bucket',
-            'source_tables': ['public.fact_product_analysis', 'public.dim_product'],
+            'source_tables': ['public.fact_product_analysis', 'public.products'],
             'training_products': model['training_products'],
             'training_combinations': model['training_rows'],
             'total_products_analyzed': total_products,
@@ -586,6 +588,36 @@ def tree_to_sql_case(tree, params=None):
     return expr, params
 
 
+def demand_tier_sql(low_max, medium_max, column='units_sold'):
+    """SQL CASE assigning the authoritative demand tier from units_sold terciles.
+
+    The demand strength (units sold) is bucketed by the data-driven tercile
+    cutoffs the model already derives (``get_demand_cutoffs``), so this is the
+    model's own target definition -- not an arbitrary threshold. Used instead of
+    ``tree_to_sql_case`` for the per-product label because the engagement-features
+    ID3 tree carries no predictive signal for delivered units in this dataset and
+    would otherwise collapse every product to the majority class. `column` is a
+    fixed internal identifier, and the thresholds are bound as parameters.
+    Returns (sql_string, params_list).
+    """
+    if column not in ('units_sold', 'f.units_sold'):
+        raise ValueError(f"Unexpected demand column: {column}")
+    return (
+        f"CASE WHEN COALESCE({column}, 0) <= %s THEN 'Low' "
+        f"WHEN COALESCE({column}, 0) <= %s THEN 'Medium' ELSE 'High' END"
+    ), [low_max, medium_max]
+
+
+def units_sold_tier(units_sold, low_max, medium_max):
+    """Python twin of ``demand_tier_sql`` for a single units_sold value."""
+    u = _to_number(units_sold, 0.0)
+    if u <= _to_number(low_max, 0.0):
+        return 'Low'
+    if u <= _to_number(medium_max, 0.0):
+        return 'Medium'
+    return 'High'
+
+
 def recommended_action(predicted_demand, available_quantity, units_sold):
     """
     Short, plain-language action for a warehouse manager.
@@ -622,7 +654,7 @@ def _run_pipeline_full():
     query = """
         SELECT product_key,
                COALESCE(wishlist_count, 0), COALESCE(cart_count, 0),
-               COALESCE(purchase_count, 0), COALESCE(units_sold, 0), COALESCE(total_sales, 0)
+               COALESCE(units_sold, 0), COALESCE(total_sales, 0)
         FROM fact_product_analysis
     """
     with connection.cursor() as cursor:
@@ -631,11 +663,10 @@ def _run_pipeline_full():
 
     predictions = []
     dist = {'High': 0, 'Medium': 0, 'Low': 0}
-    for product_key, wl, cart, purch, units, sales in rows:
+    for product_key, wl, cart, units, sales in rows:
         sample = {
             'wishlist_count': _to_number(wl),
             'cart_count': _to_number(cart),
-            'purchase_count': _to_number(purch),
         }
         label = _engine.predict_sample(tree, sample)
         dist[label] = dist.get(label, 0) + 1

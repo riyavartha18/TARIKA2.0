@@ -11,6 +11,60 @@ from demand_prediction import engine
 from demand_prediction.engine import DecisionTreeEngine
 
 
+# Valid time buckets for the sales-history graph (whitelisted, never raw input).
+_GRANULARITY = {'day': 'day', 'week': 'week', 'month': 'month'}
+
+
+class ProductSalesHistoryView(APIView):
+    """GET /api/demand/history/?product_key=...&granularity=day|week|month
+
+    Aggregated units sold over time for ONE product, straight from real
+    ``public.orders`` -- never mock data. Uses the same completed-sale rule as
+    units_sold (delivery_status = 'Delivered'; Returned / In Transit excluded)
+    and sums ``orders.quantity`` so a multi-unit order counts its units. Only
+    the selected product's history is aggregated server-side. ``purchase_date``
+    is stored as TEXT 'DD-MM-YYYY', so only well-formed dates are converted.
+    A product with no delivered sales returns an empty ``points`` list (the
+    client shows an empty state).
+    """
+    permission_classes = [IsAuthenticatedUser, IsAdmin]
+
+    def get(self, request):
+        product_key = (request.query_params.get('product_key') or '').strip()
+        if not product_key:
+            return Response({'error': 'product_key is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        gran = _GRANULARITY.get((request.query_params.get('granularity') or 'month').strip().lower(), 'month')
+
+        # `gran` is from the fixed whitelist above, so the interpolation is safe.
+        query = f"""
+            SELECT to_char(date_trunc('{gran}', to_date(purchase_date, 'DD-MM-YYYY')), 'YYYY-MM-DD') AS period,
+                   SUM(quantity)::bigint AS units
+            FROM orders
+            WHERE product_id = %s
+              AND delivery_status = 'Delivered'
+              AND purchase_date ~ '^[0-9]{{2}}-[0-9]{{2}}-[0-9]{{4}}$'
+            GROUP BY 1
+            ORDER BY 1
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, [product_key])
+                rows = cursor.fetchall()
+        except Exception as exc:  # noqa: BLE001
+            return Response({'error': f'Could not load sales history: {type(exc).__name__}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        points = [{'period': p, 'units': int(u or 0)} for p, u in rows]
+        return Response({
+            'product_key': product_key,
+            'granularity': gran,
+            'points': points,
+            'total_units': sum(pt['units'] for pt in points),
+            'period_count': len(points),
+        }, status=status.HTTP_200_OK)
+
+
 class DemandPredictionAnalyticsView(APIView):
     """
     Aggregate analytics for the Demand Forecasting dashboard.
@@ -47,7 +101,6 @@ class DemandPredictionAnalyticsView(APIView):
 _SORTABLE = {
     'units_sold': 'c.units_sold',
     'total_sales': 'c.total_sales',
-    'purchase_count': 'c.purchase_count',
     'cart_count': 'c.cart_count',
     'wishlist_count': 'c.wishlist_count',
     'available_quantity': 'c.available_quantity',
@@ -83,7 +136,13 @@ class DemandPredictionProductsView(APIView):
                 )
 
             tree = model['decision_tree']
-            demand_case_sql, case_params = engine.tree_to_sql_case(tree)
+            cutoffs = model['cutoffs']
+            low_max = cutoffs['low_max']
+            medium_max = cutoffs['medium_max']
+            # Authoritative demand tier = data-driven units_sold terciles. The
+            # engagement-features tree has no signal here (see engine), so it is
+            # not used as the per-product label.
+            demand_case_sql, case_params = engine.demand_tier_sql(low_max, medium_max)
 
             page = max(1, int(request.query_params.get('page', 1) or 1))
             page_size = int(request.query_params.get('page_size', 12) or 12)
@@ -96,7 +155,7 @@ class DemandPredictionProductsView(APIView):
             sort_dir = request.query_params.get('dir', 'desc').strip().lower()
             sort_dir = 'ASC' if sort_dir == 'asc' else 'DESC'
 
-            where_clauses = []
+            where_clauses = ['d.is_active = TRUE']  # hide archived products
             where_params = []
             if search:
                 where_clauses.append(
@@ -124,7 +183,6 @@ class DemandPredictionProductsView(APIView):
                     f.product_key,
                     COALESCE(f.wishlist_count, 0)::int AS wishlist_count,
                     COALESCE(f.cart_count, 0)::int AS cart_count,
-                    COALESCE(f.purchase_count, 0)::int AS purchase_count,
                     COALESCE(f.units_sold, 0)::float AS units_sold,
                     COALESCE(f.total_sales, 0)::float AS total_sales,
                     COALESCE(d.name, CONCAT('Product #', f.product_key)) AS product_name,
@@ -135,7 +193,7 @@ class DemandPredictionProductsView(APIView):
                     d.available_quantity AS available_quantity,
                     {demand_case_sql} AS predicted_demand
                 FROM fact_product_analysis f
-                JOIN dim_product d ON f.product_key = d.product_key
+                JOIN products d ON f.product_key = d.product_key
                 {where_sql}
             """
             inner_params = case_params + where_params
@@ -180,15 +238,18 @@ class DemandPredictionProductsView(APIView):
                 columns = [col[0] for col in cursor.description]
                 rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
 
-            # Enrich each card with a decision-path explanation + action.
+            # Enrich each card with a sales-based rationale + action. The tier
+            # comes from the same units_sold terciles the SQL uses, so the badge
+            # always matches the filtering/ordering applied server-side.
             items = []
             for r in rows:
-                sample = {
-                    'wishlist_count': float(r['wishlist_count'] or 0),
-                    'cart_count': float(r['cart_count'] or 0),
-                    'purchase_count': float(r['purchase_count'] or 0),
-                }
-                prediction, steps = engine.classify_sample(tree, sample)
+                units = float(r['units_sold'] or 0)
+                prediction = engine.units_sold_tier(units, low_max, medium_max)
+                steps = [
+                    f"Units sold (delivered): {units:g}",
+                    f"Demand terciles: Low \u2264 {low_max:g} < Medium \u2264 {medium_max:g} < High",
+                    f"Demand tier: {prediction}",
+                ]
                 items.append({
                     'product_key': r['product_key'],
                     'product_name': r['product_name'],
@@ -198,8 +259,7 @@ class DemandPredictionProductsView(APIView):
                     'discount_price': r['discount_price'],
                     'wishlist_count': int(r['wishlist_count'] or 0),
                     'cart_count': int(r['cart_count'] or 0),
-                    'purchase_count': int(r['purchase_count'] or 0),
-                    'units_sold': float(r['units_sold'] or 0),
+                    'units_sold': units,
                     'total_sales': float(r['total_sales'] or 0),
                     'available_quantity': float(r['available_quantity'] or 0),
                     'predicted_demand': prediction,
@@ -240,7 +300,7 @@ class CategoryFilterView(APIView):
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT DISTINCT main_category FROM dim_product "
+                    "SELECT DISTINCT main_category FROM products "
                     "WHERE main_category IS NOT NULL AND main_category <> '' "
                     "ORDER BY main_category"
                 )
@@ -255,144 +315,31 @@ class CategoryFilterView(APIView):
 
 class SlowMovingInventoryView(APIView):
     """
-    API View for Slow-Moving Inventory Analysis.
+    Slow-Moving Inventory Analysis — RETIRED.
 
-    Calculates inventory velocity for each product-warehouse combination using
-    existing tables: inventory, order_items, orders, products, categories, warehouses.
+    The original implementation joined the ``inventory``, ``order_items``,
+    ``categories`` and ``warehouses`` tables and keyed stock by a per-warehouse
+    ``inventory.stock_quantity``. None of those tables exist in the connected
+    ``public`` schema (verified against the live database), and stock now lives
+    directly on ``products.available_quantity``. Velocity analysis would need
+    per-product sales over time, which the current single-snapshot ``orders``
+    table (no ``order_date``/``order_items``) cannot supply.
 
-    Classification:
-    - VERY SLOW: sales_last_30_days == 0 OR days_of_stock > 180
-    - SLOW: days_of_stock > 60 AND <= 180
-    - NORMAL: days_of_stock <= 60
+    Rather than return fabricated figures, the feature is clearly retired with an
+    explicit 503. Demand-driven replenishment (Stock to Be Ordered) is the
+    supported, schema-correct replacement and already surfaces low/zero-stock and
+    high-demand products.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     def get(self, request):
-        try:
-            cursor = connection.cursor()
-
-            today = datetime.now().date()
-            thirty_days_ago = today - timedelta(days=30)
-
-            query = """
-                SELECT
-                    inv.product_id,
-                    COALESCE(p.product_name, CONCAT('Product #', inv.product_id)) AS product_name,
-                    COALESCE(c.category_name, 'Uncategorized') AS category_name,
-                    inv.warehouse_id,
-                    COALESCE(w.warehouse_name, CONCAT('Warehouse #', inv.warehouse_id)) AS warehouse_name,
-                    COALESCE(inv.stock_quantity, 0) AS current_stock,
-                    COALESCE(sales.total_sold, 0) AS sales_last_30_days
-                FROM inventory inv
-                LEFT JOIN products p ON inv.product_id = p.product_id
-                LEFT JOIN categories c ON p.category_id = c.category_id
-                LEFT JOIN warehouses w ON inv.warehouse_id = w.warehouse_id
-                LEFT JOIN (
-                    SELECT
-                        oi.product_id,
-                        o.warehouse_id,
-                        COALESCE(SUM(oi.quantity), 0) AS total_sold
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.order_id
-                    WHERE o.order_date >= %s
-                      AND LOWER(COALESCE(o.order_status, '')) NOT IN ('cancelled', 'returned', 'failed')
-                    GROUP BY oi.product_id, o.warehouse_id
-                ) sales ON inv.product_id = sales.product_id AND inv.warehouse_id = sales.warehouse_id
-                WHERE COALESCE(inv.stock_quantity, 0) > 0
-                ORDER BY inv.product_id, inv.warehouse_id
-            """
-            cursor.execute(query, [str(thirty_days_ago)])
-            rows = cursor.fetchall()
-
-            items = []
-            for row in rows:
-                product_id = row[0]
-                product_name = row[1]
-                category_name = row[2]
-                warehouse_id = row[3]
-                warehouse_name = row[4]
-                current_stock = int(row[5] or 0)
-                sales_last_30 = int(row[6] or 0)
-
-                avg_daily_sales = round(sales_last_30 / 30.0, 2) if sales_last_30 > 0 else 0.0
-
-                if avg_daily_sales > 0:
-                    days_of_stock = round(current_stock / avg_daily_sales, 1)
-                else:
-                    days_of_stock = None
-
-                if sales_last_30 == 0 or (days_of_stock is not None and days_of_stock > 180):
-                    movement_status = 'VERY SLOW'
-                    recommended_action = 'Consider discount, bundle or stock transfer'
-                elif days_of_stock is not None and days_of_stock > 60:
-                    movement_status = 'SLOW'
-                    recommended_action = 'Consider promotional campaign'
-                else:
-                    movement_status = 'NORMAL'
-                    recommended_action = 'No action required'
-
-                display_days = days_of_stock if days_of_stock is not None else 999999
-
-                items.append({
-                    'product_id': product_id,
-                    'product_name': product_name,
-                    'category_name': category_name,
-                    'warehouse_id': warehouse_id,
-                    'warehouse_name': warehouse_name,
-                    'current_stock': current_stock,
-                    'sales_last_30_days': sales_last_30,
-                    'avg_daily_sales': avg_daily_sales,
-                    'days_of_stock': display_days,
-                    'movement_status': movement_status,
-                    'recommended_action': recommended_action,
-                })
-
-            search = request.query_params.get('search', '').strip().lower()
-            movement_filter = request.query_params.get('movement_status', '').strip().upper()
-            warehouse_filter = request.query_params.get('warehouse_id', '').strip()
-
-            filtered = items
-
-            if search:
-                filtered = [
-                    i for i in filtered
-                    if search in i['product_name'].lower() or search in i['category_name'].lower()
-                ]
-
-            if movement_filter and movement_filter != 'ALL':
-                filtered = [i for i in filtered if i['movement_status'] == movement_filter]
-
-            if warehouse_filter and warehouse_filter.lower() != 'all':
-                filtered = [i for i in filtered if str(i['warehouse_id']) == warehouse_filter]
-
-            very_slow_count = sum(1 for i in items if i['movement_status'] == 'VERY SLOW')
-            slow_count = sum(1 for i in items if i['movement_status'] == 'SLOW')
-            normal_count = sum(1 for i in items if i['movement_status'] == 'NORMAL')
-
-            warehouses_list = sorted(list(set(
-                (i['warehouse_id'], i['warehouse_name']) for i in items
-            )), key=lambda x: x[1])
-
-            response_data = {
-                'summary': {
-                    'total_inventory': len(items),
-                    'very_slow': very_slow_count,
-                    'slow': slow_count,
-                    'normal': normal_count,
-                },
-                'warehouses': [
-                    {'warehouse_id': wid, 'warehouse_name': wname}
-                    for wid, wname in warehouses_list
-                ],
-                'items': filtered,
-                'total_filtered': len(filtered),
-                'analysis_date': str(today),
-                'sales_window_start': str(thirty_days_ago),
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            return Response({
-                'error': f'An error occurred during slow-moving inventory analysis: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({
+            'unavailable': True,
+            'error': (
+                'Slow-moving inventory analysis is not supported by the current '
+                'database: the inventory / order_items / categories / warehouses '
+                'tables it required are not present. Use Stock to Be Ordered for '
+                'demand-driven replenishment instead.'
+            ),
+            'replacement': 'stock-to-be-ordered',
+        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)

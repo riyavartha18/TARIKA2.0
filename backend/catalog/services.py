@@ -23,9 +23,11 @@ class CatalogService:
     def get_annotated_products_queryset():
         """
         Returns a base queryset over the real public.products table.
+        Archived (soft-deleted) products are excluded so a warehouse delete
+        removes them from every customer listing, search and curated rail.
         (Legacy stock annotation removed: the new schema has no inventory data.)
         """
-        return Product.objects.all()
+        return Product.objects.filter(is_active=True)
 
     @staticmethod
     def _parse_price_filter(value):

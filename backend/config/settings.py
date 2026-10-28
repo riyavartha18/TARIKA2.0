@@ -141,18 +141,38 @@ DATABASES = {
 
 # ---------------------------------------------------------------------------
 # Cache
-# The customer-facing category list is derived from a GROUP BY over the whole
-# ~90k-row products table (~2.4s cold). It changes only when a warehouse
-# product's category is edited, so a short-lived in-process cache turns repeat
-# homepage loads into sub-millisecond reads without risking stale private data
-# (the endpoint is public and identical for every customer).
+# The customer-facing category list and curated home rails are derived from a
+# GROUP BY over the ~90k-row products table (~2.4s cold). They are refreshed via
+# a monotonically increasing "catalog version" key that every mutation bumps
+# (see catalog/cache.py bump_catalog_version).
+#
+# Backend selection (single place, no mandatory external service):
+#   * REDIS_URL set  -> shared Redis cache. REQUIRED when the app runs more than
+#     one worker/process, so a version bump by one worker is instantly visible
+#     to every other worker (LocMemCache is per-process and would serve stale
+#     catalogues elsewhere). Requires `pip install django-redis`.
+#   * otherwise      -> in-process LocMemCache. Safe default for single-process
+#     development (`runserver`), zero extra dependencies.
+# Deployments behind multiple gunicorn/uvicorn workers must set REDIS_URL.
 # ---------------------------------------------------------------------------
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'tarika-retail',
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            },
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'tarika-retail',
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

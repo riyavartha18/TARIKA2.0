@@ -22,6 +22,7 @@ from .serializers import (
     ReviewDetailSerializer,
     CATEGORY_IMAGE_MAPPING,
 )
+from .cache import categories_cache_key, curated_cache_key
 
 
 class GroupedCategoryProductsView(APIView):
@@ -81,11 +82,11 @@ class CategoryListView(APIView):
     """
     permission_classes = [AllowAny]
     authentication_classes = []
-    cache_key = 'catalog:categories:v1'
     cache_timeout = 600  # 10 minutes
 
     def get(self, request):
-        cached = cache.get(self.cache_key)
+        cache_key = categories_cache_key()
+        cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
@@ -96,6 +97,7 @@ class CategoryListView(APIView):
         # (avoids a second per-category query for subcategory navigation).
         rows = (
             Product.objects
+            .filter(is_active=True)
             .exclude(main_category__isnull=True)
             .exclude(main_category='')
             .values('main_category', 'sub_category')
@@ -125,7 +127,7 @@ class CategoryListView(APIView):
                     'product_count': row['product_count'],
                 })
         data = sorted(cat_map.values(), key=lambda c: c['category_name'])
-        cache.set(self.cache_key, data, self.cache_timeout)
+        cache.set(cache_key, data, self.cache_timeout)
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -200,7 +202,7 @@ class ProductDetailView(APIView):
         # product is fetched plainly. The serializer still exposes the same
         # response shape (total_stock / inventory_breakdown / rating_summary /
         # reviews default to safe empty values when those tables are absent).
-        product = get_object_or_404(Product.objects.all(), product_id=product_id)
+        product = get_object_or_404(Product.objects.filter(is_active=True), product_id=product_id)
         serializer = ProductDetailSerializer(product)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -259,7 +261,7 @@ def _paginated_curated_products(request, queryset, endpoint):
     # public and identical for every customer, so cache the serialized payload
     # keyed by endpoint + the exact query string for a short TTL.
     query_key = request.get_full_path()
-    cache_key = f'catalog:curated:{endpoint}:{query_key}'
+    cache_key = curated_cache_key(endpoint, query_key)
     cached = cache.get(cache_key)
     if cached is not None:
         return Response(cached, status=status.HTTP_200_OK)

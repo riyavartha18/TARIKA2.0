@@ -6,6 +6,7 @@ import {
   getDemandPredictionProducts,
   getDemandPredictionCategories,
   getSlowMovingInventory,
+  getProductSalesHistory,
 } from '../../services/api';
 import {
   BrainCircuit,
@@ -30,6 +31,7 @@ import {
   ShoppingCart,
   Package,
   Images,
+  X,
 } from 'lucide-react';
 import '../../styles/admin-portal.css';
 
@@ -66,8 +68,33 @@ export default function AdminAnalyticsView() {
   const [slowStatusFilter, setSlowStatusFilter] = useState('ALL');
   const [slowWarehouseFilter, setSlowWarehouseFilter] = useState('ALL');
 
+  // Product detail drawer (image click) + sales-history graph
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [history, setHistory] = useState({ loading: false, error: null, points: [], totalUnits: 0, granularity: 'month' });
+
   const getActiveToken = () =>
     authContextToken || localStorage.getItem('iras_token') || localStorage.getItem('token');
+
+  const loadHistory = useCallback(async (productKey, granularity = 'month') => {
+    setHistory({ loading: true, error: null, points: [], totalUnits: 0, granularity });
+    const res = await getProductSalesHistory(
+      authContextToken || localStorage.getItem('iras_token') || localStorage.getItem('token'),
+      productKey, granularity,
+    );
+    setHistory(res.success
+      ? { loading: false, error: null, points: res.points || [], totalUnits: res.totalUnits || 0, granularity }
+      : { loading: false, error: res.error || 'Failed to load sales history.', points: [], totalUnits: 0, granularity });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authContextToken]);
+
+  const openProductDetail = (p) => {
+    setSelectedProduct(p);
+    loadHistory(p.product_key, 'month');
+  };
+
+  const changeGranularity = (g) => {
+    if (selectedProduct) loadHistory(selectedProduct.product_key, g);
+  };
 
   const fetchAnalyticsData = async () => {
     setLoading(true);
@@ -295,7 +322,7 @@ export default function AdminAnalyticsView() {
 
             {/* Description */}
             <p style={{ color: '#6B5E63', fontSize: '0.95rem', lineHeight: 1.6, margin: '0 0 1.75rem 0' }}>
-              Classifies catalog products into demand tiers (High, Medium, Low) from live customer demand signals ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>wishlist_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>cart_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>purchase_count</code> ) to predict demand strength ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>units_sold</code> ), using a manual ID3 Decision Tree over <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>fact_product_analysis</code> + <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>dim_product</code>.
+              Classifies catalog products into demand tiers (High, Medium, Low) from live customer demand signals ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>wishlist_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>cart_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>purchase_count</code> ) to predict demand strength ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>units_sold</code> ), using a manual ID3 Decision Tree over <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>fact_product_analysis</code> joined to <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>products</code> on <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>product_key</code>.
             </p>
 
             {/* Demand Forecasting Visual Banner */}
@@ -506,15 +533,6 @@ export default function AdminAnalyticsView() {
                 </p>
               </div>
             </div>
-
-            <button
-              onClick={() => { fetchAnalyticsData(); fetchProducts(); }}
-              className="tarika-btn-outline"
-              style={{ padding: '0.55rem 1.1rem', fontSize: '0.82rem' }}
-            >
-              <RefreshCw size={14} />
-              <span>Refresh Predictions</span>
-            </button>
           </div>
 
           {/* Loading State */}
@@ -547,52 +565,6 @@ export default function AdminAnalyticsView() {
           {/* Data Loaded */}
           {!loading && !error && data && (
             <>
-              {/* Demand Model Info Banner */}
-              <div style={{
-                background: 'linear-gradient(135deg, #FAF7F5 0%, #FBF1F0 100%)',
-                border: '1px solid rgba(216, 114, 126, 0.25)',
-                borderRadius: '14px',
-                padding: '1.25rem 1.5rem',
-                marginBottom: '1.5rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flexWrap: 'wrap',
-                gap: '1rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  <div style={{
-                    width: '44px', height: '44px', borderRadius: '12px',
-                    backgroundColor: '#FDF2F4', color: '#B8505E',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>
-                    <BrainCircuit size={22} />
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#8E3642', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Demand Model
-                    </span>
-                    <h3 style={{ margin: '0.1rem 0 0', fontSize: '1.15rem', fontWeight: 800, color: '#1F191B', fontFamily: "var(--font-serif, 'Playfair Display', serif)" }}>
-                      ID3 decision tree · <span style={{ color: '#B8505E' }}>{totalCount.toLocaleString('en-IN')}</span> products classified
-                    </h3>
-                    <p style={{ margin: '0.25rem 0 0', fontSize: '0.8rem', color: '#6B5E63' }}>
-                      Demand strength (units sold) is split into Low ≤ {summary.demand_cutoffs?.low_max ?? '–'} and
-                      {' '}Medium ≤ {summary.demand_cutoffs?.medium_max ?? '–'}; the tree learns which customer signals predict it.
-                      {' '}Stock on hand is shown separately and is never counted as demand.
-                    </p>
-                  </div>
-                </div>
-                {data?.metadata?.model_rebuilt ? (
-                  <div style={{ fontSize: '0.78rem', color: '#059669', fontWeight: 700 }}>
-                    <CheckCircle2 size={14} style={{ verticalAlign: 'middle' }} /> Model recalculated
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.78rem', color: '#6B5E63' }}>
-                    Prepared in {data?.metadata?.build_ms ?? '–'} ms
-                  </div>
-                )}
-              </div>
-
               {/* Metrics Grid */}
               <div className="admin-metrics-grid" style={{ marginBottom: '1.5rem' }}>
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
@@ -705,7 +677,6 @@ export default function AdminAnalyticsView() {
                     <option value="demand">Sort: Demand tier</option>
                     <option value="units_sold">Sort: Units sold</option>
                     <option value="total_sales">Sort: Total sales</option>
-                    <option value="purchase_count">Sort: Purchases</option>
                     <option value="available_quantity">Sort: Stock on hand</option>
                     <option value="product_name">Sort: Product name</option>
                   </select>
@@ -755,7 +726,11 @@ export default function AdminAnalyticsView() {
 
                       return (
                         <div key={p.product_key} className="df-card" style={{ borderTop: `3px solid ${accent}` }}>
-                          <div className="df-card-media">
+                          <div className="df-card-media" role="button" tabIndex={0}
+                            onClick={() => openProductDetail(p)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openProductDetail(p); } }}
+                            title="View product details & sales history"
+                            style={{ cursor: 'pointer' }}>
                             {p.image ? (
                               <img src={p.image} alt={p.product_name} loading="lazy" className="df-card-img"
                                 onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }} />
@@ -773,7 +748,6 @@ export default function AdminAnalyticsView() {
 
                             <div className="df-evidence">
                               <span className="df-chip" title="Units sold"><TrendingUp size={12} /> {fmtNum(p.units_sold)} sold</span>
-                              <span className="df-chip" title="Purchase count"><CheckCircle2 size={12} /> {fmtNum(p.purchase_count)} buys</span>
                               <span className="df-chip" title="Cart count"><ShoppingCart size={12} /> {fmtNum(p.cart_count)}</span>
                               <span className="df-chip" title="Wishlist count"><Heart size={12} /> {fmtNum(p.wishlist_count)}</span>
                               <span className="df-chip" title="Total Revenue (fact_product_analysis.total_sales)"><IndianRupee size={12} /> Total Revenue {fmtNum(Math.round(p.total_sales))}</span>
@@ -826,7 +800,7 @@ export default function AdminAnalyticsView() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63' }}>
                 <span>Showing <strong>{productItems.length}</strong> of {productPagination.total_filtered?.toLocaleString('en-IN') ?? totalCount.toLocaleString('en-IN')} products</span>
-                <span>Dataset Source: <code style={{ fontSize: '0.75rem' }}>public.fact_product_analysis</code> + <code style={{ fontSize: '0.75rem' }}>public.dim_product</code></span>
+                <span>Dataset Source: <code style={{ fontSize: '0.75rem' }}>public.fact_product_analysis</code> + <code style={{ fontSize: '0.75rem' }}>public.products</code></span>
               </div>
             </>
           )}
@@ -1116,6 +1090,165 @@ export default function AdminAnalyticsView() {
           )}
         </>
       )}
+
+      {selectedProduct && (
+        <ProductDetailModal
+          product={selectedProduct}
+          history={history}
+          onClose={() => setSelectedProduct(null)}
+          onChangeGranularity={changeGranularity}
+        />
+      )}
     </div>
+  );
+}
+
+/* Sales-history bar chart drawn from real delivered-order aggregates. */
+function SalesHistoryChart({ points, granularity }) {
+  if (!points || points.length === 0) {
+    return (
+      <div style={{ padding: '2rem 1rem', textAlign: 'center', color: '#9E8F94', border: '1px dashed #F0E2E0', borderRadius: '12px' }}>
+        <PackageSearch size={26} style={{ marginBottom: '0.4rem' }} />
+        <p style={{ margin: 0, fontSize: '0.85rem' }}>No delivered sales recorded for this product yet.</p>
+      </div>
+    );
+  }
+  const width = 640;
+  const height = 220;
+  const pad = 8;
+  const max = Math.max(1, ...points.map((pt) => pt.units));
+  const step = (width - pad * 2) / points.length;
+  const baseline = height - 24;
+  const plotH = height - 40;
+  const fmtTick = (period) => (granularity === 'day' ? period.slice(8, 10) : granularity === 'week' ? period.slice(5, 10) : period.slice(0, 7));
+  const coords = points.map((pt, i) => ({
+    x: pad + i * step + step / 2,
+    y: baseline - (pt.units / max) * plotH,
+    pt,
+  }));
+  const linePts = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+  const areaPts = `${pad},${baseline} ${linePts} ${width - pad},${baseline}`;
+  return (
+    <div style={{ width: '100%', overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="Units sold over time">
+        {coords.length > 1 && (
+          <>
+            <polygon points={areaPts} fill="rgba(216, 114, 126, 0.15)" stroke="none" />
+            <polyline
+              points={linePts}
+              fill="none"
+              stroke="#D8727E"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </>
+        )}
+        <line x1={pad} y1={baseline} x2={width - pad} y2={baseline} stroke="#F0E2E0" />
+        {coords.map((c, i) => (
+          <g key={c.pt.period + i}>
+            <title>{`${c.pt.period}: ${c.pt.units} units`}</title>
+            <circle cx={c.x} cy={c.y} r={coords.length > 40 ? 1.5 : 3} fill="#B8505E" />
+          </g>
+        ))}
+        {points.map((pt, i) => {
+          if (points.length > 12 && i % Math.ceil(points.length / 8) !== 0) return null;
+          const x = pad + i * step + step / 2;
+          return (
+            <text key={`t-${pt.period}-${i}`} x={x} y={height - 8} fontSize="9" fill="#9E8F94" textAnchor="middle">
+              {fmtTick(pt.period)}
+            </text>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function ProductDetailModal({ product, history, onClose, onChangeGranularity }) {
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-IN');
+  const tier = product.predicted_demand || 'Medium';
+  const tierBadge = tier === 'High'
+    ? { backgroundColor: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' }
+    : tier === 'Medium'
+    ? { backgroundColor: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' }
+    : { backgroundColor: '#FEF2F2', color: '#DC2626', borderColor: '#FCA5A5' };
+  const last = history.points.length ? history.points[history.points.length - 1] : null;
+  const imageUrl = product.image || '';
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 200, backgroundColor: 'rgba(31,25,27,0.55)', backdropFilter: 'blur(4px)' }} />
+      <div role="dialog" aria-modal="true" aria-label="Product details" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, zIndex: 201, width: 'min(640px,100vw)', backgroundColor: '#FFF', boxShadow: '-8px 0 60px rgba(31,25,27,0.18)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'rgba(255,255,255,0.96)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--tarika-border,#F0E2E0)', padding: '1rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+          <span style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#8E3642' }}>Product Details</span>
+          <button onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: '50%', border: '1px solid var(--tarika-border,#F0E2E0)', backgroundColor: '#FAF7F5', color: '#6B5E63', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><X size={18} /></button>
+        </div>
+
+        <div style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          {/* Hero */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.25rem', padding: '1.25rem', background: 'linear-gradient(135deg,#FAF7F5 0%,#FBF1F0 100%)', borderBottom: '1px solid var(--tarika-border,#F0E2E0)', borderRadius: '14px' }}>
+            <div style={{ width: 120, height: 150, flexShrink: 0, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(216,114,126,0.15)' }}>
+              {imageUrl ? (<img src={imageUrl} alt={product.product_name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }} />) : (<div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9E8F94' }}><Images size={26} /></div>)}
+            </div>
+            <div style={{ flex: '1 1 220px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.4rem', justifyContent: 'center' }}>
+              <span style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#8E3642' }}>{product.main_category}{product.sub_category ? ` · ${product.sub_category}` : ''}</span>
+              <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: '#1F191B', lineHeight: 1.3 }}>{product.product_name}</h2>
+              <code style={{ fontFamily: 'monospace', fontSize: '0.75rem', fontWeight: 700, color: '#1F191B', background: '#FFF', padding: '0.2rem 0.55rem', borderRadius: 6, border: '1px solid #F0E2E0', alignSelf: 'flex-start', wordBreak: 'break-all' }}>{product.product_key}</code>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginTop: 2 }}>
+                <span style={{ ...tierBadge, fontSize: '0.75rem', fontWeight: 700, padding: '0.25rem 0.75rem', borderRadius: '9999px', border: `1px solid ${tierBadge.borderColor}` }}>{tier} demand</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Facts: sales demand vs stock, clearly separated */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: '0.75rem 1.5rem' }}>
+            {[
+              { label: 'Units sold (delivered)', value: `${fmtNum(product.units_sold)} units` },
+              { label: 'Available stock', value: `${fmtNum(product.available_quantity)} units` },
+              { label: 'Total sales value', value: `₹${fmtNum(Math.round(product.total_sales))}` },
+              { label: 'Wishlist signals', value: `${fmtNum(product.wishlist_count)}` },
+              { label: 'Cart signals', value: `${fmtNum(product.cart_count)}` },
+            ].map(({ label, value }) => (
+              <div key={label}>
+                <p style={{ margin: '0 0 2px', fontSize: '0.7rem', fontWeight: 600, color: '#9E8F94', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</p>
+                <p style={{ margin: 0, fontSize: '0.9rem', fontWeight: 700, color: '#1F191B' }}>{value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Sales history graph */}
+          <div style={{ border: '1px solid #F0E2E0', borderRadius: 16, padding: '1.25rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+              <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 800, color: '#1F191B', fontFamily: 'var(--font-serif)' }}>
+                <TrendingUp size={15} style={{ verticalAlign: '-2px', marginRight: 4 }} /> Sales History
+              </h4>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <select value={history.granularity} onChange={(e) => onChangeGranularity(e.target.value)} style={{ padding: '0.4rem 0.6rem', borderRadius: 8, border: '1.5px solid var(--tarika-border,#F0E2E0)', fontSize: '0.78rem', backgroundColor: '#FFF', cursor: 'pointer' }}>
+                  <option value="day">By day</option><option value="week">By week</option><option value="month">By month</option>
+                </select>
+              </div>
+            </div>
+
+            {history.loading ? (
+              <div style={{ padding: '2rem', textAlign: 'center', color: '#6B5E63' }}>
+                <div className="tarika-auth-spinner" style={{ margin: '0 auto 0.75rem', width: '1.75rem', height: '1.75rem', borderColor: 'rgba(216,114,126,0.25)', borderTopColor: '#D8727E' }} />
+                Loading real sales data…
+              </div>
+            ) : history.error ? (
+              <div style={{ padding: '1rem', color: '#DC2626', fontSize: '0.85rem' }}>{history.error}</div>
+            ) : (
+              <>
+                <SalesHistoryChart points={history.points} granularity={history.granularity} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.75rem', fontSize: '0.8rem', color: '#6B5E63' }}>
+                  <span>Total sold: <strong style={{ color: '#1F191B' }}>{fmtNum(history.totalUnits)} units</strong></span>
+                  {last && <span>Most recent {history.granularity}: <strong style={{ color: '#1F191B' }}>{fmtNum(last.units)} units</strong> ({last.period})</span>}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
   );
 }

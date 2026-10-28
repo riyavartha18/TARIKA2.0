@@ -10,10 +10,11 @@ class DemandPredictionEngineTest(SimpleTestCase):
         """ID3 features must be demand indicators; stock/target are excluded."""
         self.assertEqual(
             set(DecisionTreeEngine.FEATURE_NAMES),
-            {'wishlist_count', 'cart_count', 'purchase_count'},
+            {'wishlist_count', 'cart_count'},
         )
         self.assertNotIn('available_quantity', DecisionTreeEngine.FEATURE_NAMES)
         self.assertNotIn('units_sold', DecisionTreeEngine.FEATURE_NAMES)
+        self.assertNotIn('purchase_count', DecisionTreeEngine.FEATURE_NAMES)
 
     def test_weighted_entropy_matches_manual_value(self):
         """Weighted entropy equals the unweighted case when counts are 1."""
@@ -37,21 +38,21 @@ class DemandPredictionEngineTest(SimpleTestCase):
     def test_build_tree_and_predict(self):
         """ID3 builds a tree and predicts cleanly on a small dataset."""
         dataset = [
-            {'wishlist_count': 0.0, 'cart_count': 0.0, 'purchase_count': 1.0, 'target': 'Low', 'count': 40},
-            {'wishlist_count': 10.0, 'cart_count': 20.0, 'purchase_count': 20.0, 'target': 'High', 'count': 40},
-            {'wishlist_count': 5.0, 'cart_count': 8.0, 'purchase_count': 10.0, 'target': 'Medium', 'count': 20},
+            {'wishlist_count': 0.0, 'cart_count': 0.0, 'target': 'Low', 'count': 40},
+            {'wishlist_count': 10.0, 'cart_count': 20.0, 'target': 'High', 'count': 40},
+            {'wishlist_count': 5.0, 'cart_count': 8.0, 'target': 'Medium', 'count': 20},
         ]
         tree = DecisionTreeEngine.build_tree(dataset, depth=0, max_depth=3)
         high, _ = DecisionTreeEngine.explain_prediction(
-            tree, {'wishlist_count': 10.0, 'cart_count': 20.0, 'purchase_count': 20.0}
+            tree, {'wishlist_count': 10.0, 'cart_count': 20.0}
         )
         self.assertEqual(high, 'High')
 
     def test_tree_to_sql_case_roundtrip(self):
         """The tree serialises to a CASE expression with one param per node."""
         dataset = [
-            {'wishlist_count': 0.0, 'cart_count': 0.0, 'purchase_count': 1.0, 'target': 'Low', 'count': 40},
-            {'wishlist_count': 10.0, 'cart_count': 20.0, 'purchase_count': 20.0, 'target': 'High', 'count': 40},
+            {'wishlist_count': 0.0, 'cart_count': 0.0, 'target': 'Low', 'count': 40},
+            {'wishlist_count': 10.0, 'cart_count': 20.0, 'target': 'High', 'count': 40},
         ]
         tree = DecisionTreeEngine.build_tree(dataset, depth=0, max_depth=3)
         sql, params = engine.tree_to_sql_case(tree)

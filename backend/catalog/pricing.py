@@ -1,7 +1,7 @@
 from django.db import connection
 
 
-def get_dim_product_selling_price_map(product_ids):
+def get_product_selling_price_map(product_ids):
     """Return the effective selling price for products, keyed by product id.
 
     The real `public.products` table stores the current price in
