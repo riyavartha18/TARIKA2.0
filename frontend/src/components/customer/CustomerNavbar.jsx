@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import {
   Search,
   Heart,
@@ -22,14 +22,16 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
   const { wishlistItems, totalItems, subtotal, wishlistBounced, bagBounced } = useCustomer();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const urlSearch = searchParams.get('search') || '';
 
   const [scrolled, setScrolled] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
-  const [localSearch, setLocalSearch] = useState(searchTerm);
+  const [localSearch, setLocalSearch] = useState(searchTerm || urlSearch);
 
   useEffect(() => {
-    setLocalSearch(searchTerm);
-  }, [searchTerm]);
+    setLocalSearch(searchTerm || urlSearch);
+  }, [searchTerm, urlSearch]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -46,10 +48,15 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
+    const q = localSearch.trim();
     if (onSearchChange) {
-      onSearchChange(localSearch);
+      onSearchChange(q);
     } else {
-      navigate(`/customer/shop?search=${encodeURIComponent(localSearch)}`);
+      if (q) {
+        navigate(`/customer/shop?search=${encodeURIComponent(q)}`);
+      } else {
+        navigate('/customer/shop');
+      }
     }
   };
 
@@ -57,6 +64,8 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
     setLocalSearch('');
     if (onSearchChange) {
       onSearchChange('');
+    } else {
+      navigate('/customer/shop');
     }
   };
 

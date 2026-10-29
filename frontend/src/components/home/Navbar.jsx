@@ -203,7 +203,14 @@ export default function Navbar() {
           }}
         >
           {/* Search Bar matching reference pill */}
-          <div
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const q = searchQuery.trim();
+              if (q) {
+                navigate(`/customer/shop?search=${encodeURIComponent(q)}`);
+              }
+            }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -230,8 +237,21 @@ export default function Navbar() {
                 fontFamily: 'inherit'
               }}
             />
-            <Search size={16} color="#9E8F94" style={{ flexShrink: 0, marginLeft: '0.4rem' }} />
-          </div>
+            <button
+              type="submit"
+              aria-label="Submit search"
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: 0
+              }}
+            >
+              <Search size={16} color="#9E8F94" style={{ flexShrink: 0, marginLeft: '0.4rem' }} />
+            </button>
+          </form>
 
           {/* Wishlist Heart Icon */}
           <button

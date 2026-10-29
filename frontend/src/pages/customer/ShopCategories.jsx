@@ -5,13 +5,16 @@ import {
   Sparkles,
   Tag,
   Check,
-  RotateCcw
+  RotateCcw,
 } from 'lucide-react';
 import ProductCard from '../../components/customer/ProductCard';
+import CategoryEditorialSection from '../../components/customer/CategoryEditorialSection';
 import { getCategories, getProducts } from '../../services/api';
+import {
+  EDITORIAL_CATEGORIES,
+  CATEGORY_BY_NAME_MAP,
+} from '../../data/editorialCategories';
 
-// Neutral banner copy used when a category carries no creative metadata.
-// Category names, counts and subcategories all come from the database.
 const DEFAULT_SUBTITLE = 'Curated with refined craftsmanship for the modern wardrobe.';
 const FALLBACK_CATEGORY_IMAGE =
   'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=600&auto=format&fit=crop&q=80';
@@ -20,14 +23,14 @@ const normalizeName = (value) => String(value || '').trim().toLowerCase();
 
 export default function ShopCategories() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialSearch = searchParams.get('search') || '';
+  const urlCategory = searchParams.get('category');
+  const currentSearch = (searchParams.get('search') || '').trim();
+  const isSearchActive = Boolean(currentSearch);
 
-  const [categories, setCategories] = useState([]);
-  // '' until the database category list has loaded, so the page can never
-  // render or query an invented category.
-  const [selectedCategory, setSelectedCategory] = useState(
-    searchParams.get('category') || ''
-  );
+  const initialCategory = urlCategory || (isSearchActive ? 'ALL' : 'The Dress Story');
+
+  const [dbCategories, setDbCategories] = useState([]);
+  const [selectedCategory, setSelectedCategory] = useState(initialCategory);
   const [rawProducts, setRawProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [productsError, setProductsError] = useState(null);
@@ -50,8 +53,7 @@ export default function ShopCategories() {
   // Guards against stale responses when filters change rapidly.
   const reqSeq = useRef(0);
 
-  // Customer-facing categories straight from the database (products
-  // main_category GROUP BY), strictly excluding Kids Wear.
+  // Fetch all customer-facing database categories for fallback & other departments list
   useEffect(() => {
     async function fetchCatList() {
       const res = await getCategories();
@@ -59,93 +61,131 @@ export default function ShopCategories() {
         const filtered = res.categories.filter(
           (c) => (c.category_name || c.name || '').toLowerCase() !== 'kids wear'
         );
-        setCategories(filtered);
+        setDbCategories(filtered);
       }
     }
     fetchCatList();
   }, []);
 
-  // Ensure the active category is always a real database category: keep the
-  // URL selection when it matches, otherwise fall back to the first DB one.
+  // Listen to URL query params (both category and search)
   useEffect(() => {
-    if (!categories.length) return;
-    const matchesDb = categories.some(
-      (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
-    );
-    if (matchesDb) {
-      const canonical = categories.find(
-        (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
-      ).category_name;
-      if (canonical !== selectedCategory) setSelectedCategory(canonical);
+    const urlCat = searchParams.get('category');
+    const urlSrch = (searchParams.get('search') || '').trim();
+
+    if (urlCat) {
+      setSelectedCategory(urlCat);
+      setActiveSubcategory('All');
+    } else if (urlSrch) {
+      setSelectedCategory('ALL');
+      setActiveSubcategory('All');
     } else {
-      setSelectedCategory(categories[0].category_name);
+      setSelectedCategory((prev) => (prev === 'ALL' ? 'The Dress Story' : prev));
       setActiveSubcategory('All');
     }
-  }, [categories, selectedCategory]);
+  }, [searchParams]);
 
-  // The DB entry for the active category, with its real sub_categories.
-  const activeCategory = useMemo(
-    () =>
-      categories.find(
-        (c) => normalizeName(c.category_name) === normalizeName(selectedCategory)
-      ) || null,
-    [categories, selectedCategory]
+  // Find metadata for the active category (either editorial or database)
+  const activeEditorial = useMemo(() => {
+    const norm = normalizeName(selectedCategory);
+    return CATEGORY_BY_NAME_MAP[norm] || null;
+  }, [selectedCategory]);
+
+  const activeDbCategory = useMemo(() => {
+    const norm = normalizeName(selectedCategory);
+    return (
+      dbCategories.find(
+        (c) => normalizeName(c.category_name) === norm || normalizeName(c.name) === norm
+      ) || null
+    );
+  }, [dbCategories, selectedCategory]);
+
+  // Titles, subtitles, quotes and images for the hero banner
+  const activeCreativeTitle = isSearchActive
+    ? `SEARCH: "${currentSearch.toUpperCase()}"`
+    : activeEditorial
+    ? activeEditorial.creativeTitle
+    : selectedCategory.toUpperCase();
+
+  const activeSubtitle = isSearchActive
+    ? `Curated styles matching "${currentSearch}" across the TARIKA collection.`
+    : activeEditorial
+    ? activeEditorial.subtitle
+    : DEFAULT_SUBTITLE;
+
+  const activeBannerQuote = isSearchActive
+    ? `Showing items matching your search.`
+    : activeEditorial
+    ? activeEditorial.bannerQuote
+    : 'Curated from our latest drops.';
+
+  const activeHeroImage =
+    activeEditorial?.image || activeDbCategory?.image || FALLBACK_CATEGORY_IMAGE;
+
+  // Active subcategories list
+  const activeSubcategories = useMemo(() => {
+    if (activeEditorial?.subcategories?.length) {
+      return activeEditorial.subcategories;
+    }
+    if (activeDbCategory?.sub_categories?.length) {
+      return ['All', ...activeDbCategory.sub_categories.map((s) => s.sub_category)];
+    }
+    return ['All'];
+  }, [activeEditorial, activeDbCategory]);
+
+  // Build the server query from the currently active filters
+  const buildProductParams = useCallback(
+    (pageNum) => {
+      const params = {
+        sort: selectedSort,
+        page_size: 20,
+        page: pageNum,
+      };
+
+      if (selectedCategory && selectedCategory !== 'ALL') {
+        params.category = selectedCategory;
+      }
+      if (currentSearch) {
+        params.search = currentSearch;
+      }
+      if (onlyInStock) {
+        params.in_stock = 'true';
+      }
+      if (maxPriceFilter) {
+        params.max_price = maxPriceFilter;
+      }
+      if (onlySale) params.on_sale = 'true';
+      if (selectedSize !== 'All') params.size = selectedSize;
+      if (selectedColor !== 'All') params.color = selectedColor;
+
+      // Subcategory filter: pass cleaned subcategory keyword
+      if (activeSubcategory && !activeSubcategory.startsWith('All')) {
+        const cleanedSub = activeSubcategory
+          .replace(/^(All|all)\s*/, '')
+          .replace(/(Dresses|Tops|Bottoms|Jeans|Jackets|Shirts|Tailored|Denim|Footwear|Jewellery|Accents|Bags)/gi, '')
+          .trim();
+        params.sub_category = cleanedSub || activeSubcategory;
+      }
+
+      return params;
+    },
+    [
+      selectedCategory,
+      currentSearch,
+      onlyInStock,
+      maxPriceFilter,
+      onlySale,
+      selectedSize,
+      selectedColor,
+      activeSubcategory,
+      selectedSort,
+    ]
   );
 
-  // When a query param changes in URL. Only real database categories are
-  // applied, so an old bookmark (e.g. ?category=Dresses) can never re-enter
-  // the selection and fight the reconciliation effect above.
-  useEffect(() => {
-    const urlCategory = searchParams.get('category');
-    if (!urlCategory || urlCategory === selectedCategory || !categories.length) return;
-    const match = categories.find(
-      (c) => normalizeName(c.category_name) === normalizeName(urlCategory)
-    );
-    if (match) {
-      setSelectedCategory(match.category_name);
-      setActiveSubcategory('All');
-    }
-  }, [searchParams, selectedCategory, categories]);
-
-  // Build the server query from the currently active filters.
-  const buildProductParams = useCallback((pageNum) => {
-    const params = {
-      sort: selectedSort,
-      page_size: 20,
-      page: pageNum,
-    };
-    if (selectedCategory && selectedCategory !== 'ALL') {
-      params.category = selectedCategory;
-    }
-    if (initialSearch) {
-      params.search = initialSearch;
-    }
-    if (onlyInStock) {
-      params.in_stock = 'true';
-    }
-    if (maxPriceFilter) {
-      params.max_price = maxPriceFilter;
-    }
-    if (onlySale) params.on_sale = 'true';
-    if (selectedSize !== 'All') params.size = selectedSize;
-    if (selectedColor !== 'All') params.color = selectedColor;
-    // Subcategory filtering only ever uses real database sub_category values.
-    if (activeSubcategory && activeSubcategory !== 'All' && activeCategory) {
-      const isRealSubcategory = (activeCategory.sub_categories || []).some(
-        (subcategory) => subcategory.sub_category === activeSubcategory
-      );
-      if (isRealSubcategory) {
-        params.sub_category = activeSubcategory;
-      }
-    }
-    return params;
-  }, [selectedCategory, initialSearch, onlyInStock, maxPriceFilter, onlySale,
-    selectedSize, selectedColor, activeSubcategory, activeCategory, selectedSort]);
-
-  // Fetch the first page whenever the active filters change.
+  // Fetch the first page whenever the active filters change
   useEffect(() => {
     if (!selectedCategory) return;
     const seq = ++reqSeq.current;
+
     async function fetchCategoryProducts() {
       setLoadingProducts(true);
       setLoadingMore(false);
@@ -175,7 +215,7 @@ export default function ShopCategories() {
     fetchCategoryProducts();
   }, [buildProductParams, selectedCategory]);
 
-  // Append the next page without duplicating already-loaded products.
+  // Append the next page without duplicating already-loaded products
   const handleLoadMore = async () => {
     if (loadingMore || !hasMore) return;
     const seq = reqSeq.current;
@@ -184,7 +224,7 @@ export default function ShopCategories() {
     setProductsError(null);
     try {
       const res = await getProducts(buildProductParams(nextPage));
-      if (seq !== reqSeq.current) return; // filters changed mid-flight
+      if (seq !== reqSeq.current) return;
       if (res.success) {
         const incoming = res.products || [];
         setRawProducts((prev) => {
@@ -229,25 +269,35 @@ export default function ShopCategories() {
     }
   };
 
-  const activeCreativeTitle = selectedCategory ? selectedCategory.toUpperCase() : '';
-  const activeSubtitle = DEFAULT_SUBTITLE;
-  const activeBannerQuote = activeCategory?.image
-    ? 'Curated from the latest drops.'
-    : 'Chosen from the real collection.';
-
-  // Sidebar subcategory list built ONLY from database sub_category values.
-  const activeSubcategories = useMemo(() => {
-    if (!activeCategory) return [];
-    return ['All', ...(activeCategory.sub_categories || []).map((s) => s.sub_category)];
-  }, [activeCategory]);
+  // Other editorial collections for the left sidebar
+  const otherEditorialCategories = useMemo(() => {
+    return EDITORIAL_CATEGORIES.filter((c) => {
+      const normCat = normalizeName(c.dbCategory);
+      const normCur = normalizeName(selectedCategory);
+      return normCat !== normCur && normalizeName(c.creativeTitle) !== normCur;
+    });
+  }, [selectedCategory]);
 
   return (
     <div style={{ paddingBottom: '4rem' }}>
       {/* =================================================================
-          CATEGORY PRODUCT SECTION (Loaded with Actual Database Products)
-          The category-card landing now lives on the Customer Home page.
+          1. RECREATED EDITORIAL CATEGORY CARDS SECTION (Top Landing)
          ================================================================= */}
-      <div ref={productsSectionRef} id="category-products-view" style={{ scrollMarginTop: '110px' }}>
+      <CategoryEditorialSection
+        selectedCategory={selectedCategory}
+        onSelectCategory={handleCategorySelect}
+        showMasthead={true}
+        defaultDepartment="all"
+      />
+
+      {/* =================================================================
+          2. DUAL-PANE PRODUCT LISTING SECTION (Loaded from Database)
+         ================================================================= */}
+      <div
+        ref={productsSectionRef}
+        id="category-products-view"
+        style={{ scrollMarginTop: '110px', paddingTop: '1rem' }}
+      >
         {/* Breadcrumb Navigation */}
         <div
           style={{
@@ -276,7 +326,7 @@ export default function ShopCategories() {
             Shop
           </button>
           <ChevronRight size={12} />
-          <span style={{ color: '#B8505E', fontWeight: 600 }}>{selectedCategory}</span>
+          <span style={{ color: '#B8505E', fontWeight: 600 }}>{activeCreativeTitle}</span>
         </div>
 
         {/* Dual Pane Layout (Sidebar + Hero Banner + Products) */}
@@ -288,7 +338,7 @@ export default function ShopCategories() {
           }}
           className="department-dual-pane"
         >
-          {/* LEFT SIDEBAR: database sub-categories and department switcher */}
+          {/* LEFT SIDEBAR: subcategories and department switcher */}
           <aside className="department-tabs-sidebar">
             <span
               style={{
@@ -300,18 +350,14 @@ export default function ShopCategories() {
                 padding: '0 8px 8px 8px',
               }}
             >
-              {selectedCategory}
+              {activeCreativeTitle}
             </span>
 
-            {/* Subcategories straight from the database sub_category column */}
+            {/* Subcategories list */}
             {activeSubcategories.map((sub, index) => {
-              const isActive = activeSubcategory === sub || (index === 0 && activeSubcategory === 'All');
-              const subCount =
-                index === 0
-                  ? activeCategory?.product_count
-                  : (activeCategory?.sub_categories || []).find(
-                      (s) => s.sub_category === sub
-                    )?.product_count;
+              const isActive =
+                activeSubcategory === sub || (index === 0 && activeSubcategory === 'All');
+
               return (
                 <button
                   key={sub}
@@ -319,17 +365,7 @@ export default function ShopCategories() {
                   className={`department-tab-btn ${isActive ? 'is-active' : ''}`}
                   onClick={() => setActiveSubcategory(sub)}
                 >
-                  <span>{sub === 'All' ? `All ${selectedCategory}` : sub}</span>
-                  {subCount !== undefined && (
-                    <span
-                      style={{
-                        fontSize: '0.72rem',
-                        color: isActive ? '#B8505E' : '#9E8F94',
-                      }}
-                    >
-                      ({subCount.toLocaleString('en-IN')})
-                    </span>
-                  )}
+                  <span>{sub}</span>
                 </button>
               );
             })}
@@ -351,31 +387,21 @@ export default function ShopCategories() {
                   padding: '0 8px 8px 8px',
                 }}
               >
-                Other Departments
+                Other Collections
               </span>
             </div>
 
-            {/* Other customer-facing categories from DB (Kids Wear already excluded) */}
-            {categories
-              .filter(
-                (cat) =>
-                  normalizeName(cat.category_name) !== normalizeName(selectedCategory)
-              )
-              .map((cat) => (
-                <button
-                  key={cat.category_id || cat.category_name}
-                  type="button"
-                  className="department-tab-btn"
-                  onClick={() => handleCategorySelect(cat.category_name)}
-                >
-                  <span>{cat.category_name}</span>
-                  <span style={{ fontSize: '0.72rem', color: '#9E8F94' }}>
-                    {cat.product_count !== undefined
-                      ? `(${cat.product_count.toLocaleString('en-IN')})`
-                      : ''}
-                  </span>
-                </button>
-              ))}
+            {/* Other Editorial Collections Switcher */}
+            {otherEditorialCategories.slice(0, 8).map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                className="department-tab-btn"
+                onClick={() => handleCategorySelect(cat.dbCategory)}
+              >
+                <span>{cat.creativeTitle}</span>
+              </button>
+            ))}
           </aside>
 
           {/* RIGHT COLUMN: Hero Banner & Products Grid */}
@@ -415,13 +441,70 @@ export default function ShopCategories() {
                 <p className="cat-hero-script-tagline">{activeBannerQuote}</p>
                 <div className="cat-hero-vignette-circle">
                   <img
-                    src={activeCategory?.image || FALLBACK_CATEGORY_IMAGE}
+                    src={activeHeroImage}
                     alt={activeCreativeTitle}
                     loading="lazy"
                   />
                 </div>
               </div>
             </div>
+
+            {/* Active Search Banner */}
+            {isSearchActive && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  backgroundColor: '#FFF5F6',
+                  border: '1px solid rgba(216, 114, 126, 0.35)',
+                  borderRadius: '16px',
+                  padding: '10px 18px',
+                  marginBottom: '1.25rem',
+                  gap: '12px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Sparkles size={16} color="#B8505E" />
+                  <span style={{ fontSize: '0.88rem', color: '#1F191B' }}>
+                    Showing search results for: <strong style={{ color: '#B8505E' }}>"{currentSearch}"</strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = new URLSearchParams(searchParams);
+                    next.delete('search');
+                    setSearchParams(next);
+                  }}
+                  style={{
+                    background: '#FFFFFF',
+                    border: '1px solid #D8727E',
+                    borderRadius: '9999px',
+                    color: '#B8505E',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    padding: '4px 12px',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    transition: 'all 0.2s ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#D8727E';
+                    e.currentTarget.style.color = '#FFFFFF';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = '#FFFFFF';
+                    e.currentTarget.style.color = '#B8505E';
+                  }}
+                >
+                  Clear Search ✕
+                </button>
+              </div>
+            )}
 
             {/* Quick Filter Bar */}
             <div
@@ -611,7 +694,12 @@ export default function ShopCategories() {
               <span style={{ fontSize: '0.86rem', color: '#6B5E63', fontWeight: 600 }}>
                 {filteredProducts.length} Products
               </span>
-              {(activeSubcategory !== 'All' || selectedSize !== 'All' || selectedColor !== 'All' || onlySale || onlyInStock || maxPriceFilter) && (
+              {(activeSubcategory !== 'All' ||
+                selectedSize !== 'All' ||
+                selectedColor !== 'All' ||
+                onlySale ||
+                onlyInStock ||
+                maxPriceFilter) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -712,14 +800,11 @@ export default function ShopCategories() {
                     margin: '0 0 0.5rem 0',
                   }}
                 >
-                  {categories.length === 0
-                    ? 'Categories Are Loading'
-                    : 'No Products Found In This Selection'}
+                  No Products Found In This Selection
                 </h3>
                 <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: '0 0 1.5rem 0' }}>
-                  {categories.length === 0
-                    ? 'The category list could not be loaded. Please refresh the page.'
-                    : `Try resetting your price, size, or stock filters to view available styles in ${selectedCategory}.`}
+                  Try resetting your price, size, or stock filters to view available styles in{' '}
+                  {activeCreativeTitle}.
                 </p>
                 <button
                   type="button"

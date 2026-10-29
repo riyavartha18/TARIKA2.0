@@ -4,6 +4,7 @@ from django.db import DatabaseError
 from django.db.models import Q, Sum, F, OuterRef, Subquery, IntegerField, FloatField
 from django.db.models.functions import Coalesce
 from .models import Product, OrderItem
+from .category_mapping import get_editorial_filter
 
 
 class CatalogService:
@@ -62,21 +63,13 @@ class CatalogService:
         if queryset is None:
             queryset = cls.get_annotated_products_queryset()
 
-        # 1. Category filter: real schema has main_category / sub_category
+        # 1. Category filter: supports editorial titles (e.g. "The Dress Story", "Dresses")
+        #    as well as real schema main_category / sub_category
         if category:
             category_str = str(category).strip()
-            cat_lower = category_str.lower()
-            if cat_lower in ['tops', 'top']:
-                queryset = queryset.filter(
-                    Q(sub_category__icontains='top') |
-                    Q(sub_category__icontains='t-shirt')
-                )
-            elif cat_lower in ['bottom wear', 'bottoms', 'bottom']:
-                queryset = queryset.filter(
-                    Q(sub_category__icontains='bottom') |
-                    Q(sub_category__icontains='trouser') |
-                    Q(sub_category__icontains='jean')
-                )
+            editorial_q = get_editorial_filter(category_str)
+            if editorial_q is not None:
+                queryset = queryset.filter(editorial_q)
             else:
                 queryset = queryset.filter(
                     Q(main_category__iexact=category_str) |
@@ -85,14 +78,19 @@ class CatalogService:
                     Q(sub_category__icontains=category_str)
                 )
 
-        # 2. Sub-category filter on the real `sub_category` column
+        # 2. Sub-category filter on real sub_category column or product name
         if sub_category:
             sub_str = str(sub_category).strip()
-            if sub_str:
-                queryset = queryset.filter(
-                    Q(sub_category__iexact=sub_str) |
-                    Q(sub_category__icontains=sub_str)
-                )
+            if sub_str and not sub_str.lower().startswith('all'):
+                sub_editorial_q = get_editorial_filter(sub_str)
+                if sub_editorial_q is not None:
+                    queryset = queryset.filter(sub_editorial_q)
+                else:
+                    queryset = queryset.filter(
+                        Q(sub_category__iexact=sub_str) |
+                        Q(sub_category__icontains=sub_str) |
+                        Q(product_name__icontains=sub_str)
+                    )
 
         # 3. Text search across real schema text columns
         if search:
