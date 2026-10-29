@@ -16,8 +16,9 @@ class Order(models.Model):
     `purchase_date` is TEXT in 'DD-MM-YYYY' form, which is why ordering uses a
     parsed date rather than the raw string.
 
-    There is no warehouse, shipping-address, payment or return table in this
-    database, so none are modelled here - the API only reports what exists.
+    There is no warehouse, shipping-address or payment table in this database,
+    so none are modelled here - the API only reports what exists. Return
+    reasons live in `public.returns`, modelled separately below.
     """
     order_id = models.CharField(max_length=32, primary_key=True, db_column='orderid')
     product = models.ForeignKey(
@@ -80,3 +81,37 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order {self.order_id}"
+
+
+class CustomerReturnRecord(models.Model):
+    """Row of the existing `public.returns` table.
+
+    The table arrived with the dataset (`return.csv` was imported into it) and
+    records one return per (customer, product) pair: `return_id` is the primary
+    key and the lookup columns are the natural keys used across the schema, so
+    there is no order-line reference here - an order's return is found through
+    its customer and product.
+
+    `abuse_type` is an internal fraud/wardrobing classification. It is modelled
+    so the column exists for backend analytics, but it must never be serialized
+    into a customer-facing response.
+
+    `customer` is not declared as a FK: `public.orders` already owns the
+    (orderid) -> customers relationship used by `Order`, and a second managed
+    FK to the same table from this unmodelled-row app would only add duplicate
+    constraints Postgres cannot verify against existing data. The text column
+    is enough for the customer-scoped read.
+    """
+    return_id = models.IntegerField(primary_key=True)
+    customer_id = models.CharField(max_length=32, blank=True, null=True)
+    product_id = models.CharField(max_length=32, blank=True, null=True)
+    return_reason = models.CharField(max_length=255, blank=True, null=True)
+    abuse_type = models.CharField(max_length=100, blank=True, null=True)
+
+    class Meta:
+        db_table = 'returns'
+        managed = False
+        ordering = ['return_id']
+
+    def __str__(self):
+        return f"Return {self.return_id} ({self.customer_id}/{self.product_id})"

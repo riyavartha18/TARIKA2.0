@@ -77,10 +77,23 @@ class CustomerOrdersListView(CustomerAPIView):
 
 class CustomerOrderReturnView(CustomerAPIView):
     """
+    GET  /api/orders/<order_id>/returns/
     POST /api/orders/<order_id>/return/
-    The current database has no returns records, so this answers with a clear
-    validation message after verifying that the order belongs to the requester.
+
+    The GET reads the stored return reason for the requester's own returned
+    order, on demand (the My Orders list never carries reasons). Ownership is
+    enforced inside the lookup, and only the reason leaves the server - the
+    internal abuse classification is never serialized.
     """
+
+    def get(self, request, order_id):
+        customer = CustomerResolver.get_customer_for_user(request.user)
+        info = CustomerReturnService.get_return_reason(customer, order_id)
+        return Response({
+            'order_id': str(order_id),
+            'found': bool(info),
+            'return_reason': info['return_reason'] if info else None,
+        }, status=status.HTTP_200_OK)
 
     def post(self, request, order_id):
         customer = CustomerResolver.get_customer_for_user(request.user)

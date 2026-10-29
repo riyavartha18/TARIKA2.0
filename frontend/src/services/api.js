@@ -612,6 +612,32 @@ export async function requestCustomerReturn(orderId, { order_item_id, return_rea
 }
 
 
+/**
+ * Fetch the stored return reason for one returned order, on demand.
+ * Scoped to the signed-in customer on the backend; the internal abuse
+ * classification is never part of the response.
+ */
+export async function getOrderReturnReason(orderId, token = null) {
+  try {
+    const authToken = token || localStorage.getItem('tarika_auth_token');
+    const headers = {};
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/orders/${orderId}/returns/`, {
+      method: 'GET',
+      headers,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to fetch return details.' };
+    }
+    return { success: true, found: Boolean(data.found), returnReason: data.return_reason || '' };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching return details.' };
+  }
+}
+
+
 
 export async function getProductDetail(productId) {
   try {

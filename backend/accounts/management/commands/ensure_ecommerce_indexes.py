@@ -41,6 +41,9 @@ INDEXES = [
     ('orders_customer_idx',
      'CREATE INDEX IF NOT EXISTS orders_customer_idx '
      'ON public.orders (customer_id)'),
+    ('returns_customer_product_idx',
+     'CREATE INDEX IF NOT EXISTS returns_customer_product_idx '
+     'ON public.returns (customer_id, product_id)'),
     ('customers_email_lower_idx',
      'CREATE INDEX IF NOT EXISTS customers_email_lower_idx '
      'ON public.customers (LOWER(email))'),
@@ -86,7 +89,7 @@ class Command(BaseCommand):
         if not options['dry_run']:
             # Fresh planner statistics so the new indexes are actually chosen.
             with connection.cursor() as cursor:
-                for table in ('wishlist', 'cart', 'orders', 'customers'):
+                for table in ('wishlist', 'cart', 'orders', 'customers', 'returns'):
                     try:
                         cursor.execute(f"ANALYZE public.{table};")
                     except DatabaseError as exc:

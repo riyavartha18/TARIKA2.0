@@ -45,7 +45,8 @@ def build_order_item(order):
         'unit_price': unit_price,
         'discount': float(order.additional_discount or 0),
         'subtotal': round(total, 2),
-        # No returns table exists in this database.
+        # Reasons live in public.returns and are fetched on demand by the
+        # customer ("Reason Details"), never bundled into the list payload.
         'return_info': None,
         # `orders.rating` is the only review column the schema has.
         'customer_review': (

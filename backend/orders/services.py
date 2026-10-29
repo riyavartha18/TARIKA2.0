@@ -31,7 +31,7 @@ from cart.services import (
 from catalog.pricing import get_product_selling_price_map
 from catalog.models import Product
 from catalog.cache import bump_catalog_version
-from .models import Order
+from .models import Order, CustomerReturnRecord
 
 # 'DD-MM-YYYY', matching the format the existing rows already use.
 PURCHASE_DATE_FORMAT = '%d-%m-%Y'
@@ -221,7 +221,37 @@ class OrderCreationService:
 
 
 class CustomerReturnService:
-    """Return requests need a returns table, which this database does not have."""
+    """Return reads over the existing `public.returns` table.
+
+    `returns` stores one row per (customer_id, product_id) with no order
+    reference, so an order's return reason is found through that order's own
+    customer and product - never through parameters the client controls.
+    """
+
+    @classmethod
+    def get_return_reason(cls, customer, order_id):
+        """The stored reason for this customer's returned order, or None.
+
+        Ownership is part of the lookup (via OrderQueryService), so asking for
+        someone else's order answers exactly like a non-existent one. Only the
+        reason is returned to callers - `abuse_type` stays in the database.
+        """
+        order = OrderQueryService.get_customer_order(customer, order_id)
+        if not order.product_id:
+            return None
+
+        record = (
+            CustomerReturnRecord.objects
+            .filter(customer_id=customer.customer_id, product_id=order.product_id)
+            .only('return_id', 'return_reason')
+            .first()
+        )
+        if not record:
+            return None
+        reason = str(record.return_reason or '').strip()
+        if not reason:
+            return None
+        return {'return_id': record.return_id, 'return_reason': reason}
 
     @classmethod
     def request_return(cls, customer, order_id, order_item_id, return_reason,

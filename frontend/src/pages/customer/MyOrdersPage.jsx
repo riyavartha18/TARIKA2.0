@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
-import { getCustomerOrders, submitProductReview, requestCustomerReturn } from '../../services/api';
+import { getCustomerOrders, submitProductReview, requestCustomerReturn, getOrderReturnReason } from '../../services/api';
 
 export default function MyOrdersPage() {
   const { token, user } = useAuth();
@@ -60,6 +60,67 @@ export default function MyOrdersPage() {
 
   // Return Tracking Modal state
   const [returnTrackingItem, setReturnTrackingItem] = useState(null);
+
+  // Return reason shown inside the View Details modal. Fetched on demand only
+  // when a returned order's details are opened - never with the list payload.
+  const [detailsReason, setDetailsReason] = useState(null);
+  const [detailsReasonLoading, setDetailsReasonLoading] = useState(false);
+  const [detailsReasonError, setDetailsReasonError] = useState('');
+  const reasonCacheRef = React.useRef({});
+  const reasonReqSeqRef = React.useRef(0);
+
+  const isOrderReturned = (order) =>
+    (order?.order_status || '').toLowerCase() === 'returned' ||
+    (order?.delivery_status || '').toLowerCase() === 'returned';
+
+  const loadReturnReason = async (orderId) => {
+    const seq = ++reasonReqSeqRef.current;
+    setDetailsReasonError('');
+
+    // Reuse the reason already fetched for this order - no duplicate request.
+    if (orderId in reasonCacheRef.current) {
+      setDetailsReason(reasonCacheRef.current[orderId]);
+      return;
+    }
+
+    setDetailsReason(null);
+    setDetailsReasonLoading(true);
+    const res = await getOrderReturnReason(orderId, token);
+
+    // A newer details view superseded this request.
+    if (seq !== reasonReqSeqRef.current) return;
+    setDetailsReasonLoading(false);
+
+    if (res.success) {
+      const details = { found: res.found, reason: res.returnReason };
+      reasonCacheRef.current[orderId] = details;
+      setDetailsReason(details);
+    } else {
+      setDetailsReasonError(res.error || 'Unable to load the return reason right now.');
+    }
+  };
+
+  // Opens the existing details view, and pulls the return reason into it only
+  // for a returned product. Non-returned orders behave exactly as before.
+  const handleOpenDetails = (item) => {
+    const order = item.order;
+    setDetailsModalOrder(order);
+    if (isOrderReturned(order)) {
+      loadReturnReason(order.order_id);
+    } else {
+      reasonReqSeqRef.current += 1; // drop any in-flight reason fetch
+      setDetailsReason(null);
+      setDetailsReasonLoading(false);
+      setDetailsReasonError('');
+    }
+  };
+
+  const handleCloseDetails = () => {
+    setDetailsModalOrder(null);
+    setDetailsReason(null);
+    setDetailsReasonLoading(false);
+    setDetailsReasonError('');
+  };
 
   const handleOpenReturnModal = (item) => {
     setReturnModalItem(item);
@@ -1065,7 +1126,7 @@ export default function MyOrdersPage() {
 
                     <button
                       type="button"
-                      onClick={() => setDetailsModalOrder(item.order)}
+                      onClick={() => handleOpenDetails(item)}
                       style={{
                         padding: '0.55rem 1rem',
                         borderRadius: '9999px',
@@ -1139,7 +1200,7 @@ export default function MyOrdersPage() {
             zIndex: 1000,
             animation: 'fadeIn 0.2s ease-out',
           }}
-          onClick={() => setDetailsModalOrder(null)}
+          onClick={handleCloseDetails}
         >
           <div
             style={{
@@ -1159,7 +1220,7 @@ export default function MyOrdersPage() {
             {/* Close Button */}
             <button
               type="button"
-              onClick={() => setDetailsModalOrder(null)}
+              onClick={handleCloseDetails}
               aria-label="Close"
               style={{
                 position: 'absolute',
@@ -1385,6 +1446,53 @@ export default function MyOrdersPage() {
                 </div>
               </div>
             </div>
+
+            {/* REASON FOR RETURN - shown only for returned products, fetched
+                when this details view opens (never in the list payload). */}
+            {isOrderReturned(detailsModalOrder) && (
+              <div
+                style={{
+                  borderRadius: '16px',
+                  border: '1px solid rgba(219, 39, 119, 0.3)',
+                  backgroundColor: '#FDF2F8',
+                  padding: '1.25rem',
+                  marginBottom: '1.5rem',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <RotateCcw size={16} color="#9D174D" />
+                  <h3 style={{ fontSize: '0.86rem', fontWeight: 700, color: '#9D174D', margin: 0, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Reason for Return
+                  </h3>
+                </div>
+
+                {detailsReasonLoading && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#6B5E63', fontSize: '0.84rem' }}>
+                    <RefreshCw size={15} style={{ animation: 'spin 1s linear infinite' }} color="#B8505E" />
+                    <span>Loading your return reason…</span>
+                  </div>
+                )}
+
+                {!detailsReasonLoading && detailsReasonError && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#DC2626', fontSize: '0.84rem' }}>
+                    <AlertCircle size={16} />
+                    <span>{detailsReasonError}</span>
+                  </div>
+                )}
+
+                {!detailsReasonLoading && !detailsReasonError && detailsReason && (
+                  <p style={{ margin: 0, fontSize: '0.9rem', fontWeight: 600, color: '#1F191B', lineHeight: 1.5 }}>
+                    {detailsReason.reason || 'No return reason provided.'}
+                  </p>
+                )}
+
+                {!detailsReasonLoading && !detailsReasonError && !detailsReason && (
+                  <p style={{ margin: 0, fontSize: '0.86rem', color: '#6B5E63' }}>
+                    No return reason provided.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* RETURN & REFUND INFORMATION (Part 11 & 12) */}
             {detailsModalOrder.items?.some((i) => i.return_info) && (
