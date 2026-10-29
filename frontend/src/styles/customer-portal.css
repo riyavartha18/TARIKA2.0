@@ -467,6 +467,19 @@
   position: relative;
 }
 
+/* Product detail modal image grid: stack on small screens so the product
+   image stays fully visible above the details */
+@media (max-width: 768px) {
+  .product-modal-grid {
+    grid-template-columns: 1fr !important;
+    gap: 1.5rem !important;
+  }
+  .product-modal-grid .zoom-container {
+    aspect-ratio: auto;
+    max-height: 55vh;
+  }
+}
+
 /* SHOP DEPARTMENTAL DUAL PANE */
 .department-tabs-sidebar {
   display: flex;

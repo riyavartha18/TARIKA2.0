@@ -321,17 +321,39 @@ export default function ProductDetailModal() {
   const totalStock = product.total_stock !== undefined ? product.total_stock : 10;
   const isOutOfStock = totalStock <= 0;
 
-  // Build image array
+  // Build image array — priority: products.image (the real DB column, returned
+  // as `image` by the catalog API and used by ProductCard), then legacy keys.
   const images = [];
-  if (product.primary_image) images.push(product.primary_image);
+  if (product.image) images.push(product.image);
+  if (product.primary_image && !images.includes(product.primary_image)) {
+    images.push(product.primary_image);
+  }
   if (Array.isArray(product.images) && product.images.length > 0) {
     product.images.forEach((img) => {
       const url = typeof img === 'string' ? img : img.image_url;
       if (url && !images.includes(url)) images.push(url);
     });
   }
+  // Graceful fallback: category artwork (mirrors backend serializer), then the
+  // same generic image ProductCard falls back to.
   if (images.length === 0) {
+    const catName = String(
+      product.category?.name || product.category_name || ''
+    ).trim().toLowerCase();
+    const categoryImages = {
+      dresses: 'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=600&auto=format&fit=crop&q=80',
+      't-shirts': 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=600&auto=format&fit=crop&q=80',
+      tops: 'https://images.unsplash.com/photo-1564257631407-4deb1f99d992?w=600&auto=format&fit=crop&q=80',
+      shirts: 'https://images.unsplash.com/photo-1598033129183-c4f50c736f10?w=600&auto=format&fit=crop&q=80',
+      jeans: 'https://images.unsplash.com/photo-1541099649105-f69ad21f3246?w=600&auto=format&fit=crop&q=80',
+      sarees: 'https://images.unsplash.com/photo-1617627143750-d86bc21e42bb?w=600&auto=format&fit=crop&q=80',
+      kurtis: 'https://images.unsplash.com/photo-1610030469983-98e550d6193c?w=600&auto=format&fit=crop&q=80',
+      footwear: 'https://images.unsplash.com/photo-1543163521-1bf539c55dd2?w=600&auto=format&fit=crop&q=80',
+      handbags: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?w=600&auto=format&fit=crop&q=80',
+      accessories: 'https://images.unsplash.com/photo-1611652022419-a9419f74343d?w=600&auto=format&fit=crop&q=80',
+    };
     images.push(
+      categoryImages[catName] ||
       'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=800&q=80'
     );
   }
@@ -413,11 +435,18 @@ export default function ProductDetailModal() {
             >
               <img
                 src={activeImage}
-                alt={product.name}
+                alt={product.name || product.product_name || 'Product image'}
+                onError={(e) => {
+                  // Same broken-image fallback used by ProductCard.
+                  if (e.target.dataset.fallbackApplied) return;
+                  e.target.dataset.fallbackApplied = '1';
+                  e.target.src =
+                    'https://images.unsplash.com/photo-1490481651871-ab68de25d43d?auto=format&fit=crop&w=700&q=80';
+                }}
                 style={{
                   width: '100%',
                   height: '100%',
-                  objectFit: 'cover',
+                  objectFit: 'contain',
                 }}
               />
               {isOnSale && (
