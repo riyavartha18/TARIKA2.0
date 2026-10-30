@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'demand_prediction.apps.DemandPredictionConfig',
     'stock_to_be_ordered.apps.StockToBeOrderedConfig',
     'recommendations.apps.RecommendationsConfig',
+    'rfm_analysis.apps.RfmAnalysisConfig',
 ]
 
 MIDDLEWARE = [

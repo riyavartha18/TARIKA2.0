@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   ChevronRight,
   Sparkles,
+  Ticket,
 } from 'lucide-react';
 
 export const ADMIN_NAV_ITEMS = [
@@ -14,6 +15,7 @@ export const ADMIN_NAV_ITEMS = [
   { id: 'staff', label: 'Staff Management', icon: Users },
   { id: 'products', label: 'Products', icon: Package },
   { id: 'analytics', label: 'Admin Analysis', icon: BarChart3 },
+  { id: 'campaigns', label: 'Campaigns', icon: Ticket },
 ];
 
 export default function AdminSidebar({ activeSection, onSelectSection, isMobileOpen, onCloseMobile }) {

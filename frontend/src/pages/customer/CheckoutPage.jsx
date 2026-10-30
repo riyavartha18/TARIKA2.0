@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
-import { createOrder } from '../../services/api';
+import { createOrder, validateCheckoutCoupon } from '../../services/api';
 
 export default function CheckoutPage() {
   const navigate = useNavigate();
@@ -40,6 +40,14 @@ export default function CheckoutPage() {
   const [postalCode, setPostalCode] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('COD'); // 'COD' or 'ONLINE'
 
+  // Coupon. The discount is validated and recomputed on the backend; the
+  // frontend never decides the amount, it only reflects what the server returns.
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState(null); // { code, discount, payable }
+  const [couponMsg, setCouponMsg] = useState('');
+  const [couponType, setCouponType] = useState(''); // 'success' | 'error'
+  const [couponApplying, setCouponApplying] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -56,6 +64,28 @@ export default function CheckoutPage() {
       else if (user.address) setShippingAddress(user.address);
     }
   }, [user]);
+
+  const handleApplyCoupon = async () => {
+    const code = couponInput.trim().toUpperCase();
+    setCouponMsg('');
+    if (!code) {
+      setCouponType('error');
+      setCouponMsg('Enter a coupon code first.');
+      return;
+    }
+    setCouponApplying(true);
+    const res = await validateCheckoutCoupon(token, code, subtotal);
+    setCouponApplying(false);
+    if (res.success && res.valid) {
+      setAppliedCoupon({ code: res.coupon_code, discount: res.discount, payable: res.payable });
+      setCouponType('success');
+      setCouponMsg(`Coupon applied — you saved \u20B9${Number(res.discount).toLocaleString('en-IN')}.`);
+    } else {
+      setAppliedCoupon(null);
+      setCouponType('error');
+      setCouponMsg(res.error || 'Coupon is not valid for this order.');
+    }
+  };
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
@@ -85,6 +115,9 @@ export default function CheckoutPage() {
         state: state.trim(),
         postal_code: postalCode.trim(),
         payment_method: paymentMethod, // 'COD' or 'ONLINE'
+        // Only a server-validated coupon is sent; the backend re-checks it
+        // against the live cart total before applying any discount.
+        coupon_code: appliedCoupon ? appliedCoupon.code : '',
       };
 
       const res = await createOrder(token, payload);
@@ -905,6 +938,45 @@ export default function CheckoutPage() {
                   paddingTop: '1rem',
                 }}
               >
+                {/* Coupon */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingBottom: '0.4rem' }}>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      value={couponInput}
+                      onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                      placeholder="Coupon code"
+                      disabled={!!appliedCoupon}
+                      style={{
+                        flex: 1, border: '1px solid #F0E2E0', borderRadius: 9,
+                        padding: '0.5rem 0.65rem', fontSize: '0.85rem', letterSpacing: '0.04em',
+                      }}
+                    />
+                    {appliedCoupon ? (
+                      <button
+                        type="button"
+                        onClick={() => { setAppliedCoupon(null); setCouponInput(''); setCouponMsg(''); setCouponType(''); }}
+                        style={{ border: '1px solid #F0E2E0', background: '#fff', borderRadius: 9, padding: '0 0.8rem', cursor: 'pointer', fontSize: '0.78rem', color: '#6B5E63' }}
+                      >
+                        Remove
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleApplyCoupon}
+                        disabled={couponApplying}
+                        style={{ border: 'none', background: '#B8505E', color: '#fff', borderRadius: 9, padding: '0 1rem', cursor: couponApplying ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '0.82rem', opacity: couponApplying ? 0.6 : 1 }}
+                      >
+                        {couponApplying ? 'Checking…' : 'Apply'}
+                      </button>
+                    )}
+                  </div>
+                  {couponMsg && (
+                    <span style={{ fontSize: '0.76rem', color: couponType === 'success' ? '#16A34A' : '#B3261E' }}>
+                      {couponMsg}
+                    </span>
+                  )}
+                </div>
+
                 {/* Subtotal */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', color: '#6B5E63' }}>
                   <span>Subtotal</span>
@@ -918,6 +990,16 @@ export default function CheckoutPage() {
                   <span>Delivery</span>
                   <span style={{ fontWeight: 700, color: '#16A34A' }}>Free</span>
                 </div>
+
+                {/* Coupon discount (server-computed) */}
+                {appliedCoupon && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', color: '#6B5E63' }}>
+                    <span>Discount ({appliedCoupon.code})</span>
+                    <span style={{ fontWeight: 700, color: '#16A34A' }}>
+                      −₹{Number(appliedCoupon.discount).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                )}
 
                 {/* Final Total */}
                 <div
@@ -941,7 +1023,7 @@ export default function CheckoutPage() {
                       fontFamily: "'Plus Jakarta Sans', sans-serif",
                     }}
                   >
-                    ₹{Number(total).toLocaleString('en-IN')}
+                    ₹{Number(appliedCoupon ? appliedCoupon.payable : total).toLocaleString('en-IN')}
                   </span>
                 </div>
               </div>
@@ -972,7 +1054,7 @@ export default function CheckoutPage() {
                 ) : (
                   <>
                     <Lock size={16} />
-                    <span>Place Order • ₹{Number(total).toLocaleString('en-IN')}</span>
+                    <span>Place Order • ₹{Number(appliedCoupon ? appliedCoupon.payable : total).toLocaleString('en-IN')}</span>
                   </>
                 )}
               </button>

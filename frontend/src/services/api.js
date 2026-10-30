@@ -1732,3 +1732,187 @@ export async function getSlowMovingInventory(token, params = {}) {
     return { success: false, error: 'Network error fetching slow-moving inventory data.' };
   }
 }
+
+/* ==========================================================================
+   RFM SEGMENTATION, CAMPAIGN & PERSONALIZED OFFER API HELPERS
+   ========================================================================== */
+
+function authHeaders(token) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+/** POST /api/analytics/rfm/run -> start a background RFM analysis. */
+export async function runRfmAnalysis(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/run`, {
+      method: 'POST', headers: authHeaders(token),
+    });
+    const data = await response.json();
+    // 202 accepted, 409 already running -> both are normal responses.
+    if (!response.ok && response.status !== 409) {
+      return { success: false, error: data.detail || 'Failed to start RFM analysis.' };
+    }
+    return { success: true, status: data.status, message: data.message, conflict: response.status === 409 };
+  } catch (err) {
+    return { success: false, error: 'Network error starting RFM analysis.' };
+  }
+}
+
+/** GET /api/analytics/rfm/run -> current run status (for polling). */
+export async function getRfmRunStatus(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/run`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch run status.' };
+    return { success: true, status: data.status };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching RFM run status.' };
+  }
+}
+
+/** GET /api/analytics/rfm/summary -> aggregate KPIs and segment cards. */
+export async function getRfmSummary(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/summary`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch RFM summary.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching RFM summary.' };
+  }
+}
+
+/** GET /api/analytics/rfm/segments/{segment} -> one paginated segment list. */
+export async function getRfmSegmentCustomers(token, segment, params = {}) {
+  try {
+    const query = new URLSearchParams();
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
+    if (params.search) query.append('search', params.search);
+    if (params.sort) query.append('sort', params.sort);
+    if (params.dir) query.append('dir', params.dir);
+    const qs = query.toString();
+    const url = `${API_BASE_URL}/api/analytics/rfm/segments/${encodeURIComponent(segment)}${qs ? '?' + qs : ''}`;
+    const response = await fetch(url, { headers: authHeaders(token) });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch segment customers.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching segment customers.' };
+  }
+}
+
+/** GET /api/campaigns/ -> list campaigns (admin). */
+export async function getCampaigns(token, params = {}) {
+  try {
+    const query = new URLSearchParams();
+    if (params.status && params.status !== 'ALL') query.append('status', params.status);
+    const qs = query.toString();
+    const url = `${API_BASE_URL}/api/campaigns/${qs ? '?' + qs : ''}`;
+    const response = await fetch(url, { headers: authHeaders(token) });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch campaigns.' };
+    return { success: true, campaigns: data.results || [], count: data.count || 0 };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching campaigns.' };
+  }
+}
+
+/** POST /api/campaigns/ -> create a campaign (admin). */
+export async function createCampaign(token, payload) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/`, {
+      method: 'POST', headers: authHeaders(token), body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const errorText = data.errors ? Object.values(data.errors).flat().join(', ') : (data.detail || 'Failed to create campaign.');
+      return { success: false, error: errorText };
+    }
+    return { success: true, campaign: data };
+  } catch (err) {
+    return { success: false, error: 'Network error creating campaign.' };
+  }
+}
+
+/** PUT /api/campaigns/{id}/ -> edit a campaign (admin). */
+export async function updateCampaign(token, campaignId, payload) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/`, {
+      method: 'PUT', headers: authHeaders(token), body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const errorText = data.errors ? Object.values(data.errors).flat().join(', ') : (data.detail || 'Failed to update campaign.');
+      return { success: false, error: errorText };
+    }
+    return { success: true, campaign: data };
+  } catch (err) {
+    return { success: false, error: 'Network error updating campaign.' };
+  }
+}
+
+/** DELETE /api/campaigns/{id}/ -> remove a campaign (admin). */
+export async function deleteCampaign(token, campaignId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/`, {
+      method: 'DELETE', headers: authHeaders(token),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to delete campaign.' };
+    return { success: true, message: data.message };
+  } catch (err) {
+    return { success: false, error: 'Network error deleting campaign.' };
+  }
+}
+
+/** POST /api/campaigns/{id}/status/ -> publish / pause / draft (admin). */
+export async function setCampaignStatus(token, campaignId, status) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/status/`, {
+      method: 'POST', headers: authHeaders(token), body: JSON.stringify({ status }),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to change campaign status.' };
+    return { success: true, campaign: data };
+  } catch (err) {
+    return { success: false, error: 'Network error changing campaign status.' };
+  }
+}
+
+/** GET /api/customer/me/offers -> the signed-in customer's eligible offers. */
+export async function getMyOffers(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/customer/me/offers`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch your offers.' };
+    return { success: true, segment: data.segment, tags: data.tags || [], offers: data.offers || [] };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching your offers.' };
+  }
+}
+
+/** POST /api/checkout/validate-coupon -> backend coupon check + reprice. */
+export async function validateCheckoutCoupon(token, couponCode, cartValue) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/checkout/validate-coupon`, {
+      method: 'POST', headers: authHeaders(token),
+      body: JSON.stringify({ coupon_code: couponCode, cart_value: cartValue }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, valid: false, error: data.detail || (data.coupon_code && String(data.coupon_code)) || 'Coupon is not valid.' };
+    }
+    return { success: true, valid: true, discount: data.discount, payable: data.payable, coupon_code: data.coupon_code };
+  } catch (err) {
+    return { success: false, valid: false, error: 'Network error validating coupon.' };
+  }
+}

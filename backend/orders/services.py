@@ -99,6 +99,7 @@ class OrderCreationService:
     @classmethod
     def create_orders_from_cart(cls, customer, checkout_data):
         payment_method = cls._resolve_payment_method(checkout_data)
+        coupon_code = str(checkout_data.get('coupon_code') or '').strip().upper()
 
         try:
             with transaction.atomic():
@@ -118,6 +119,21 @@ class OrderCreationService:
                 price_map = get_product_selling_price_map(
                     item.product_id for item in cart_items if item.product
                 )
+
+                # The coupon is validated against the whole-cart subtotal, then
+                # its (backend-recomputed) discount is applied across the order
+                # rows below. No client-supplied discount is ever trusted.
+                coupon = None
+                if coupon_code:
+                    from rfm_analysis import coupon_validation
+                    cart_subtotal = round(sum(
+                        float(price_map.get(str(item.product_id)) or 0)
+                        * int(item.quantity or 1)
+                        for item in cart_items if item.product
+                    ), 2)
+                    coupon = coupon_validation.validate_coupon(
+                        customer.customer_id, coupon_code, cart_subtotal
+                    )
 
                 created_orders = []
                 purchase_date = date.today().strftime(PURCHASE_DATE_FORMAT)
@@ -199,6 +215,12 @@ class OrderCreationService:
 
                     created_orders.append(order)
 
+                # Spread the recomputed discount across the created orders and
+                # book exactly one redemption for this checkout use, tied to the
+                # first discounted order (so per-customer limits stay honest).
+                if coupon and coupon['discount'] > 0:
+                    cls._apply_discount(created_orders, coupon, customer)
+
                 CartService.clear_cart(customer)
 
             # Sold stock changed, so any cached availability/category rail must
@@ -208,6 +230,40 @@ class OrderCreationService:
             safe_database_failure("checkout", exc)
 
         return created_orders
+
+    @classmethod
+    def _apply_discount(cls, created_orders, coupon, customer):
+        """Reduce order final prices by the recomputed discount and book one redemption.
+
+        Runs inside the checkout transaction, so a discount that cannot be
+        booked leaves the whole order uncommitted rather than pricing some rows
+        down with no audit trail. The redemption is attached to the first
+        discounted order, giving one auditable use per checkout regardless of
+        how many order lines the cart held.
+        """
+        from rfm_analysis import coupon_validation
+
+        remaining = round(float(coupon['discount']), 2)
+        primary_order = None
+        for order in created_orders:
+            if remaining <= 0:
+                break
+            share = min(remaining, float(order.final_price or 0))
+            if share <= 0:
+                continue
+            order.additional_discount = float(order.additional_discount or 0) + share
+            order.final_price = round(float(order.final_price or 0) - share, 2)
+            order.save(update_fields=['additional_discount', 'final_price'])
+            remaining = round(remaining - share, 2)
+            if primary_order is None:
+                primary_order = order
+
+        applied = round(float(coupon['discount']) - remaining, 2)
+        if primary_order is not None and applied > 0:
+            coupon_validation.redeem(
+                coupon['campaign_id'], customer.customer_id,
+                primary_order.order_id, applied,
+            )
 
     @staticmethod
     def _resolve_payment_method(checkout_data):

@@ -339,10 +339,10 @@ export default function ProfilePage() {
               <Gift size={18} color="#D8727E" />
               <div>
                 <span style={{ fontSize: '0.88rem', fontWeight: 600, color: '#1F191B', display: 'block' }}>
-                  20% Secret Coupon
+                  Personalized Offers
                 </span>
                 <span style={{ fontSize: '0.76rem', color: '#6B5E63' }}>
-                  Use code <strong>TARIKA20</strong> at flash events
+                  Tailored to your shopping profile — see Your Exclusive Privileges on your home page
                 </span>
               </div>
             </div>

@@ -6,6 +6,7 @@ import AdminDashboardView from './AdminDashboardView';
 import AdminStaffView from './AdminStaffView';
 import AdminProductView from './AdminProductView';
 import AdminAnalyticsView from './AdminAnalyticsView';
+import AdminCampaignView from './AdminCampaignView';
 import AdminSectionPlaceholder from './AdminSectionPlaceholder';
 import '../../styles/tarika.css';
 import '../../styles/admin-portal.css';
@@ -78,8 +79,9 @@ export default function AdminPortal() {
             <Route path="products" element={<AdminProductView />} />
             <Route path="analytics" element={<AdminAnalyticsView />} />
             <Route path="analysis" element={<AdminAnalyticsView />} />
+            <Route path="campaigns" element={<AdminCampaignView />} />
             {ADMIN_NAV_ITEMS.filter(
-              (item) => !['dashboard', 'staff', 'products', 'analytics', 'analysis'].includes(item.id)
+              (item) => !['dashboard', 'staff', 'products', 'analytics', 'analysis', 'campaigns'].includes(item.id)
             ).map((item) => (
               <Route
                 key={item.id}

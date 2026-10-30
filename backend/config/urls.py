@@ -49,6 +49,7 @@ urlpatterns = [
             namespace='recommendations'
         )
     ),
+    path('api/', include(('rfm_analysis.urls', 'rfm_analysis'), namespace='rfm_analysis')),
 ]
 
 # Reload URLconf: registered warehouse app routes

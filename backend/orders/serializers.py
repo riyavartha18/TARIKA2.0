@@ -114,6 +114,12 @@ class CheckoutRequestSerializer(serializers.Serializer):
     state = serializers.CharField(required=False, allow_blank=True, max_length=100, default='')
     postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20, default='')
     payment_method = serializers.CharField(required=False, default='COD')
+    # Optional coupon. When present the discount is recomputed on the backend
+    # (never trusted from the client) and applied across the created orders.
+    coupon_code = serializers.CharField(required=False, allow_blank=True, max_length=64, default='')
+
+    def validate_coupon_code(self, value):
+        return str(value or '').strip().upper()
 
     def validate_shipping_address(self, value):
         cleaned = value.strip()

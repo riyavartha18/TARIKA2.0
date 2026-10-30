@@ -34,6 +34,8 @@ import {
   X,
 } from 'lucide-react';
 import '../../styles/admin-portal.css';
+import RfmAnalysisCard from './RfmAnalysisCard';
+import RfmDashboard from './AdminRFMView';
 
 export default function AdminAnalyticsView() {
   const { token: authContextToken } = useAuth();
@@ -41,7 +43,7 @@ export default function AdminAnalyticsView() {
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
 
-  // Active view: 'overview' | 'demand_forecasting' | 'slow_inventory'
+  // Active view: 'overview' | 'demand_forecasting' | 'slow_inventory' | 'rfm'
   const [activeView, setActiveView] = useState('overview');
 
   // Filters for product predictions (server-driven)
@@ -201,6 +203,10 @@ export default function AdminAnalyticsView() {
       fetchSlowInventoryData();
     }
   };
+
+  // The RFM card and dashboard fetch their own lightweight cached summary, so
+  // opening them is just a view switch (no eager heavy load on the overview).
+  const handleOpenRfmView = () => setActiveView('rfm');
 
   const { summary = {} } = data || {};
 
@@ -504,7 +510,21 @@ export default function AdminAnalyticsView() {
             </div>
           </div>
 
+          {/* ================================================================
+              RFM CUSTOMER SEGMENTATION CARD
+             ================================================================ */}
+          <RfmAnalysisCard onOpen={handleOpenRfmView} />
+
           </div>
+        </div>
+      )}
+
+      {/* ==========================================================================
+          DEDICATED DETAILED VIEW: RFM CUSTOMER SEGMENTATION DASHBOARD
+         ========================================================================== */}
+      {activeView === 'rfm' && (
+        <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+          <RfmDashboard onBack={() => setActiveView('overview')} />
         </div>
       )}
 

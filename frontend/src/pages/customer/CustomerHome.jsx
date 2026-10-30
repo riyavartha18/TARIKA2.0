@@ -7,6 +7,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import CategoryEditorialSection from '../../components/customer/CategoryEditorialSection';
+import CustomerOffers from '../../components/customer/CustomerOffers';
 import ProductCard from '../../components/customer/ProductCard';
 import {
   SkeletonProductRow,
@@ -88,7 +89,10 @@ export default function CustomerHome() {
         </div>
       </section>
 
-      {/* 2. EXPLORE BY CATEGORY — editorial cards */}
+      {/* 2. PERSONALIZED OFFERS — from the latest RFM analysis + published campaigns */}
+      <CustomerOffers />
+
+      {/* 3. EXPLORE BY CATEGORY — editorial cards */}
       <CategoryEditorialSection />
 
       {/* 3. NEW ARRIVALS — single horizontal product rail */}
