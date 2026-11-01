@@ -10,6 +10,7 @@ import {
   removeFromBag as apiRemoveFromBag,
   clearBag as apiClearBag,
   getProductDetail as apiGetProductDetail,
+  getMyOffers,
 } from '../services/api';
 
 const CustomerContext = createContext(null);
@@ -57,6 +58,26 @@ export function CustomerProvider({ children }) {
   const [total, setTotal] = useState(0);
   const [bagLoading, setBagLoading] = useState(false);
   const [bagError, setBagError] = useState('');
+
+  // Personalized offers state. Fetched once per session here so the navbar
+  // badge, the home page feature, the Your Offers page and Member Privileges
+  // all read the identical server-decided list (never four separate queries,
+  // never a locally filtered copy that could drift).
+  const [offers, setOffers] = useState([]);
+  const [offersLoading, setOffersLoading] = useState(true);
+  // True while the backend has no completed RFM analysis in memory yet (it
+  // starts one in the background on the first request). The offers simply are
+  // not decided until that run finishes, so the UI waits instead of falsely
+  // claiming the customer has nothing.
+  const [offersSyncing, setOffersSyncing] = useState(false);
+  const offersRequestSeq = useRef(0);
+  const offersRetryTimer = useRef(null);
+  const loadOffersRef = useRef(null);
+  // Only the very first analysis (before any has been stored) can report
+  // "syncing", so this is a short bounded fallback, not a polling loop: two
+  // extra attempts and the page stops asking.
+  const OFFER_RETRY_MS = 10000;
+  const OFFER_MAX_ATTEMPTS = 2;
 
   // Micro-animation triggers for navbar badges
   const [wishlistBounced, setWishlistBounced] = useState(false);
@@ -305,6 +326,50 @@ export function CustomerProvider({ children }) {
   useEffect(() => {
     fetchCustomerData();
   }, [fetchCustomerData]);
+
+  // ---- Personalized offers -------------------------------------------------
+  // One request per session, retried a bounded number of times while the
+  // backend is still computing the customer's segment. Everything on this list
+  // has already passed server-side eligibility (authenticated identity, latest
+  // completed RFM segment, published status, validity dates), so no surface has
+  // to filter campaigns itself.
+  const loadOffers = useCallback(async (attempt = 0) => {
+    if (!isCustomer || !token) {
+      offersRequestSeq.current += 1;
+      setOffers([]);
+      setOffersSyncing(false);
+      setOffersLoading(false);
+      return;
+    }
+    const seq = offersRequestSeq.current + 1;
+    offersRequestSeq.current = seq;
+    setOffersLoading(true);
+    const res = await getMyOffers(token);
+    if (seq !== offersRequestSeq.current) return;
+    const nextOffers = res.success && Array.isArray(res.offers) ? res.offers : [];
+    setOffers(nextOffers);
+    setOffersLoading(false);
+    const syncing = Boolean(res.syncing) && nextOffers.length === 0;
+    setOffersSyncing(syncing);
+    if (syncing && attempt < OFFER_MAX_ATTEMPTS) {
+      clearTimeout(offersRetryTimer.current);
+      offersRetryTimer.current = setTimeout(
+        () => loadOffersRef.current && loadOffersRef.current(attempt + 1),
+        OFFER_RETRY_MS,
+      );
+    }
+  }, [isCustomer, token]);
+
+  // The retry is scheduled through a ref, so the loader never has to capture
+  // itself while it is still being declared.
+  useEffect(() => {
+    loadOffersRef.current = loadOffers;
+  }, [loadOffers]);
+
+  useEffect(() => {
+    loadOffers();
+    return () => clearTimeout(offersRetryTimer.current);
+  }, [loadOffers]);
 
   // Wishlist Actions
   const toggleWishlist = useCallback(
@@ -604,6 +669,11 @@ export function CustomerProvider({ children }) {
     openProductDetail,
     refreshProductDetail,
     closeProductDetail,
+
+    offers,
+    offersLoading,
+    offersSyncing,
+    refreshOffers: loadOffers,
 
     toasts,
     addToast,

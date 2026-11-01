@@ -41,6 +41,23 @@ RFM_SNAPSHOT_META_KEY = 'rfm:analysis:snapshot:meta:{version}'
 RFM_SNAPSHOT_RECORDS_KEY = 'rfm:analysis:snapshot:records:{version}'
 RFM_RUN_STATUS_KEY = 'rfm:analysis:run_status'
 RFM_RUN_LOCK_KEY = 'rfm:analysis:run_lock'
+# Bumped whenever an admin creates, edits, publishes, pauses or deletes a
+# campaign. It is part of every per-customer offer cache key, so a campaign
+# change is visible to customers on their very next request instead of after
+# the short offer TTL has elapsed.
+RFM_CAMPAIGN_EPOCH_KEY = 'rfm:campaigns:epoch'
+# Bumped when a completed analysis publishes new segment labels. Together with
+# the campaign epoch it keys the cached per-customer offer list, so a customer
+# page can be served entirely from cache - no segment query at all - until
+# either a campaign or the segmentation actually changes.
+RFM_ANALYSIS_EPOCH_KEY = 'rfm:analysis:epoch'
+# Cooldown marker for the customer-side self-heal (a customer request may start
+# a background analysis when none exists yet). Without it, traffic arriving while
+# runs keep failing could repeatedly launch a full-population computation.
+RFM_OFFER_SELF_HEAL_KEY = 'rfm:offers:self_heal'
+OFFER_SELF_HEAL_COOLDOWN_SECONDS = int(
+    os.getenv('RFM_OFFER_SELF_HEAL_COOLDOWN_SECONDS', 2 * 60)
+)
 
 # Snapshot TTL: long enough that dashboards read pure cache, short enough that
 # a forgotten analysis still refreshes itself eventually.

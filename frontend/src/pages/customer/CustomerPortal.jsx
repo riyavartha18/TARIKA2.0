@@ -20,6 +20,7 @@ const CheckoutPage = lazy(() => import('./CheckoutPage'));
 const OrderConfirmationPage = lazy(() => import('./OrderConfirmationPage'));
 const MyOrdersPage = lazy(() => import('./MyOrdersPage'));
 const ProfilePage = lazy(() => import('./ProfilePage'));
+const YourOffersPage = lazy(() => import('./YourOffersPage'));
 
 // Portal CSS
 import '../../styles/tarika.css';
@@ -204,6 +205,14 @@ export default function CustomerPortal() {
               element={
                 <Suspense fallback={<RouteFallback />}>
                   <ProfilePage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="offers"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <YourOffersPage />
                 </Suspense>
               }
             />

@@ -155,15 +155,19 @@ def project_row(record):
     return {column: record.get(column) for column in TABLE_COLUMNS}
 
 
-def publish_snapshot(snapshot):
+def publish_snapshot(snapshot, version=None):
     """Write a new immutable version and atomically point 'latest' at it.
 
     `snapshot` is split into its small `meta` part and its large `records`
     part, stored under separate keys. The version pointer flips only after both
     are present, so readers never observe a partial analysis.
+
+    `version` lets the caller keep versions monotonic across restarts (the
+    durable per-customer segment store outlives this cache, so a run must not
+    restart numbering at 1 and reuse an older offer-cache key).
     """
     previous = get_latest_version()
-    new_version = (previous or 0) + 1
+    new_version = version if version is not None else (previous or 0) + 1
 
     records = snapshot.pop('records', [])
     customer_ids = snapshot.pop('customer_ids', [])
@@ -181,6 +185,11 @@ def publish_snapshot(snapshot):
 
     if previous is not None:
         _invalidate_for_version(previous)
+
+    # Segmentation just changed, so every cached per-customer offer list is
+    # stale by definition: bumping the analysis epoch makes those keys
+    # unreachable instead of waiting out the short offer TTL.
+    bump_analysis_epoch()
 
     # Prime this process's index so the very first dashboard/detail read is
     # already served from memory.
@@ -233,26 +242,88 @@ def release_run_lock():
     cache.delete(utils.RFM_RUN_LOCK_KEY)
 
 
-def offer_cache_key(version, customer_id):
-    return f'rfm:offers:{version}:{customer_id}'
+def get_campaign_epoch():
+    """Monotonic counter identifying the current campaign configuration.
+
+    Reading it is one cheap cache get; it never needs a database query.
+    """
+    epoch = cache.get(utils.RFM_CAMPAIGN_EPOCH_KEY)
+    return epoch if isinstance(epoch, int) and epoch >= 0 else 0
 
 
-def get_cached_offers(version, customer_id):
-    if version is None:
-        return None
-    return cache.get(offer_cache_key(version, customer_id))
+def _bump_epoch(key):
+    try:
+        return cache.incr(key)
+    except ValueError:
+        # First bump after a restart: start from 1 and never expire the counter,
+        # otherwise a plain cache expiry would silently reuse old offer keys.
+        cache.set(key, 1, None)
+        return 1
 
 
-def set_cached_offers(version, customer_id, offers):
-    if version is None:
+def bump_campaign_epoch():
+    """Invalidate every cached per-customer offer list.
+
+    Called by the admin campaign write endpoints and when a coupon is redeemed.
+    Because the epoch is part of the offer key, old entries simply stop being
+    addressed (and expire on their own short TTL), which works identically on
+    LocMemCache and Redis - neither can enumerate keys by pattern.
+    """
+    return _bump_epoch(utils.RFM_CAMPAIGN_EPOCH_KEY)
+
+
+def get_analysis_epoch():
+    """Monotonic counter identifying the currently stored segmentation."""
+    epoch = cache.get(utils.RFM_ANALYSIS_EPOCH_KEY)
+    return epoch if isinstance(epoch, int) and epoch >= 0 else 0
+
+
+def bump_analysis_epoch():
+    """Invalidate cached customer offers because segment labels changed."""
+    return _bump_epoch(utils.RFM_ANALYSIS_EPOCH_KEY)
+
+
+def offer_cache_key(customer_id):
+    """Key of one customer's cached offer list.
+
+    Both epochs are in the key, so serving a cached list needs no database query
+    at all: a campaign change or a newly completed analysis makes the key
+    unreachable and the next request recomputes from live data.
+    """
+    return (f'rfm:offers:{get_campaign_epoch()}'
+            f':{get_analysis_epoch()}:{customer_id}')
+
+
+def try_offer_self_heal():
+    """Return True once per cooldown window when a customer may start a run.
+
+    The snapshot is cache-only, so a freshly started process legitimately has
+    published campaigns and no analysis yet. Customer traffic may then ask for a
+    background run, but only on this rate limit - the run lock alone would still
+    allow a new full computation every time a previous one fails.
+    """
+    return cache.add(utils.RFM_OFFER_SELF_HEAL_KEY,
+                     1,
+                     utils.OFFER_SELF_HEAL_COOLDOWN_SECONDS)
+
+
+def get_cached_offers(customer_id):
+    return cache.get(offer_cache_key(customer_id))
+
+
+def set_cached_offers(customer_id, offers):
+    if not isinstance(offers, dict) or offers.get('version') is None:
+        # Nothing was decided yet (no completed analysis at all). Caching that
+        # would hide a customer's real offers until the TTL expired.
         return
-    cache.set(offer_cache_key(version, customer_id), offers, utils.OFFER_CACHE_TTL_SECONDS)
+    cache.set(offer_cache_key(customer_id), offers, utils.OFFER_CACHE_TTL_SECONDS)
 
 
 def _invalidate_for_version(version):
-    # Offer keys are version-scoped, so once the pointer moves they are never
-    # requested again and expire on their own short TTL. Redis-backed
-    # deployments could add a pattern-delete here; LocMemCache cannot enumerate.
+    # Cached customer offer lists are keyed on the campaign and analysis epochs,
+    # so they are already unreachable once a run publishes; these entries expire
+    # on their own short TTL. Redis-backed deployments could add a pattern-delete
+    # here; LocMemCache cannot enumerate keys.
     cache.delete(utils.snapshot_records_key(version))
     cache.delete(utils.snapshot_meta_key(version))
     cache.delete(never_purchased_key(version))

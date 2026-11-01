@@ -14,16 +14,19 @@ from django.utils import timezone
 from .models import Campaign, CampaignStatus
 
 
-def _within_window(campaign, now):
-    return campaign.start_date <= now <= campaign.end_date
-
-
 def fetch_published_campaigns(now=None):
-    """Every PUBLISHED campaign, freshly ordered, from the database."""
+    """Every currently live PUBLISHED campaign.
+
+    The status and the validity window are filtered in SQL (backed by the
+    `campaign_live_window` index) instead of loading every campaign and
+    filtering in Python, so a customer request reads only the small live set.
+    """
     now = now or timezone.now()
-    campaigns = list(Campaign.objects.filter(status=CampaignStatus.PUBLISHED))
-    live = [c for c in campaigns if _within_window(c, now)]
-    return live
+    return list(Campaign.objects.filter(
+        status=CampaignStatus.PUBLISHED,
+        start_date__lte=now,
+        end_date__gte=now,
+    ))
 
 
 def matches_customer(campaign, segment, tags):

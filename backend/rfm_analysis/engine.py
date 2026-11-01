@@ -17,7 +17,8 @@ import threading
 from django.db import close_old_connections
 from django.utils import timezone
 
-from . import cache_manager, queries, rfm_calculator, rfm_scoring, segmentation, utils
+from . import (cache_manager, queries, rfm_calculator, rfm_scoring,
+               segment_store, segmentation, utils)
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,21 @@ def compute_snapshot():
 
 
 def run_and_publish():
-    """Compute and publish a new snapshot, recording the run status."""
+    """Compute, publish the cache snapshot and persist the segment labels."""
     cache_manager.set_run_status('running', started_at=utils.utcnow().isoformat())
     try:
         snapshot = compute_snapshot()
-        version = cache_manager.publish_snapshot(snapshot)
+        # publish_snapshot() pops the records out of the dict, so keep the list
+        # for the durable per-customer store.
+        records = snapshot['records']
+        analysis_date = snapshot['analysis_date']
+        # Keep numbering monotonic: the store survives a restart while the
+        # snapshot cache does not, so a fresh process must not reuse an old
+        # version number (customer offer caches are keyed by it).
+        next_version = max(cache_manager.get_latest_version() or 0,
+                           segment_store.latest_version() or 0) + 1
+        version = cache_manager.publish_snapshot(snapshot, version=next_version)
+        store_segments(version, records, analysis_date)
         cache_manager.set_run_status(
             'completed',
             finished_at=utils.utcnow().isoformat(),
@@ -91,6 +102,23 @@ def run_and_publish():
         raise
     finally:
         cache_manager.release_run_lock()
+
+
+def store_segments(version, records, analysis_date=None):
+    """Persist per-buyer segments for a published snapshot (never fails a run).
+
+    The dashboard works from the cache snapshot alone, so if this write hits a
+    database problem the analysis is still published; the next completed run
+    repairs the store, and until then the customer path simply falls back to the
+    snapshot instead of showing wrong data.
+    """
+    try:
+        stored = segment_store.store_records(records, version, analysis_date)
+        logger.info('Stored RFM segments for %s buyers (version %s)', stored, version)
+        return stored
+    except Exception:  # noqa: BLE001 - logging is enough, the run itself succeeded
+        logger.exception('Could not persist RFM segment labels (version %s)', version)
+        return None
 
 
 def start_background_run():
@@ -141,11 +169,16 @@ def _snapshot_age_seconds(meta, now):
 def ensure_latest():
     """Serve the latest completed analysis and refresh it in the background.
 
-    Called whenever an admin opens the analysis, so no manual Run action is
-    needed. It never blocks the request and never exposes an incomplete run:
+    Called whenever an admin opens the analysis (and by the customer offer path
+    when nothing is available yet), so no manual Run action is needed. It never
+    blocks the request and never exposes an incomplete run:
 
     * If a run is already in flight, it is left alone (the lock guarantees it).
-    * If no completed snapshot exists yet, a run is started in the background.
+    * If the in-cache snapshot is gone but a completed analysis is still stored
+      per customer, that stored result is reused: at most a background refresh
+      is scheduled when it is older than the threshold, never a blocking
+      recompute. A restarted server therefore keeps serving real offers.
+    * If no analysis has ever completed, one is started in the background.
     * If the latest snapshot is older than the refresh threshold, a refresh is
       started in the background while the existing completed snapshot is kept.
 
@@ -160,6 +193,18 @@ def ensure_latest():
 
     meta = cache_manager.get_meta()
     if meta is None:
+        state = segment_store.get_state()
+        if state is not None:
+            # Reuse the stored analysis; only schedule a refresh when stale.
+            age = (now - state.completed_at).total_seconds()
+            threshold = utils.RFM_REFRESH_AFTER_SECONDS
+            if threshold > 0 and age > threshold:
+                accepted, run_status = start_background_run()
+                return {'refreshing': accepted, 'started': accepted,
+                        'run_status': run_status, 'stored_version': state.version}
+            return {'refreshing': False, 'started': False, 'run_status': status,
+                    'stored_version': state.version}
+
         accepted, run_status = start_background_run()
         return {'refreshing': True, 'started': accepted, 'run_status': run_status}
 

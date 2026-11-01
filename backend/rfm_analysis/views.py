@@ -10,15 +10,20 @@ search, sorting and pagination, so the browser never receives all ~100k rows.
 import logging
 
 from django.db import DatabaseError
+from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError as DRFValidationError
 
 from accounts.permissions import IsAdmin, IsAuthenticatedUser, IsCustomer
+from cart.models import CartItem
 from cart.services import CustomerResolver
+from catalog.pricing import get_product_selling_price_map
 
-from . import cache_manager, coupon_validation, engine, personalization, queries, utils
+from . import (cache_manager, campaign_audience, coupon_validation, engine,
+               personalization, queries, utils)
 from .models import Campaign, CampaignStatus
 from .serializers import CampaignSerializer
 
@@ -252,17 +257,72 @@ class RfmSegmentDetailView(AdminRFMView):
 
 
 class CampaignListCreateView(AdminRFMView):
-    """GET/POST /api/campaigns/ -> list or author campaigns (admin only)."""
+    """GET/POST /api/campaigns/ -> filterable list or author a campaign.
+
+    The list supports the admin filters (status, target segment, offer type,
+    free-text search over name/coupon code) with server-side pagination, and
+    every row carries its live eligible-audience count from the latest RFM
+    snapshot, so the table always answers "who actually receives this?".
+    """
+
+    # Pseudo-statuses the UI filter offers beyond the stored values.
+    STATUS_FILTERS = {'ACTIVE', 'DRAFT', 'PAUSED', 'EXPIRED', 'PUBLISHED', 'ALL'}
+    OFFER_TYPES = {'DISCOUNT', 'BUY_GET', 'COMBINED', 'ALL'}
 
     def get(self, request):
-        campaigns = Campaign.objects.all()
-        status_filter = (request.query_params.get('status') or '').strip().upper()
-        if status_filter and status_filter != 'ALL':
-            campaigns = campaigns.filter(status=status_filter)
+        rows = self._apply_filters(request, Campaign.objects.all())
+
+        # Segment targeting lives in a JSON list, so that one filter is
+        # evaluated in Python (campaign tables stay small by nature; every
+        # other filter and the pagination are done server-side).
+        segment = (request.query_params.get('segment') or '').strip()
+        if segment and segment != 'ALL':
+            rows = [c for c in rows if segment in (c.target_segments or [])]
+
+        total = len(rows)
+        page, page_size = _parse_pagination(request)
+        offset = (page - 1) * page_size
+        page_rows = rows[offset:offset + page_size]
+
+        results = []
+        for campaign in page_rows:
+            data = CampaignSerializer(campaign).data
+            data['eligible_audience_count'] = campaign_audience.audience_count(
+                campaign.target_segments, campaign.target_tags)
+            results.append(data)
         return Response({
-            'count': campaigns.count(),
-            'results': CampaignSerializer(campaigns, many=True).data,
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if page_size else 1,
+            'results': results,
         }, status=status.HTTP_200_OK)
+
+    def _apply_filters(self, request, queryset):
+        status_filter = (request.query_params.get('status') or 'ALL').strip().upper()
+        if status_filter == 'ACTIVE':
+            # "Active" for the admin means what customers can actually see
+            # right now: published and inside its validity window.
+            now = timezone.now()
+            queryset = queryset.filter(status=CampaignStatus.PUBLISHED,
+                                       start_date__lte=now, end_date__gte=now)
+        elif status_filter == 'EXPIRED':
+            now = timezone.now()
+            queryset = queryset.filter(Q(status=CampaignStatus.EXPIRED)
+                                       | Q(status=CampaignStatus.PUBLISHED,
+                                           end_date__lt=now))
+        elif status_filter in self.STATUS_FILTERS and status_filter != 'ALL':
+            queryset = queryset.filter(status=status_filter)
+
+        offer_type = (request.query_params.get('offer_type') or 'ALL').strip().upper()
+        if offer_type in ('DISCOUNT', 'BUY_GET', 'COMBINED'):
+            queryset = queryset.filter(offer_category=offer_type)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(name__icontains=search)
+                                       | Q(coupon_code__icontains=search))
+        return list(queryset)
 
     def post(self, request):
         serializer = CampaignSerializer(data=request.data)
@@ -271,6 +331,9 @@ class CampaignListCreateView(AdminRFMView):
         except DRFValidationError:
             return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         serializer.save()
+        # Customers must see a new campaign immediately, not after the brief
+        # per-customer offer cache has expired.
+        cache_manager.bump_campaign_epoch()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -281,7 +344,11 @@ class CampaignDetailView(AdminRFMView):
         campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
         if not campaign:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(CampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+        data = CampaignSerializer(campaign).data
+        data['eligible_audience_count'] = campaign_audience.audience_count(
+            campaign.target_segments, campaign.target_tags)
+        data['redemption_count'] = campaign.redemptions.count()
+        return Response(data, status=status.HTTP_200_OK)
 
     def put(self, request, campaign_id):
         campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
@@ -293,19 +360,26 @@ class CampaignDetailView(AdminRFMView):
         except DRFValidationError:
             return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         serializer.save()
+        cache_manager.bump_campaign_epoch()
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def delete(self, request, campaign_id):
         deleted, _ = Campaign.objects.filter(campaign_id=campaign_id).delete()
         if not deleted:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
+        cache_manager.bump_campaign_epoch()
         return Response({'message': 'Campaign deleted.'}, status=status.HTTP_200_OK)
 
 
 class CampaignStatusView(AdminRFMView):
-    """POST /api/campaigns/{id}/status/ -> publish, pause or draft a campaign.
+    """POST /api/campaigns/{id}/status/ -> publish, pause, resume, draft, expire.
 
-    Publishing is an explicit admin action (Section 11); nothing auto-publishes.
+    Publishing is an explicit admin action; nothing auto-publishes. Resuming
+    or publishing re-checks the campaign end to end first: a campaign without
+    a target segment, with no valid offer, or whose dates have already lapsed
+    is refused, so a "Published" row is always one customers may actually see.
+    Pausing keeps every campaign row and its redemption history untouched -
+    it only flips availability.
     """
 
     def post(self, request, campaign_id):
@@ -318,29 +392,58 @@ class CampaignStatusView(AdminRFMView):
         campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
         if not campaign:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if new_status == CampaignStatus.PUBLISHED:
+            error = self._publish_blocker(campaign)
+            if error:
+                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
         campaign.status = new_status
         campaign.save(update_fields=['status', 'updated_at'])
-        return Response(CampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+        cache_manager.bump_campaign_epoch()
+        data = CampaignSerializer(campaign).data
+        data['eligible_audience_count'] = campaign_audience.audience_count(
+            campaign.target_segments, campaign.target_tags)
+        return Response(data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _publish_blocker(campaign):
+        if not campaign.target_segments:
+            return ('Publish this campaign to at least one RFM segment first - '
+                    'offers must never go to all customers.')
+        now = timezone.now()
+        if campaign.end_date <= now:
+            return ('This campaign\'s validity has already ended. '
+                    'Update its dates before publishing.')
+        serializer = CampaignSerializer(campaign, data={}, partial=True)
+        # Re-run the full offer validation against the stored configuration,
+        # so a campaign edited before the rules tightened cannot be published
+        # half-configured.
+        try:
+            serializer.is_valid(raise_exception=True)
+        except DRFValidationError as exc:
+            return _flatten_error(exc)
+        return None
 
 
 class CustomerOffersView(APIView):
     """GET /api/customer/me/offers -> this customer's eligible offers.
 
     The customer is resolved from the authenticated session, so one customer
-    can never read another's offers. Results are cached briefly per analysis
-    version, making a repeat dashboard open a pure cache read.
+    can never read another's offers. The list itself is cached per customer
+    under the campaign + analysis epochs, so opening the home page, Your Offers
+    or Member Privileges again is a pure cache read with no offer query at all -
+    and any campaign change, coupon redemption or new completed analysis moves
+    an epoch and is therefore visible on the very next request.
     """
     permission_classes = [IsAuthenticatedUser, IsCustomer]
 
     def get(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
-        cached = cache_manager.get_cached_offers(cache_manager.get_latest_version(),
-                                                 customer.customer_id)
+        cached = cache_manager.get_cached_offers(customer.customer_id)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
         result = personalization.eligible_offers(customer.customer_id)
-        cache_manager.set_cached_offers(result.get('version'), customer.customer_id, result)
+        cache_manager.set_cached_offers(customer.customer_id, result)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -351,23 +454,46 @@ class CustomerCouponsView(CustomerOffersView):
 class CheckoutCouponValidateView(APIView):
     """POST /api/checkout/validate-coupon -> backend coupon check + reprice.
 
-    The payable amount and discount are always recomputed here from the
-    customer's own cart total; the value sent by the frontend is never trusted.
+    The payable amount and every benefit (discount, Buy X Get Y, cashback,
+    free shipping, gift) are recomputed here from the customer's own stored
+    cart rows with authoritative prices - the cart value or product quantities
+    sent by the frontend are never trusted.
     """
     permission_classes = [IsAuthenticatedUser, IsCustomer]
 
     def post(self, request):
         customer = CustomerResolver.get_customer_for_user(request.user)
         code = request.data.get('coupon_code')
+        cart_lines, cart_subtotal = _server_cart_lines(customer)
         try:
             result = coupon_validation.validate_coupon(
-                customer.customer_id, code, request.data.get('cart_value', 0)
+                customer.customer_id, code, cart_subtotal, cart_lines=cart_lines
             )
         except DRFValidationError as exc:
             return Response(
                 {'detail': _flatten_error(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
         return Response({'valid': True, **result}, status=status.HTTP_200_OK)
+
+
+def _server_cart_lines(customer):
+    """(cart lines, subtotal) read straight from the customer's cart rows."""
+    items = list(CartItem.objects.filter(customer=customer).select_related('product'))
+    price_map = get_product_selling_price_map(
+        item.product_id for item in items if item.product)
+    lines = []
+    for item in items:
+        if not item.product:
+            continue
+        lines.append({
+            'product_id': str(item.product_id),
+            'name': item.product.product_name or '',
+            'category': item.product.main_category or '',
+            'quantity': int(item.quantity or 1),
+            'unit_price': float(price_map.get(str(item.product_id)) or 0),
+        })
+    subtotal = round(sum(l['unit_price'] * l['quantity'] for l in lines), 2)
+    return lines, subtotal
 
 
 def _flatten_error(exc):

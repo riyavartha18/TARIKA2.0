@@ -1808,17 +1808,28 @@ export async function getRfmSegmentCustomers(token, segment, params = {}) {
   }
 }
 
-/** GET /api/campaigns/ -> list campaigns (admin). */
+/** GET /api/campaigns/ -> list campaigns with admin filters (admin). */
 export async function getCampaigns(token, params = {}) {
   try {
     const query = new URLSearchParams();
     if (params.status && params.status !== 'ALL') query.append('status', params.status);
+    if (params.segment && params.segment !== 'ALL') query.append('segment', params.segment);
+    if (params.offer_type && params.offer_type !== 'ALL') query.append('offer_type', params.offer_type);
+    if (params.search) query.append('search', params.search);
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
     const qs = query.toString();
     const url = `${API_BASE_URL}/api/campaigns/${qs ? '?' + qs : ''}`;
     const response = await fetch(url, { headers: authHeaders(token) });
     const data = await response.json();
     if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch campaigns.' };
-    return { success: true, campaigns: data.results || [], count: data.count || 0 };
+    return {
+      success: true,
+      campaigns: data.results || [],
+      count: data.count || 0,
+      totalPages: data.total_pages || 1,
+      currentPage: data.page || 1,
+    };
   } catch (err) {
     return { success: false, error: 'Network error fetching campaigns.' };
   }
@@ -1872,7 +1883,7 @@ export async function deleteCampaign(token, campaignId) {
   }
 }
 
-/** POST /api/campaigns/{id}/status/ -> publish / pause / draft (admin). */
+/** POST /api/campaigns/{id}/status/ -> publish / pause / resume / expire (admin). */
 export async function setCampaignStatus(token, campaignId, status) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/status/`, {
@@ -1886,7 +1897,26 @@ export async function setCampaignStatus(token, campaignId, status) {
   }
 }
 
-/** GET /api/customer/me/offers -> the signed-in customer's eligible offers. */
+/** GET /api/campaigns/{id}/ -> one campaign with audience + redemption counts. */
+export async function getCampaignDetail(token, campaignId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch campaign.' };
+    return { success: true, campaign: data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching campaign.' };
+  }
+}
+
+/** GET /api/customer/me/offers -> the signed-in customer's eligible offers.
+ *
+ *  Only the offers themselves are handed to the UI. The internal RFM segment
+ *  and tags stay server-side (they drive eligibility, they are never shown).
+ *  `syncing` means the backend is computing the latest analysis; retry shortly.
+ */
 export async function getMyOffers(token) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/customer/me/offers`, {
@@ -1894,7 +1924,7 @@ export async function getMyOffers(token) {
     });
     const data = await response.json();
     if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch your offers.' };
-    return { success: true, segment: data.segment, tags: data.tags || [], offers: data.offers || [] };
+    return { success: true, offers: data.offers || [], syncing: Boolean(data.syncing) };
   } catch (err) {
     return { success: false, error: 'Network error fetching your offers.' };
   }
@@ -1911,7 +1941,16 @@ export async function validateCheckoutCoupon(token, couponCode, cartValue) {
     if (!response.ok) {
       return { success: false, valid: false, error: data.detail || (data.coupon_code && String(data.coupon_code)) || 'Coupon is not valid.' };
     }
-    return { success: true, valid: true, discount: data.discount, payable: data.payable, coupon_code: data.coupon_code };
+    return {
+      success: true, valid: true,
+      discount: data.discount, payable: data.payable, coupon_code: data.coupon_code,
+      // Extra benefits computed by the backend (Buy & Get / combined offers).
+      cashback: data.cashback || 0,
+      free_shipping: Boolean(data.free_shipping),
+      gift: data.gift || null,
+      offer_summary: data.offer_summary || '',
+      benefit_labels: data.benefit_labels || [],
+    };
   } catch (err) {
     return { success: false, valid: false, error: 'Network error validating coupon.' };
   }

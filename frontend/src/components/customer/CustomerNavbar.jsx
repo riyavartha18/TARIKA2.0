@@ -13,13 +13,17 @@ import {
   Tag,
   Compass,
   Package,
+  Ticket,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
+import usePersonalizedOffers from '../../hooks/usePersonalizedOffers';
 
 export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
   const { user, logout } = useAuth();
   const { wishlistItems, totalItems, subtotal, wishlistBounced, bagBounced } = useCustomer();
+  // Memoized in the hook: how many of this customer's offers are still usable.
+  const { availableCount: activeOfferCount } = usePersonalizedOffers();
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -75,6 +79,15 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
     { label: 'New In', path: '/customer/new-in', icon: <Sparkles size={14} /> },
     { label: 'Trending', path: '/customer/trending', icon: <Flame size={14} /> },
     { label: 'Sale', path: '/customer/sale', icon: <Tag size={14} /> },
+    // The count is the customer's own still-usable campaign list (same list the
+    // home page and Member Privileges show), decided by the backend. Used and
+    // expired offers stay in the list but no longer count as active.
+    {
+      label: 'Your Offers',
+      path: '/customer/offers',
+      icon: <Ticket size={14} />,
+      badge: activeOfferCount,
+    },
   ];
 
   const currentPath = location.pathname;
@@ -141,6 +154,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           {/* Brand Logo */}
           <Link
             to="/customer"
+            className="customer-nav-brand"
             style={{
               textDecoration: 'none',
               display: 'flex',
@@ -205,6 +219,28 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                 >
                   {tab.icon}
                   <span>{tab.label}</span>
+                  {tab.badge > 0 && (
+                    <span
+                      aria-label={`${tab.badge} offers available to you`}
+                      style={{
+                        minWidth: '18px',
+                        height: '18px',
+                        padding: '0 5px',
+                        borderRadius: '9999px',
+                        backgroundColor: '#E04D60',
+                        color: '#FFFFFF',
+                        fontSize: '0.66rem',
+                        fontWeight: 800,
+                        lineHeight: 1,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        boxShadow: '0 2px 8px rgba(224, 77, 96, 0.35)',
+                      }}
+                    >
+                      {tab.badge > 9 ? '9+' : tab.badge}
+                    </span>
+                  )}
                 </Link>
               );
             })}
@@ -283,7 +319,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           </form>
 
           {/* Action Icons: Wishlist, Bag, Profile */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0 }}>
+          <div className="customer-nav-actions" style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0 }}>
             {/* Wishlist Icon */}
             <Link
               to="/customer/wishlist"

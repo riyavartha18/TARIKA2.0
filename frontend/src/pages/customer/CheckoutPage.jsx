@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ShoppingBag,
@@ -14,9 +14,13 @@ import {
   Sparkles,
   CheckCircle2,
   Loader2,
+  Gift,
+  ChevronDown,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
+import CheckoutOfferCard from '../../components/customer/CheckoutOfferCard';
+import { offerDisplayName } from '../../utils/offerNames';
 import { createOrder, validateCheckoutCoupon } from '../../services/api';
 
 export default function CheckoutPage() {
@@ -29,6 +33,9 @@ export default function CheckoutPage() {
     bagLoading,
     addToast,
     clearCartLocal,
+    refreshOffers,
+    offers,
+    offersLoading,
   } = useCustomer();
 
   // Form State
@@ -43,10 +50,13 @@ export default function CheckoutPage() {
   // Coupon. The discount is validated and recomputed on the backend; the
   // frontend never decides the amount, it only reflects what the server returns.
   const [couponInput, setCouponInput] = useState('');
-  const [appliedCoupon, setAppliedCoupon] = useState(null); // { code, discount, payable }
+  const [appliedCoupon, setAppliedCoupon] = useState(null); // { code, name, discount, payable }
   const [couponMsg, setCouponMsg] = useState('');
   const [couponType, setCouponType] = useState(''); // 'success' | 'error'
-  const [couponApplying, setCouponApplying] = useState(false);
+  const [applyingCode, setApplyingCode] = useState(''); // code currently being validated
+  // The offers list stays collapsed by default so the checkout summary keeps
+  // reading cleanly; one row shows what is available (and what was applied).
+  const [offersOpen, setOffersOpen] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
@@ -65,27 +75,66 @@ export default function CheckoutPage() {
     }
   }, [user]);
 
-  const handleApplyCoupon = async () => {
-    const code = couponInput.trim().toUpperCase();
+  // Applies one code. Every amount comes back from the server, which rebuilds
+  // the cart from the customer's own stored cart rows and re-checks the segment,
+  // validity dates, minimum order and the one-use-per-customer rule.
+  const applyCode = async (rawCode) => {
+    const code = String(rawCode || '').trim().toUpperCase();
     setCouponMsg('');
     if (!code) {
       setCouponType('error');
       setCouponMsg('Enter a coupon code first.');
       return;
     }
-    setCouponApplying(true);
+    setApplyingCode(code);
     const res = await validateCheckoutCoupon(token, code, subtotal);
-    setCouponApplying(false);
+    setApplyingCode('');
     if (res.success && res.valid) {
-      setAppliedCoupon({ code: res.coupon_code, discount: res.discount, payable: res.payable });
+      // The campaign name comes from the same offer list Your Offers shows, so
+      // the summary names the applied offer instead of only its code.
+      const offer = (offers || []).find(
+        (item) => String(item.coupon_code).toUpperCase() === code,
+      );
+      setAppliedCoupon({
+        code: res.coupon_code,
+        name: offer ? offerDisplayName(offer.name) : res.offer_summary,
+        discount: res.discount, payable: res.payable,
+        // Extra benefits computed by the backend (Buy & Get / combined offers).
+        cashback: res.cashback, freeShipping: res.free_shipping,
+        gift: res.gift, summary: res.offer_summary,
+      });
+      setCouponInput(code);
       setCouponType('success');
-      setCouponMsg(`Coupon applied — you saved \u20B9${Number(res.discount).toLocaleString('en-IN')}.`);
+      const savedPart = Number(res.discount) > 0
+        ? `you saved \u20B9${Number(res.discount).toLocaleString('en-IN')}`
+        : (res.offer_summary || 'benefit applied');
+      setCouponMsg(`Applied successfully \u2014 ${savedPart}.`);
     } else {
       setAppliedCoupon(null);
       setCouponType('error');
       setCouponMsg(res.error || 'Coupon is not valid for this order.');
     }
   };
+
+  const removeAppliedCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponInput('');
+    setCouponMsg('');
+    setCouponType('');
+  };
+
+  // The same server-decided campaign list Your Offers, Customer Home and Member
+  // Privileges render - no extra request, no duplicate campaign records. Used
+  // and Expired entries stay listed with their badge, and the card disables
+  // their Apply button exactly as the backend refuses them.
+  const checkoutOffers = useMemo(() => offers || [], [offers]);
+  const availableOfferCount = useMemo(
+    () => checkoutOffers.filter((offer) => (offer.status || 'AVAILABLE') === 'AVAILABLE').length,
+    [checkoutOffers],
+  );
+  // Generous measured height for the collapse animation: each card plus the
+  // manual-code row and the message line.
+  const offersPanelHeight = Math.max(260, checkoutOffers.length * 205 + 210);
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
@@ -128,6 +177,11 @@ export default function CheckoutPage() {
         if (clearCartLocal) {
           clearCartLocal();
         }
+        // The coupon was booked server-side as part of this confirmed order, so
+        // My Profile / Member Privileges must show it as Used right away.
+        if (appliedCoupon && refreshOffers) {
+          refreshOffers();
+        }
         if (addToast) {
           addToast('Your order has been placed successfully!', 'success');
         }
@@ -165,6 +219,26 @@ export default function CheckoutPage() {
           border-color: #B8505E !important;
           outline: none;
           box-shadow: 0 0 0 3px rgba(184, 80, 94, 0.12);
+        }
+        /* Offers & Coupons accordion */
+        .checkout-offers-panel {
+          overflow: hidden;
+          transition: max-height 0.32s ease, opacity 0.24s ease;
+        }
+        .checkout-offers-chevron svg {
+          transition: transform 0.25s ease;
+        }
+        .checkout-offers-chevron.open svg {
+          transform: rotate(180deg);
+        }
+        .checkout-offers-toggle:hover {
+          color: #B8505E;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .checkout-offers-panel,
+          .checkout-offers-chevron svg {
+            transition: none;
+          }
         }
       `}</style>
 
@@ -938,43 +1012,155 @@ export default function CheckoutPage() {
                   paddingTop: '1rem',
                 }}
               >
-                {/* Coupon */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingBottom: '0.4rem' }}>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      value={couponInput}
-                      onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                      placeholder="Coupon code"
-                      disabled={!!appliedCoupon}
-                      style={{
-                        flex: 1, border: '1px solid #F0E2E0', borderRadius: 9,
-                        padding: '0.5rem 0.65rem', fontSize: '0.85rem', letterSpacing: '0.04em',
-                      }}
-                    />
-                    {appliedCoupon ? (
-                      <button
-                        type="button"
-                        onClick={() => { setAppliedCoupon(null); setCouponInput(''); setCouponMsg(''); setCouponType(''); }}
-                        style={{ border: '1px solid #F0E2E0', background: '#fff', borderRadius: 9, padding: '0 0.8rem', cursor: 'pointer', fontSize: '0.78rem', color: '#6B5E63' }}
+                {/* Offers & Coupons - an accordion over the customer's own
+                    eligible campaigns: the exact same list Your Offers, Customer
+                    Home and Member Privileges render, from the same one
+                    server-decided service. Collapsed by default so the summary
+                    panel stays uncluttered. */}
+                <div
+                  style={{
+                    border: '1px solid rgba(216,114,126,0.22)',
+                    borderRadius: 14,
+                    background: '#FFFFFF',
+                    padding: '0.7rem 0.85rem',
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="checkout-offers-toggle"
+                    aria-expanded={offersOpen}
+                    aria-controls="checkout-offers-panel"
+                    onClick={() => setOffersOpen((open) => !open)}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center',
+                      justifyContent: 'space-between', gap: 10,
+                      background: 'none', border: 'none', padding: 0,
+                      cursor: 'pointer', textAlign: 'left', color: '#1F191B',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                      <span
+                        style={{
+                          flexShrink: 0, width: 30, height: 30, borderRadius: 9,
+                          background: 'rgba(216,114,126,0.12)',
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        }}
                       >
-                        Remove
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleApplyCoupon}
-                        disabled={couponApplying}
-                        style={{ border: 'none', background: '#B8505E', color: '#fff', borderRadius: 9, padding: '0 1rem', cursor: couponApplying ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '0.82rem', opacity: couponApplying ? 0.6 : 1 }}
-                      >
-                        {couponApplying ? 'Checking…' : 'Apply'}
-                      </button>
-                    )}
-                  </div>
-                  {couponMsg && (
-                    <span style={{ fontSize: '0.76rem', color: couponType === 'success' ? '#16A34A' : '#B3261E' }}>
-                      {couponMsg}
+                        <Gift size={16} color="#B8505E" />
+                      </span>
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: '0.86rem', fontWeight: 800, lineHeight: 1.25 }}>
+                          Offers &amp; Coupons
+                        </span>
+                        <span
+                          style={{
+                            display: 'block', fontSize: '0.72rem', color: '#6B5E63',
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {appliedCoupon
+                            ? `Applied: ${appliedCoupon.name || appliedCoupon.code} — you saved ₹${Number(appliedCoupon.discount).toLocaleString('en-IN')}`
+                            : availableOfferCount
+                              ? `${availableOfferCount} offer${availableOfferCount === 1 ? '' : 's'} available for your account`
+                              : 'Offers available for your account'}
+                        </span>
+                      </span>
                     </span>
-                  )}
+                    <span
+                      className={offersOpen ? 'checkout-offers-chevron open' : 'checkout-offers-chevron'}
+                      style={{
+                        flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5,
+                        border: '1px solid rgba(184,80,94,0.35)', borderRadius: 9999,
+                        padding: '4px 10px', fontSize: '0.72rem', fontWeight: 700,
+                        color: '#B8505E', background: '#FFFFFF', whiteSpace: 'nowrap',
+                      }}
+                    >
+                      <span>{offersOpen ? 'Hide Offers' : 'View Available Offers'}</span>
+                      <ChevronDown size={13} />
+                    </span>
+                  </button>
+
+                  <div
+                    id="checkout-offers-panel"
+                    className="checkout-offers-panel"
+                    style={{
+                      maxHeight: offersOpen ? `${offersPanelHeight}px` : 0,
+                      opacity: offersOpen ? 1 : 0,
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: '0.7rem' }}>
+                      {checkoutOffers.length > 0 ? (
+                        checkoutOffers.map((offer) => (
+                          <CheckoutOfferCard
+                            key={offer.campaign_id}
+                            offer={offer}
+                            applied={!!appliedCoupon && appliedCoupon.code === offer.coupon_code}
+                            applying={applyingCode === offer.coupon_code}
+                            onApply={applyCode}
+                            onRemove={removeAppliedCoupon}
+                          />
+                        ))
+                      ) : (
+                        <p style={{ margin: 0, fontSize: '0.76rem', color: '#9E8F94' }}>
+                          {offersLoading
+                            ? 'Loading your offers…'
+                            : 'No personalized offers are active on your account right now. You can still try a coupon code below.'}
+                        </p>
+                      )}
+
+                      {/* Manual code entry, for any other valid campaign code. */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 2 }}>
+                        <label style={{ fontSize: '0.76rem', fontWeight: 700, color: '#1F191B' }}>
+                          Have another coupon code?
+                        </label>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <input
+                            value={couponInput}
+                            onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                            placeholder="Enter coupon code"
+                            style={{
+                              flex: 1, minWidth: 0, border: '1px solid #F0E2E0', borderRadius: 9,
+                              padding: '0.5rem 0.65rem', fontSize: '0.85rem', letterSpacing: '0.04em',
+                            }}
+                          />
+                          {appliedCoupon ? (
+                            <button
+                              type="button"
+                              onClick={removeAppliedCoupon}
+                              style={{ border: '1px solid #F0E2E0', background: '#fff', borderRadius: 9, padding: '0 0.8rem', cursor: 'pointer', fontSize: '0.78rem', color: '#6B5E63', whiteSpace: 'nowrap' }}
+                            >
+                              Remove
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => applyCode(couponInput)}
+                              disabled={!!applyingCode}
+                              style={{ border: 'none', background: '#B8505E', color: '#fff', borderRadius: 9, padding: '0 1rem', cursor: applyingCode ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '0.82rem', opacity: applyingCode ? 0.6 : 1, whiteSpace: 'nowrap' }}
+                            >
+                              {applyingCode ? 'Checking…' : 'Apply'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {couponMsg && (
+                        <span
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6,
+                            fontSize: '0.76rem', fontWeight: 600,
+                            color: couponType === 'success' ? '#15803D' : '#B3261E',
+                            background: couponType === 'success' ? 'rgba(21,128,61,0.08)' : 'rgba(179,38,30,0.07)',
+                            borderRadius: 8, padding: '6px 9px',
+                          }}
+                        >
+                          {couponType === 'success' && <CheckCircle2 size={14} />}
+                          {couponMsg}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 {/* Subtotal */}
@@ -991,6 +1177,16 @@ export default function CheckoutPage() {
                   <span style={{ fontWeight: 700, color: '#16A34A' }}>Free</span>
                 </div>
 
+                {/* Which campaign is applied - named, not just a code. */}
+                {appliedCoupon && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: '0.9rem', color: '#6B5E63' }}>
+                    <span>Applied Offer</span>
+                    <span style={{ fontWeight: 700, color: '#B8505E', textAlign: 'right' }}>
+                      {appliedCoupon.name || appliedCoupon.code}
+                    </span>
+                  </div>
+                )}
+
                 {/* Coupon discount (server-computed) */}
                 {appliedCoupon && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', color: '#6B5E63' }}>
@@ -998,6 +1194,26 @@ export default function CheckoutPage() {
                     <span style={{ fontWeight: 700, color: '#16A34A' }}>
                       −₹{Number(appliedCoupon.discount).toLocaleString('en-IN')}
                     </span>
+                  </div>
+                )}
+
+                {/* Extra server-validated benefits of segment offers */}
+                {appliedCoupon?.freeShipping && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#6B5E63' }}>
+                    <span>Shipping</span>
+                    <span style={{ fontWeight: 700, color: '#16A34A' }}>Free ({appliedCoupon.code})</span>
+                  </div>
+                )}
+                {appliedCoupon?.cashback > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#6B5E63' }}>
+                    <span>Cashback</span>
+                    <span style={{ fontWeight: 700, color: '#16A34A' }}>₹{Number(appliedCoupon.cashback).toLocaleString('en-IN')} after delivery</span>
+                  </div>
+                )}
+                {appliedCoupon?.gift && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#6B5E63' }}>
+                    <span>Free gift</span>
+                    <span style={{ fontWeight: 700, color: '#16A34A' }}>{appliedCoupon.gift.name}</span>
                   </div>
                 )}
 

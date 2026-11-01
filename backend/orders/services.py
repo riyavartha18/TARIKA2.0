@@ -120,19 +120,30 @@ class OrderCreationService:
                     item.product_id for item in cart_items if item.product
                 )
 
-                # The coupon is validated against the whole-cart subtotal, then
-                # its (backend-recomputed) discount is applied across the order
-                # rows below. No client-supplied discount is ever trusted.
+                # The coupon is validated against the whole-cart subtotal and
+                # the server-side cart lines (authoritative product, quantity,
+                # price), so Buy X Get Y and product-scoped offers are checked
+                # against what is actually in the bag. No client-supplied
+                # discount is ever trusted.
                 coupon = None
                 if coupon_code:
                     from rfm_analysis import coupon_validation
-                    cart_subtotal = round(sum(
-                        float(price_map.get(str(item.product_id)) or 0)
-                        * int(item.quantity or 1)
+                    cart_lines = [
+                        {
+                            'product_id': str(item.product_id),
+                            'name': item.product.product_name or '',
+                            'category': item.product.main_category or '',
+                            'quantity': int(item.quantity or 1),
+                            'unit_price': float(price_map.get(str(item.product_id)) or 0),
+                        }
                         for item in cart_items if item.product
+                    ]
+                    cart_subtotal = round(sum(
+                        line['unit_price'] * line['quantity'] for line in cart_lines
                     ), 2)
                     coupon = coupon_validation.validate_coupon(
-                        customer.customer_id, coupon_code, cart_subtotal
+                        customer.customer_id, coupon_code, cart_subtotal,
+                        cart_lines=cart_lines,
                     )
 
                 created_orders = []
@@ -218,7 +229,9 @@ class OrderCreationService:
                 # Spread the recomputed discount across the created orders and
                 # book exactly one redemption for this checkout use, tied to the
                 # first discounted order (so per-customer limits stay honest).
-                if coupon and coupon['discount'] > 0:
+                # Benefit-only coupons (cashback, gift, free shipping) book a
+                # redemption too, even though nothing leaves the order price.
+                if coupon and coupon.get('benefit_applied', coupon['discount'] > 0):
                     cls._apply_discount(created_orders, coupon, customer)
 
                 CartService.clear_cart(customer)
@@ -244,7 +257,7 @@ class OrderCreationService:
         from rfm_analysis import coupon_validation
 
         remaining = round(float(coupon['discount']), 2)
-        primary_order = None
+        first_discounted = None
         for order in created_orders:
             if remaining <= 0:
                 break
@@ -255,15 +268,28 @@ class OrderCreationService:
             order.final_price = round(float(order.final_price or 0) - share, 2)
             order.save(update_fields=['additional_discount', 'final_price'])
             remaining = round(remaining - share, 2)
-            if primary_order is None:
-                primary_order = order
+            if first_discounted is None:
+                first_discounted = order
 
+        # The redemption belongs to the first order that actually took a
+        # discount; a zero-discount benefit (cashback, gift, free shipping)
+        # still books against the first order of the checkout.
+        primary_order = first_discounted or (created_orders[0] if created_orders else None)
         applied = round(float(coupon['discount']) - remaining, 2)
-        if primary_order is not None and applied > 0:
-            coupon_validation.redeem(
+        if primary_order is not None:
+            booked = coupon_validation.redeem(
                 coupon['campaign_id'], customer.customer_id,
                 primary_order.order_id, applied,
             )
+            # One coupon, one redemption per customer. If the booking did not go
+            # through (a concurrent checkout for the same customer won the race,
+            # or the coupon was used already), the whole checkout is rolled back
+            # by the enclosing transaction instead of quietly granting a second
+            # discount with no audit row.
+            if not booked:
+                raise ValidationError(
+                    "This coupon has already been used on your account."
+                )
 
     @staticmethod
     def _resolve_payment_method(checkout_data):

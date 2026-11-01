@@ -346,3 +346,34 @@ class OrdersViewTests(SimpleTestCase):
                    side_effect=ValidationError('not available')):
             response = CustomerOrderReturnView.as_view()(request, order_id='ORD0000042')
         self.assertEqual(response.status_code, 400)
+
+
+class CheckoutCouponBookingTests(SimpleTestCase):
+    """A coupon is consumed only when its redemption row is really booked."""
+
+    COUPON = {'campaign_id': 7, 'coupon_code': 'CHAMP_VIP15', 'discount': 450.0}
+
+    def _order(self):
+        return make_order(final_price=3000.0, initial_price=3000.0, discount=0)
+
+    def test_discount_applied_and_coupon_booked_once(self):
+        order = self._order()
+        with patch.object(Order, 'save', return_value=None), \
+                patch('rfm_analysis.coupon_validation.redeem', return_value=True) as redeem:
+            OrderCreationService._apply_discount([order], self.COUPON, order.customer)
+
+        redeem.assert_called_once_with(7, 'U100010', order.order_id, 450.0)
+        self.assertEqual(order.final_price, 2550.0)
+        self.assertEqual(order.additional_discount, 450.0)
+
+    def test_checkout_fails_when_the_coupon_was_already_used(self):
+        # redeem() returns False when this customer has a redemption for the
+        # campaign, so nothing may be silently discounted without an audit row:
+        # the raised error rolls the whole checkout transaction back and the
+        # coupon stays unused.
+        order = self._order()
+        with patch.object(Order, 'save', return_value=None), \
+                patch('rfm_analysis.coupon_validation.redeem', return_value=False):
+            with self.assertRaises(ValidationError) as ctx:
+                OrderCreationService._apply_discount([order], self.COUPON, order.customer)
+        self.assertIn('already been used', str(ctx.exception))

@@ -108,6 +108,13 @@
   padding: 0.4rem 0.2rem;
   transition: color 0.25s ease;
   letter-spacing: 0.02em;
+  /* Labels such as "Shop / Categories" must stay on one line; the row scrolls
+     instead of breaking a two-word label in half. */
+  white-space: nowrap;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .customer-nav-link::after {
@@ -130,6 +137,18 @@
 .customer-nav-link.active::after,
 .customer-nav-link:hover::after {
   width: 100%;
+}
+
+/* One horizontal row: the link list never wraps and never gets squeezed, so
+   "Customer Home" / "Shop / Categories" / "Your Offers" stay intact. */
+.customer-nav-desktop {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.customer-nav-desktop > a {
+  flex-shrink: 0;
 }
 
 .customer-icon-badge {
@@ -1519,9 +1538,49 @@
 }
 
 /* Navbar responsive fallback (shared header for the customer portal) */
-@media (max-width: 1120px) {
+
+/* Medium-wide screens: the six labels no longer fit at full size, so the row
+   tightens its rhythm instead of letting a label break onto two lines. */
+@media (max-width: 1420px) and (min-width: 1121px) {
   .customer-nav-desktop {
-    display: none !important;
+    gap: 1rem !important;
+  }
+  .customer-nav-link {
+    font-size: 0.84rem;
+  }
+}
+
+/* Below the desktop breakpoint the links move into their own scrollable strip
+   under the header row, so navigation is never simply hidden. */
+@media (max-width: 1120px) {
+  .customer-nav-inner {
+    flex-wrap: wrap;
+    row-gap: 0.55rem;
+  }
+  .customer-nav-brand {
+    order: 1;
+  }
+  .customer-nav-actions {
+    order: 2;
+    margin-left: auto;
+  }
+  .customer-nav-search {
+    order: 3;
+    min-width: 180px;
+  }
+  .customer-nav-desktop {
+    display: flex !important;
+    order: 4;
+    width: 100%;
+    gap: 1.15rem !important;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 0.2rem;
+  }
+  .customer-nav-desktop::-webkit-scrollbar {
+    display: none;
   }
 }
 

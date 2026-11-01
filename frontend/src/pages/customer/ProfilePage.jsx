@@ -8,23 +8,46 @@ import {
   Heart,
   ShoppingBag,
   Sparkles,
-  Shield,
-  Crown,
-  LogOut,
   Gift,
-  Truck,
+  LogOut,
+  ArrowRight,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
+import PersonalizedOffers from '../../components/customer/PersonalizedOffers';
+import usePersonalizedOffers from '../../hooks/usePersonalizedOffers';
+import { offerDisplayName, offerStatusLabel } from '../../utils/offerNames';
 
 export default function ProfilePage() {
   const { user, logout } = useAuth();
   const { wishlistItems, totalItems } = useCustomer();
+  // Same campaigns, same eligibility logic as every other customer surface:
+  // one list from the customer context, and both blocks below render that
+  // identical list. The counts are memoized in the hook, not recomputed here.
+  const { loading, syncing, offers, availableCount, usedCount } = usePersonalizedOffers();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
     await logout();
     navigate('/');
+  };
+
+  const sectionTitleStyle = {
+    fontFamily: "'Playfair Display', serif",
+    fontSize: '1.35rem',
+    fontWeight: 700,
+    color: '#1F191B',
+    margin: '0 0 1.25rem 0',
+    borderBottom: '1px solid #F0E2E0',
+    paddingBottom: '0.75rem',
+  };
+
+  const panelStyle = {
+    backgroundColor: '#FFFFFF',
+    borderRadius: '20px',
+    padding: '2rem',
+    border: '1px solid rgba(240, 226, 224, 0.9)',
+    boxShadow: '0 4px 20px rgba(184, 80, 94, 0.05)',
   };
 
   return (
@@ -66,12 +89,6 @@ export default function ProfilePage() {
           </div>
 
           <div>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: '#8E3642', marginBottom: '4px' }}>
-              <Crown size={15} />
-              <span style={{ fontSize: '0.74rem', fontWeight: 800, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-                TARIKA VIP HAUTE CIRCLE
-              </span>
-            </div>
             <h1
               style={{
                 margin: '0 0 4px 0',
@@ -84,7 +101,7 @@ export default function ProfilePage() {
               {user?.full_name || 'Valued Member'}
             </h1>
             <p style={{ margin: 0, fontSize: '0.86rem', color: '#6B5E63' }}>
-              Member since 2026 • Exclusive Privileges Active
+              Member since 2026
             </p>
           </div>
         </div>
@@ -225,72 +242,109 @@ export default function ProfilePage() {
             <Sparkles size={22} color="#8E3642" />
           </div>
           <div>
-            <span style={{ fontSize: '1.2rem', fontWeight: 800, color: '#1F191B', display: 'block', lineHeight: 1.2 }}>
-              Tier: Rose Gold
+            <span style={{ fontSize: '1.6rem', fontWeight: 800, color: '#1F191B', display: 'block', lineHeight: 1 }}>
+              {loading || syncing ? '—' : availableCount}
             </span>
-            <span style={{ fontSize: '0.82rem', color: '#6B5E63' }}>VIP Haute Circle</span>
+            <span style={{ fontSize: '0.82rem', color: '#6B5E63' }}>Offers Ready to Use</span>
           </div>
         </div>
       </div>
 
-      {/* Account Details & VIP Privileges Grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-          gap: '2rem',
-        }}
-      >
-        {/* Contact & Delivery Details */}
-        <div
+      {/* My Profile — a summary of the live offers on this account. The cards
+          themselves live in Member Privileges below (and on Your Offers), so
+          the same campaign is never printed twice on one page. */}
+      {(offers.length > 0 || syncing) && (
+        <section
+          aria-label="My offer summary"
           style={{
-            backgroundColor: '#FFFFFF',
-            borderRadius: '20px',
-            padding: '2rem',
-            border: '1px solid rgba(240, 226, 224, 0.9)',
-            boxShadow: '0 4px 20px rgba(184, 80, 94, 0.05)',
+            ...panelStyle,
+            marginBottom: '2.5rem',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '1rem',
+            background: 'linear-gradient(135deg, #FBF1F0 0%, #F7E4E2 100%)',
+            border: '1px solid rgba(216, 114, 126, 0.25)',
           }}
         >
-          <h2
-            style={{
-              fontFamily: "'Playfair Display', serif",
-              fontSize: '1.35rem',
-              fontWeight: 700,
-              color: '#1F191B',
-              margin: '0 0 1.25rem 0',
-              borderBottom: '1px solid #F0E2E0',
-              paddingBottom: '0.75rem',
-            }}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', minWidth: 0 }}>
+            <Sparkles size={22} color="#8E3642" />
+            <div style={{ minWidth: 0 }}>
+              <span style={{ fontSize: '1rem', fontWeight: 800, color: '#1F191B', display: 'block', lineHeight: 1.3 }}>
+                {syncing && !offers.length
+                  ? 'Tailoring your offers…'
+                  : `${availableCount} offer${availableCount === 1 ? '' : 's'} ready to use${
+                    usedCount ? ` · ${usedCount} already used` : ''}`}
+              </span>
+              {offers.length > 0 && (
+                <span style={{ fontSize: '0.82rem', color: '#6B5E63', display: 'block' }}>
+                  {offers.slice(0, 3).map(
+                    (offer) => `${offerDisplayName(offer.name)} (${offerStatusLabel(offer.status)})`,
+                  ).join(' • ')}
+                  {offers.length > 3 ? ' • …' : ''}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <Link
+            to="/customer/offers"
+            className="tarika-btn-outline"
+            style={{ fontSize: '0.82rem', padding: '0.6rem 1.3rem' }}
           >
-            Account & Destination
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              View All Offers
+              <ArrowRight size={14} />
+            </span>
+          </Link>
+        </section>
+      )}
+
+      {/* Account & Destination, then Member Privileges - both full width, so
+          the two cards share exactly the same measure and alignment. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+        {/* Contact & Delivery Details */}
+        <div style={panelStyle}>
+          <h2 style={sectionTitleStyle}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+              <User size={18} color="#B8505E" />
+              Account &amp; Destination
+            </span>
           </h2>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+              gap: '1.75rem 2rem',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
               <Mail size={16} color="#B8505E" />
               <div>
-                <span style={{ fontSize: '0.72rem', color: '#9E8F94', display: 'block' }}>Email Address</span>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#1F191B' }}>
+                <span style={{ fontSize: '0.74rem', color: '#9E8F94', display: 'block', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Email Address</span>
+                <span style={{ fontSize: '0.98rem', fontWeight: 600, color: '#1F191B', display: 'block', marginTop: '2px' }}>
                   {user?.email || 'customer@tarika.com'}
                 </span>
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
               <Phone size={16} color="#B8505E" />
               <div>
-                <span style={{ fontSize: '0.72rem', color: '#9E8F94', display: 'block' }}>Contact Phone</span>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#1F191B' }}>
+                <span style={{ fontSize: '0.74rem', color: '#9E8F94', display: 'block', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Contact Phone</span>
+                <span style={{ fontSize: '0.98rem', fontWeight: 600, color: '#1F191B', display: 'block', marginTop: '2px' }}>
                   {user?.phone ? `+91 ${user.phone}` : 'Registered via email'}
                 </span>
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
               <MapPin size={16} color="#B8505E" />
               <div>
-                <span style={{ fontSize: '0.72rem', color: '#9E8F94', display: 'block' }}>City & State</span>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#1F191B' }}>
+                <span style={{ fontSize: '0.74rem', color: '#9E8F94', display: 'block', letterSpacing: '0.04em', textTransform: 'uppercase' }}>City &amp; State</span>
+                <span style={{ fontSize: '0.98rem', fontWeight: 600, color: '#1F191B', display: 'block', marginTop: '2px' }}>
                   {user?.city ? `${user.city}, ${user.state || ''}` : 'India (National Delivery)'}
                 </span>
               </div>
@@ -298,67 +352,46 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Member Benefits */}
-        <div
-          style={{
-            backgroundColor: '#FFFFFF',
-            borderRadius: '20px',
-            padding: '2rem',
-            border: '1px solid rgba(240, 226, 224, 0.9)',
-            boxShadow: '0 4px 20px rgba(184, 80, 94, 0.05)',
-          }}
-        >
+        {/* Member Privileges — the customer's eligible campaigns, the same
+            server-decided list as the Your Offers page and the home feature. */}
+        <div style={panelStyle}>
           <h2
             style={{
-              fontFamily: "'Playfair Display', serif",
-              fontSize: '1.35rem',
-              fontWeight: 700,
-              color: '#1F191B',
-              margin: '0 0 1.25rem 0',
-              borderBottom: '1px solid #F0E2E0',
-              paddingBottom: '0.75rem',
+              ...sectionTitleStyle,
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
             }}
           >
-            VIP Member Privileges
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+              <Gift size={18} color="#B8505E" />
+              Member Privileges
+            </span>
+            {offers.length > 0 && (
+              <Link to="/customer/offers" className="section-link" style={{ fontFamily: 'inherit', fontSize: '0.82rem' }}>
+                <span>View All Offers</span>
+                <ArrowRight size={14} />
+              </Link>
+            )}
           </h2>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <Truck size={18} color="#D8727E" />
-              <div>
-                <span style={{ fontSize: '0.88rem', fontWeight: 600, color: '#1F191B', display: 'block' }}>
-                  Priority Express Dispatch
-                </span>
-                <span style={{ fontSize: '0.76rem', color: '#6B5E63' }}>
-                  Zero delivery fees on all orders across India
-                </span>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <Gift size={18} color="#D8727E" />
-              <div>
-                <span style={{ fontSize: '0.88rem', fontWeight: 600, color: '#1F191B', display: 'block' }}>
-                  Personalized Offers
-                </span>
-                <span style={{ fontSize: '0.76rem', color: '#6B5E63' }}>
-                  Tailored to your shopping profile — see Your Exclusive Privileges on your home page
-                </span>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <Shield size={18} color="#D8727E" />
-              <div>
-                <span style={{ fontSize: '0.88rem', fontWeight: 600, color: '#1F191B', display: 'block' }}>
-                  Authentic Couture Guarantee
-                </span>
-                <span style={{ fontSize: '0.76rem', color: '#6B5E63' }}>
-                  Direct atelier verification on every garment
-                </span>
-              </div>
-            </div>
-          </div>
+          {loading ? (
+            <p style={{ margin: 0, fontSize: '0.84rem', color: '#9E8F94' }}>Loading your offers…</p>
+          ) : syncing && !offers.length ? (
+            <p style={{ margin: 0, fontSize: '0.84rem', color: '#6B5E63' }}>
+              Tailoring your offers — your latest shopping analysis is being prepared. This
+              refreshes on its own in a moment.
+            </p>
+          ) : offers.length ? (
+            <PersonalizedOffers offers={offers} minColumnWidth={250} />
+          ) : (
+            <p style={{ margin: 0, fontSize: '0.84rem', color: '#6B5E63' }}>
+              No offers are active for your account right now. New ones appear here as soon as
+              they are published.
+            </p>
+          )}
         </div>
       </div>
     </div>
