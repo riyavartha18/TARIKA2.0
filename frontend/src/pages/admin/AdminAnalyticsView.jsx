@@ -5,9 +5,9 @@ import {
   getDemandPredictionAnalytics,
   getDemandPredictionProducts,
   getDemandPredictionCategories,
-  getSlowMovingInventory,
   getProductSalesHistory,
 } from '../../services/api';
+import { getSlowMovingInventory } from '../../services/slowInventory';
 import {
   BrainCircuit,
   Search,
