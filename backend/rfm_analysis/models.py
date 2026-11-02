@@ -163,28 +163,72 @@ class CampaignRedemption(models.Model):
 
 
 class CustomerSegment(models.Model):
-    """One row per buyer: the segment label from the latest completed analysis.
+    """One row per buyer: the *latest* complete RFM result from a completed run.
 
-    The dashboard keeps its full snapshot in the shared cache (percentiles,
-    scores, per-segment buckets), but a customer page only ever needs this
-    buyer's segment and secondary tags. Reading them is a single primary-key row
-    instead of deserializing ~100k cached records, and - crucially - it survives
-    a server restart, so opening My Profile can never trigger a fresh full
-    RFM computation. Written only by a successfully completed run (see
-    `segment_store`), so what is stored here is always a completed analysis.
+    Originally this table carried only the segment label (so a customer page
+    could read one indexed row instead of deserializing ~100k cached records or
+    recomputing the whole analysis after a restart). It is now the dedicated,
+    durable RFM *result* store the architecture calls for: every completed run
+    synchronizes each buyer's full RFM state here - metrics, scores, segment,
+    tags and the calculation version/timestamp - so the row for a customer is
+    always their latest successfully calculated result, independent of the
+    short-lived cache snapshot.
+
+    CLV reads Monetary, Frequency and segment straight from these rows and
+    never re-derives the RFM metrics from the 1M-row orders table; first/last
+    purchase date and the lifetime order count are still computed on demand
+    from `orders` by CLV (they are order facts, not stored here for CLV).
+
+    Written only from a *successfully completed* run (see `segment_store`), and
+    updated with an `ON CONFLICT ... DO UPDATE ... WHERE <changed>` upsert, so
+    an unchanged customer is not rewritten (no `updated_at` churn) and an older
+    calculation can never overwrite a newer one.
+
+    Customer identity is a plain text key (`customer_id`), not a foreign key,
+    because `public.customers`/`public.orders` are unmanaged dataset tables.
     """
     customer_id = models.CharField(max_length=255, primary_key=True)
+    # RFM metrics (Recency in whole days, Frequency as the valid distinct order
+    # count, Monetary as lifetime valid revenue - the same definition CLV uses).
+    recency = models.IntegerField(null=True, blank=True)
+    frequency = models.IntegerField(null=True, blank=True)
+    monetary = models.DecimalField(max_digits=14, decimal_places=2,
+                                   null=True, blank=True)
+    # 1-5 percentile-band scores for each dimension plus a combined RFM score
+    # (the R/F/M scores concatenated, e.g. "543"). The combined score is stored
+    # for completeness/reporting; segmentation itself uses the percentiles.
+    r_score = models.PositiveIntegerField(null=True, blank=True)
+    f_score = models.PositiveIntegerField(null=True, blank=True)
+    m_score = models.PositiveIntegerField(null=True, blank=True)
+    rfm_score = models.CharField(max_length=3, blank=True, default='')
+    # Latest segment label and secondary tags (e.g. Big Spender).
     segment = models.CharField(max_length=40)
     tags = models.JSONField(default=list, blank=True)
+    # Purchase-date bookends kept alongside the metrics so the paginated RFM
+    # results endpoint is fully served from this table (no order scan). CLV does
+    # not consume these - it derives them from `orders` - so they are optional.
+    first_purchase_date = models.DateField(null=True, blank=True)
+    last_purchase_date = models.DateField(null=True, blank=True)
+    # Version of the RFM calculation that last changed this row (monotonic run
+    # id) - guards against an older run overwriting a newer result.
     version = models.PositiveIntegerField(default=0)
+    # When this row's values were last calculated (per-customer) ...
     computed_at = models.DateTimeField()
+    # ... and when a stored value actually changed (only moved on real change).
+    # Nullable so adding the column to a populated table needs no back-fill
+    # default; it is always set explicitly by the upsert write paths.
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = 'rfm_customer_segments'
         indexes = [
-            # Audience counts by segment (admin campaign list / preview).
+            # Audience counts by segment and the segment-filtered results list.
             models.Index(fields=['segment', 'customer_id'],
                          name='rfm_segment_by_label'),
+            # The results endpoint sorts within a segment by Monetary (top
+            # spenders); this keeps that filter+order an index scan.
+            models.Index(fields=['segment', 'monetary'],
+                         name='rfm_segment_by_monetary'),
         ]
 
     def __str__(self):
@@ -205,6 +249,11 @@ class RfmAnalysisState(models.Model):
     buyer_count = models.PositiveIntegerField(default=0)
     analysis_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField()
+    # Cheap fingerprint of the eligible source data at the moment this version
+    # completed (eligible order count | distinct buyers | max purchase date).
+    # The incremental refresh compares the live fingerprint against this to
+    # decide whether anything actually changed, without a dirty-customer queue.
+    source_fingerprint = models.CharField(max_length=128, blank=True, default='')
 
     class Meta:
         db_table = 'rfm_analysis_state'

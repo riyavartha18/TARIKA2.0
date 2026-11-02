@@ -7,6 +7,7 @@ from rest_framework import status
 from django.db import connection
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
+from catalog.normalize import normalize_category, sql_norm_expr
 from demand_prediction import engine
 from demand_prediction.engine import DecisionTreeEngine
 
@@ -166,8 +167,9 @@ class DemandPredictionProductsView(APIView):
                 like = f'%{search.lower()}%'
                 where_params += [like, like, like]
             if category and category.upper() != 'ALL':
-                where_clauses.append("d.main_category = %s")
-                where_params.append(category)
+                # Case- and whitespace-insensitive category filter.
+                where_clauses.append(f"{sql_norm_expr('d.main_category')} = %s")
+                where_params.append(normalize_category(category))
 
             # Normalise demand_level to a validated value.
             if demand_level not in ('HIGH', 'MEDIUM', 'LOW'):
@@ -190,6 +192,8 @@ class DemandPredictionProductsView(APIView):
                     COALESCE(d.sub_category, '') AS sub_category,
                     d.image AS image,
                     d.discount_price AS discount_price,
+                    COALESCE(NULLIF(regexp_replace(d.actual_price, '[^0-9.]', '', 'g'), '')::float8,
+                             d.initial_price) AS selling_price,
                     d.available_quantity AS available_quantity,
                     {demand_case_sql} AS predicted_demand
                 FROM fact_product_analysis f
@@ -257,6 +261,8 @@ class DemandPredictionProductsView(APIView):
                     'sub_category': r['sub_category'],
                     'image': r['image'],
                     'discount_price': r['discount_price'],
+                    # Final discounted selling price (actual_price TEXT, parsed).
+                    'selling_price': r['selling_price'],
                     'wishlist_count': int(r['wishlist_count'] or 0),
                     'cart_count': int(r['cart_count'] or 0),
                     'units_sold': units,
@@ -299,10 +305,14 @@ class CategoryFilterView(APIView):
     def get(self, request):
         try:
             with connection.cursor() as cursor:
+                # One entry per case/whitespace-insensitive category (a stable
+                # display name is the MIN of the trimmed raw values).
                 cursor.execute(
-                    "SELECT DISTINCT main_category FROM products "
-                    "WHERE main_category IS NOT NULL AND main_category <> '' "
-                    "ORDER BY main_category"
+                    "SELECT MIN(TRIM(main_category)) AS main_category "
+                    "FROM products "
+                    "WHERE main_category IS NOT NULL AND TRIM(main_category) <> '' "
+                    "GROUP BY LOWER(TRIM(main_category)) "
+                    "ORDER BY 1"
                 )
                 categories = [row[0] for row in cursor.fetchall()]
             return Response({'categories': categories}, status=status.HTTP_200_OK)

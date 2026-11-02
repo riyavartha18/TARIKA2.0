@@ -346,3 +346,23 @@ def set_never_purchased(version, rows):
     if version is None:
         return
     cache.set(never_purchased_key(version), rows, utils.SNAPSHOT_TTL_SECONDS)
+
+
+# Dashboard KPIs + segment distribution derived by SQL aggregation over the
+# persisted result table. Keyed by the analysis version, so a completed refresh
+# (which bumps the version) makes the previous aggregate unreachable and the
+# next read recomputes from current stored results - never a stale segment mix.
+def dashboard_totals_key(version):
+    return f'rfm:dashboard_totals:{version}'
+
+
+def get_dashboard_totals(version):
+    if version is None:
+        return None
+    return cache.get(dashboard_totals_key(version))
+
+
+def set_dashboard_totals(version, payload):
+    if version is None:
+        return
+    cache.set(dashboard_totals_key(version), payload, utils.SNAPSHOT_TTL_SECONDS)

@@ -34,6 +34,7 @@ interactive (only one page of rows is transferred per request).
 """
 from django.db import connection
 
+from catalog.normalize import normalize_category, sql_norm_expr
 from demand_prediction.engine import (
     DecisionTreeEngine,
     get_trained_model,
@@ -114,8 +115,9 @@ def run_stock_forecast(page=1, page_size=25, search='', tier='ALL',
         like = f'%{search.lower()}%'
         where_params += [like, like, like]
     if category and category.upper() != 'ALL':
-        where_clauses.append('d.main_category = %s')
-        where_params.append(category)
+        # Case- and whitespace-insensitive category filter.
+        where_clauses.append(f"{sql_norm_expr('d.main_category')} = %s")
+        where_params.append(normalize_category(category))
     where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
 
     # Classified base query: demand tier (from the shared ID3 tree) plus the

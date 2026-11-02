@@ -73,8 +73,14 @@ def compute_snapshot():
     }
 
 
-def run_and_publish():
-    """Compute, publish the cache snapshot and persist the segment labels."""
+def run_and_publish(full=True):
+    """Compute, publish the cache snapshot and persist the full RFM results.
+
+    `full` selects the reconciliation policy on backends without a live orders
+    table (see `segment_store`); on PostgreSQL both paths reconcile by live
+    eligibility, so the difference there is only that an incremental run never
+    rewrites buyers whose stored values are already identical.
+    """
     cache_manager.set_run_status('running', started_at=utils.utcnow().isoformat())
     try:
         snapshot = compute_snapshot()
@@ -88,14 +94,18 @@ def run_and_publish():
         next_version = max(cache_manager.get_latest_version() or 0,
                            segment_store.latest_version() or 0) + 1
         version = cache_manager.publish_snapshot(snapshot, version=next_version)
-        store_segments(version, records, analysis_date)
+        fingerprint = queries.compute_source_fingerprint()
+        stats = store_segments(version, records, analysis_date, full=full,
+                               source_fingerprint=fingerprint, return_stats=True)
         cache_manager.set_run_status(
             'completed',
             finished_at=utils.utcnow().isoformat(),
             version=version,
             compute_ms=snapshot['compute_ms'],
+            changes=stats,
+            mode='full' if full else 'incremental',
         )
-        return version
+        return version, stats
     except Exception as exc:  # noqa: BLE001 - a background run must record failure
         logger.exception('RFM analysis run failed')
         cache_manager.set_run_status('failed', error_type=type(exc).__name__)
@@ -104,8 +114,9 @@ def run_and_publish():
         cache_manager.release_run_lock()
 
 
-def store_segments(version, records, analysis_date=None):
-    """Persist per-buyer segments for a published snapshot (never fails a run).
+def store_segments(version, records, analysis_date=None, full=True,
+                   source_fingerprint='', return_stats=False):
+    """Persist per-buyer RFM results for a published snapshot (never fails a run).
 
     The dashboard works from the cache snapshot alone, so if this write hits a
     database problem the analysis is still published; the next completed run
@@ -113,15 +124,22 @@ def store_segments(version, records, analysis_date=None):
     snapshot instead of showing wrong data.
     """
     try:
-        stored = segment_store.store_records(records, version, analysis_date)
-        logger.info('Stored RFM segments for %s buyers (version %s)', stored, version)
+        stored = segment_store.store_records(
+            records, version, analysis_date, full=full,
+            source_fingerprint=source_fingerprint, return_stats=return_stats)
+        if return_stats:
+            logger.info('Stored RFM results (version %s): +%s ~%s -%s =%s unchanged',
+                        version, stored['inserted'], stored['updated'],
+                        stored['deleted'], stored['unchanged'])
+        else:
+            logger.info('Stored RFM segments for %s buyers (version %s)', stored, version)
         return stored
     except Exception:  # noqa: BLE001 - logging is enough, the run itself succeeded
-        logger.exception('Could not persist RFM segment labels (version %s)', version)
+        logger.exception('Could not persist RFM result rows (version %s)', version)
         return None
 
 
-def start_background_run():
+def start_background_run(full=True):
     """Kick off a run on a worker thread.
 
     Returns (accepted, status). A second request while one is in flight is
@@ -139,7 +157,7 @@ def start_background_run():
         # thread, so an untouched thread would leak a Neon connection.
         close_old_connections()
         try:
-            run_and_publish()
+            run_and_publish(full=full)
         except Exception:  # noqa: BLE001 - status already recorded as failed
             logger.warning('Background RFM run ended in failure')
         finally:
@@ -148,6 +166,24 @@ def start_background_run():
     thread = threading.Thread(target=_worker, name='rfm-analysis', daemon=True)
     thread.start()
     return True, {'status': 'queued'}
+
+
+def source_changed_since_last_run():
+    """True when the live eligible order data differs from the last completed run.
+
+    Compares the cheap source fingerprint (`queries.compute_source_fingerprint`)
+    against the one stored with the latest successful analysis. On a backend
+    without a live orders table it cannot prove "unchanged", so it returns True
+    (a refresh is then simply performed). No analysis has ever completed -> True.
+    """
+    state = segment_store.get_state()
+    if state is None:
+        return True
+    fingerprint = queries.compute_source_fingerprint()
+    if not fingerprint:
+        return True
+    return fingerprint != (state.source_fingerprint or '')
+
 
 
 def _snapshot_age_seconds(meta, now):

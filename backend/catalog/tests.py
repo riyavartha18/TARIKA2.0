@@ -266,6 +266,7 @@ class CatalogViewsAPITests(SimpleTestCase):
             size=None,
             color=None,
             subcategory_search=None,
+            starts_with=None,
         )
 
     @patch('catalog.views.get_object_or_404')
@@ -359,19 +360,70 @@ class CatalogServiceFilterSortingTests(SimpleTestCase):
     def test_sorting_options_mapping(self):
         mock_qs = MagicMock()
         mock_qs.filter.return_value = mock_qs
+        # Price modes annotate first; keep the chain on the same mock so the
+        # order_by assertions observe the real call.
+        mock_qs.annotate.return_value = mock_qs
 
-        # Test 'newest'
+        from django.db.models import F
+
+        # Test 'newest' (no launch/created date columns -> stable key order)
         CatalogService.filter_and_sort_products(queryset=mock_qs, sort='newest')
-        mock_qs.order_by.assert_called_with('-launch_date', '-created_at', 'product_id')
+        mock_qs.order_by.assert_called_with('product_id')
 
-        # Test 'price_low_high'
+        # Test 'price_low_high' — by the FINAL selling price (parsed
+        # actual_price TEXT column, initial_price fallback).
         CatalogService.filter_and_sort_products(queryset=mock_qs, sort='price_low_high')
-        mock_qs.order_by.assert_called_with('dim_selling_price', 'product_name', 'product_id')
+        mock_qs.order_by.assert_called_with('parsed_selling_price', 'product_name', 'product_id')
 
         # Test 'price_high_low'
         CatalogService.filter_and_sort_products(queryset=mock_qs, sort='price_high_low')
-        mock_qs.order_by.assert_called_with('-dim_selling_price', 'product_name', 'product_id')
+        mock_qs.order_by.assert_called_with(
+            F('parsed_selling_price').desc(), 'product_name', 'product_id')
 
         # Test 'name'
         CatalogService.filter_and_sort_products(queryset=mock_qs, sort='name')
         mock_qs.order_by.assert_called_with('product_name', 'product_id')
+
+
+class CategoryNormalizationTests(SimpleTestCase):
+    """The centralized case/whitespace normalization used for grouping."""
+
+    def test_normalize_folds_case_and_surrounding_whitespace(self):
+        from catalog.normalize import normalize_category
+        for value in ('Dress', 'dress', 'DRESS', '  Dress  '):
+            self.assertEqual(normalize_category(value), 'dress')
+
+    def test_normalize_folds_apostrophes(self):
+        from catalog.normalize import normalize_category
+        self.assertEqual(normalize_category("Women’s Clothing"),
+                         normalize_category("women's clothing"))
+
+    def test_genuinely_different_names_stay_distinct(self):
+        from catalog.normalize import normalize_category
+        self.assertNotEqual(normalize_category('Dress'), normalize_category('Dresses'))
+        self.assertNotEqual(normalize_category('Shirt'), normalize_category('Trousers'))
+
+    def test_none_and_blank_are_empty_key(self):
+        from catalog.normalize import normalize_category
+        self.assertEqual(normalize_category(None), '')
+        self.assertEqual(normalize_category('   '), '')
+
+    def test_canonical_display_trims_but_keeps_casing(self):
+        from catalog.normalize import canonical_display
+        self.assertEqual(canonical_display('  Dress  '), 'Dress')
+
+    def test_sql_norm_expr_shape(self):
+        from catalog.normalize import sql_norm_expr
+        self.assertEqual(sql_norm_expr('d.main_category'),
+                         "LOWER(TRIM(COALESCE(d.main_category, '')))")
+
+    def test_grouping_merges_case_variants_but_not_different_names(self):
+        # Simulates the Python-side grouping used by the warehouse/catalog
+        # category aggregation: case+whitespace variants collapse into one.
+        from catalog.normalize import normalize_category
+        rows = ['Dress', 'dress', ' DRESS ', 'Shirt', 'shirt', 'Trousers']
+        grouped = {}
+        for value in rows:
+            grouped.setdefault(normalize_category(value), []).append(value)
+        self.assertEqual(sorted(grouped), ['dress', 'shirt', 'trousers'])
+        self.assertEqual(len(grouped['dress']), 3)

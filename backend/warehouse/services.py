@@ -11,7 +11,8 @@ class WarehouseService:
     # keeps the grouped-endpoint rows narrow (image/link/text columns are large).
     GROUPED_PRODUCT_FIELDS = [
         'product_id', 'product_name', 'main_category', 'sub_category',
-        'link', 'discount_price', 'actual_price_text', 'available_quantity', 'image',
+        'link', 'discount_price', 'actual_price_text', 'initial_price',
+        'discounted_price', 'available_quantity', 'image',
     ]
 
     @staticmethod
@@ -24,6 +25,7 @@ class WarehouseService:
         serialization.
         """
         from catalog.serializers import CATEGORY_IMAGE_MAPPING
+        from catalog.normalize import normalize_category, canonical_display
 
         products = (
             Product.objects
@@ -32,43 +34,50 @@ class WarehouseService:
             .order_by('main_category', 'product_name')
         )
 
-        # Group in Python by main_category
+        # Group in Python by the CASE- AND WHITESPACE-INSENSITIVE category key
+        # (centralized normalize_category), so "Dress"/"dress"/" DRESS " form one
+        # group. The display name comes from the first-seen raw value.
         cat_map = {}
         for p in products:
-            cat_name = (p.main_category or '').strip()
-            if not cat_name:
+            key = normalize_category(p.main_category)
+            if not key:
                 continue
-            cid = cat_name.lower().replace(' ', '-')
-            if cid not in cat_map:
-                cat_map[cid] = {
-                    'category_id': cid,
+            if key not in cat_map:
+                cat_name = canonical_display(p.main_category)
+                cat_map[key] = {
+                    'category_id': key.replace(' ', '-'),
                     'category_name': cat_name,
                     'parent_category_id': None,
                     'description': '',
-                    'image': CATEGORY_IMAGE_MAPPING.get(cat_name.lower()),
+                    'image': CATEGORY_IMAGE_MAPPING.get(key),
                     'product_count': 0,
                     'products': []
                 }
+            entry = cat_map[key]
+            cid = entry['category_id']
             # Real DB stock: keep None as None (missing data) — never invent it.
             total_stock_val = p.available_quantity if p.available_quantity is not None else None
-            image_url = p.image or CATEGORY_IMAGE_MAPPING.get(cat_name.lower())
-            cat_map[cid]['products'].append({
+            image_url = p.image or entry['image']
+            entry['products'].append({
                 'product_id': p.product_id,
                 'product_name': p.product_name,
                 'category_id': cid,
-                'category_name': cat_name,
+                'category_name': entry['category_name'],
                 'sub_category': p.sub_category,
                 'link': p.link,
                 'base_price': p.base_price,
                 'selling_price': p.selling_price,
+                # Discount AMOUNT in currency + derived percentage (never stored).
+                'discount_price': p.discount_price,
+                'discount_percentage': p.discount_percentage,
                 'in_stock': (total_stock_val or 0) > 0,
                 'total_stock': total_stock_val,
                 'available_quantity': total_stock_val,
                 'image': image_url,
             })
-            cat_map[cid]['product_count'] += 1
+            entry['product_count'] += 1
 
-        return sorted(cat_map.values(), key=lambda c: c['category_name'])
+        return sorted(cat_map.values(), key=lambda c: c['category_name'].lower())
 
     # Serializer key -> real Product model field name, for the PUT endpoint.
     # (update_fields must receive these FIELD names, not db_column names.)
@@ -78,8 +87,11 @@ class WarehouseService:
         'sub_category': 'sub_category',            # -> products.sub_category
         'image': 'image',                          # -> products.image
         'link': 'link',                            # -> products.link
-        'discount_price': 'discount_price',        # double precision
-        'actual_price': 'actual_price_text',       # TEXT column, kept as text
+        'initial_price': 'initial_price',          # original price, double precision
+        'discount_price': 'discount_price',        # discount AMOUNT, double precision
+        'actual_price': 'actual_price_text',       # TEXT column, final selling price
+        # Mirror of the final price, kept in sync on every price write.
+        'discounted_price': 'discounted_price',
         'available_quantity': 'available_quantity',  # double precision
         'is_active': 'is_active',                  # soft-delete / archive flag
     }

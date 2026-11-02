@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import StockToBeOrdered from '../../features/stockToBeOrdered/StockToBeOrdered';
-import { getProductPricing } from '../../utils/pricing';
+import { getProductPricing, formatDiscountPercentage } from '../../utils/pricing';
 import {
   getCategories,
   getProducts,
@@ -102,7 +102,7 @@ function WarehouseProductCard({ product, onCardClick }) {
   if (!product) return null;
 
   const productName = product.product_name || product.name || 'Artisanal Garment';
-  const { basePrice, currentPrice, discountAmount, isOnSale } = getProductPricing(product);
+  const { basePrice, currentPrice, discountAmount, discountPercentage, isOnSale } = getProductPricing(product);
 
   // Live stock straight from the real `available_quantity` column.
   // null/undefined  -> stock data unavailable (never shown as a fake 0/10)
@@ -178,7 +178,7 @@ function WarehouseProductCard({ product, onCardClick }) {
         {/* Sale Discount Badge */}
         {isOnSale && discountAmount > 0 && (
           <span className="product-badge-sale">
-            ₹{discountAmount.toLocaleString('en-IN')} OFF
+            {formatDiscountPercentage(discountPercentage)} OFF
           </span>
         )}
 
@@ -823,16 +823,35 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
   const [deleting, setDeleting] = React.useState(false);
   const [deleteError, setDeleteError] = React.useState(null);
 
+  // "Discounted Price" input option (beside the existing discount AMOUNT
+  // input). When enabled, the final selling price is directly editable and
+  // the discount amount is derived from it; both stay synchronised live and
+  // Django recalculates everything authoritatively on save.
+  const [discountedMode, setDiscountedMode] = React.useState(false);
+  const [discountedPrice, setDiscountedPrice] = React.useState('');
+
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const toNumber = (v) => {
+    const str = String(v ?? '').trim();
+    if (str === '') return null;
+    const num = Number(str);
+    return Number.isFinite(num) ? num : null;
+  };
+
   // Build an editable form object from a Django product payload.
   // null stock stays '' (unavailable) — never converted to an invented 0.
+  // Price fields mirror the real public.products columns:
+  //   initial_price = original price, discount_price = discount AMOUNT (₹),
+  //   actual_price = final discounted selling price (computed by Django).
   const buildFormFromProduct = (p) => ({
     product_name: p.product_name || '',
     main_category: p.main_category ?? p.category_name ?? '',
     sub_category: p.sub_category || '',
     image: p.image || '',
     link: p.link || '',
-    discount_price: p.discount_price ?? p.selling_price ?? '',
-    actual_price: p.actual_price ?? p.base_price ?? '',
+    discount_price: p.discount_price ?? '',
+    initial_price: p.initial_price ?? p.base_price ?? p.actual_price ?? '',
+    actual_price: p.selling_price ?? p.actual_price ?? '',
     available_quantity: p.available_quantity ?? p.total_stock ?? '',
   });
 
@@ -849,10 +868,12 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
         setProduct(res.product);
         // Initialise form with Django's values
         setForm(buildFormFromProduct(res.product));
+        setDiscountedPrice(String(res.product.selling_price ?? res.product.actual_price ?? ''));
       } else {
         // Fallback: use card product data so modal isn't empty
         setProduct(cardProduct);
         setForm(buildFormFromProduct(cardProduct));
+        setDiscountedPrice(String(getProductPricing(cardProduct).currentPrice));
         setFetchError(res.error || 'Could not load full product details. Showing cached data.');
       }
       setLoading(false);
@@ -872,6 +893,56 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
     setSaveError(null);
     setSaveSuccess(false);
   };
+
+  // ---- Two synchronised discount input methods ------------------------
+  // 1. Discount AMOUNT entered -> discounted price and percentage follow.
+  // 2. Discounted PRICE entered -> discount amount and percentage follow.
+  const handleDiscountAmountChange = (value) => {
+    handleChange('discount_price', value);
+    const initial = toNumber(form.initial_price);
+    const amount = toNumber(value);
+    if (discountedMode && initial != null && amount != null) {
+      setDiscountedPrice(String(round2(initial - amount)));
+    }
+  };
+
+  const handleDiscountedPriceChange = (value) => {
+    setDiscountedPrice(value);
+    const initial = toNumber(form.initial_price);
+    const final = toNumber(value);
+    if (initial != null && final != null) {
+      handleChange('discount_price', String(round2(initial - final)));
+    }
+  };
+
+  const handleInitialPriceChange = (value) => {
+    handleChange('initial_price', value);
+    const initial = toNumber(value);
+    const amount = toNumber(form.discount_price);
+    if (discountedMode && initial != null && amount != null) {
+      setDiscountedPrice(String(round2(initial - amount)));
+    }
+  };
+
+  // Clicking the option opens the Discounted Price field, pre-populated with
+  // the current final selling price (products.actual_price).
+  const handleEnableDiscountedPrice = () => {
+    const initial = toNumber(form.initial_price);
+    const amount = toNumber(form.discount_price);
+    const currentFinal = toNumber(form.actual_price);
+    const seeded = initial != null && amount != null
+      ? round2(initial - amount)
+      : (currentFinal ?? 0);
+    setDiscountedPrice(String(seeded));
+    setDiscountedMode(true);
+  };
+
+  // Live percentage preview (max 2 dp); Django recalculates on save.
+  const liveInitial = toNumber(form?.initial_price);
+  const liveAmount = toNumber(form?.discount_price);
+  const livePercentage = (liveInitial != null && liveInitial > 0 && liveAmount != null && liveAmount >= 0)
+    ? round2((liveAmount / liveInitial) * 100)
+    : 0;
 
   // Numeric field validation: finite, non-negative, empty allowed (null).
   const parseNumericField = (rawValue, label, allowEmpty = true) => {
@@ -897,14 +968,26 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
       setSaveError('Product name is required.');
       return;
     }
-    const discount = parseNumericField(form.discount_price, 'Discount price');
+    const initial = parseNumericField(form.initial_price, 'Original price');
+    if (!initial.ok) { setSaveError(initial.error); return; }
+    const discount = parseNumericField(form.discount_price, 'Discount amount');
     if (!discount.ok) { setSaveError(discount.error); return; }
+    if (initial.value != null && discount.value != null && discount.value > initial.value) {
+      setSaveError('Discount amount cannot exceed the original price.');
+      return;
+    }
     const stock = parseNumericField(form.available_quantity, 'Available stock');
     if (!stock.ok) { setSaveError(stock.error); return; }
 
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(false);
+
+    // Django recalculates the final price authoritatively; the values sent
+    // here are already synchronised by the two input methods above.
+    const finalPrice = initial.value != null
+      ? round2(initial.value - (discount.value ?? 0))
+      : null;
 
     // Payload mirrors the real public.products columns. `actual_price` is
     // sent as text because the database column is TEXT.
@@ -914,8 +997,9 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
       sub_category: (form.sub_category || '').trim(),
       image: (form.image || '').trim(),
       link: (form.link || '').trim(),
+      initial_price: initial.value,
       discount_price: discount.value,
-      actual_price: String(form.actual_price ?? ''),
+      actual_price: finalPrice != null ? String(finalPrice) : '',
       available_quantity: stock.value,
     };
 
@@ -925,6 +1009,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
       // Show the values Django re-read from the database (not optimistic state)
       setProduct(res.product);
       setForm(buildFormFromProduct(res.product));
+      setDiscountedPrice(String(res.product.selling_price ?? res.product.actual_price ?? ''));
       setSaveSuccess(true);
       // Notify parent so the product list and category counts refresh
       if (onSaveSuccess) onSaveSuccess(res.product);
@@ -1204,29 +1289,31 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
                   />
                 </div>
 
-                {/* Pricing & Stock Row (double precision numbers + TEXT price) */}
+                {/* Pricing & Stock Row (discount AMOUNT + original price + stock) */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
                   <div>
-                    <label style={labelStyle}>Discount Price (₹)</label>
+                    <label style={labelStyle}>Discount Amount (₹)</label>
                     <input
                       id="edit-discount-price"
                       type="number"
                       min="0"
                       step="any"
                       value={form.discount_price}
-                      onChange={(e) => handleChange('discount_price', e.target.value)}
+                      onChange={(e) => handleDiscountAmountChange(e.target.value)}
                       placeholder="0"
                       style={inputStyle}
                     />
                   </div>
                   <div>
-                    <label style={labelStyle}>Actual Price (text)</label>
+                    <label style={labelStyle}>Original Price (₹)</label>
                     <input
-                      id="edit-actual-price"
-                      type="text"
-                      value={form.actual_price}
-                      onChange={(e) => handleChange('actual_price', e.target.value)}
-                      placeholder="e.g. 1,099"
+                      id="edit-initial-price"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={form.initial_price}
+                      onChange={(e) => handleInitialPriceChange(e.target.value)}
+                      placeholder="e.g. 1099"
                       style={inputStyle}
                     />
                   </div>
@@ -1243,6 +1330,55 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
                       style={inputStyle}
                     />
                   </div>
+                </div>
+
+                {/* Discounted Price option + live percentage (synchronised) */}
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  {!discountedMode && (
+                    <button
+                      type="button"
+                      onClick={handleEnableDiscountedPrice}
+                      style={{
+                        padding: '0.5rem 1rem',
+                        borderRadius: '10px',
+                        border: '1px solid var(--tarika-border, #F0E2E0)',
+                        backgroundColor: '#FAF7F5',
+                        color: '#8E3642',
+                        fontSize: '0.78rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Discounted Price
+                    </button>
+                  )}
+                  {discountedMode && (
+                    <div style={{ flex: '0 0 200px' }}>
+                      <label style={labelStyle}>Discounted Price (₹)</label>
+                      <input
+                        id="edit-discounted-price"
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={discountedPrice}
+                        onChange={(e) => handleDiscountedPriceChange(e.target.value)}
+                        placeholder="Final selling price"
+                        style={inputStyle}
+                      />
+                    </div>
+                  )}
+                  <span
+                    style={{
+                      fontSize: '0.8rem',
+                      fontWeight: 800,
+                      color: livePercentage > 0 ? '#B8505E' : '#9E8F94',
+                      paddingBottom: '0.55rem',
+                    }}
+                  >
+                    {livePercentage > 0
+                      ? `${formatDiscountPercentage(livePercentage)} OFF`
+                      : 'No discount'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -1433,6 +1569,11 @@ export default function WarehousePortal() {
   const [maxPriceFilter, setMaxPriceFilter] = useState('');
   const [selectedSize, setSelectedSize] = useState('All');
   const [selectedColor, setSelectedColor] = useState('All');
+  // "Sort By Custom": typed letter (input) and the letter applied to the
+  // server query. Only Apply/Reset change appliedLetter so the listing
+  // re-fetches on demand, not on every keystroke.
+  const [customLetterInput, setCustomLetterInput] = useState('');
+  const [appliedLetter, setAppliedLetter] = useState('');
 
   // --- 2. Orders State ---
   const [orders, setOrders] = useState([]);
@@ -1570,6 +1711,7 @@ export default function WarehousePortal() {
     if (onlySale) params.on_sale = 'true';
     if (selectedSize !== 'All') params.size = selectedSize;
     if (selectedColor !== 'All') params.color = selectedColor;
+    if (appliedLetter) params.starts_with = appliedLetter;
     return params;
   };
 
@@ -1615,7 +1757,7 @@ export default function WarehousePortal() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort,
-    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor]);
+    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor, appliedLetter]);
 
   // Re-fetch page one whenever the active server-side filters change.
   useEffect(() => {
@@ -1696,7 +1838,9 @@ export default function WarehousePortal() {
     onlySale ||
     onlyInStock ||
     maxPriceFilter ||
-    productSearchQuery
+    productSearchQuery ||
+    appliedLetter ||
+    customLetterInput
   );
 
   const resetAllFilters = () => {
@@ -1707,6 +1851,8 @@ export default function WarehousePortal() {
     setOnlyInStock(false);
     setMaxPriceFilter('');
     setProductSearchQuery('');
+    setCustomLetterInput('');
+    setAppliedLetter('');
   };
 
   // Orders Fetch
@@ -2620,11 +2766,17 @@ export default function WarehousePortal() {
                     </div>
 
                     {/* Sorting Dropdown */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                       <span style={{ fontSize: '0.8rem', color: '#6B5E63', fontWeight: 600 }}>Sort:</span>
                       <select
                         value={selectedSort}
-                        onChange={(e) => setSelectedSort(e.target.value)}
+                        onChange={(e) => {
+                          setSelectedSort(e.target.value);
+                          if (e.target.value !== 'custom_letter') {
+                            setCustomLetterInput('');
+                            setAppliedLetter('');
+                          }
+                        }}
                         style={{
                           padding: '6px 12px',
                           borderRadius: '10px',
@@ -2641,7 +2793,83 @@ export default function WarehousePortal() {
                         <option value="price_low_high">Price: Low to High</option>
                         <option value="price_high_low">Price: High to Low</option>
                         <option value="name">Name: A to Z</option>
+                        <option value="custom_letter">Sort By Custom</option>
                       </select>
+
+                      {/* Custom Letter Input (A-Z, case-insensitive) */}
+                      {selectedSort === 'custom_letter' && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <input
+                            type="text"
+                            maxLength={1}
+                            placeholder="A-Z"
+                            aria-label="Custom letter"
+                            value={customLetterInput}
+                            onChange={(e) => setCustomLetterInput(
+                              e.target.value.replace(/[^A-Za-z]/g, '').slice(0, 1)
+                            )}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                setAppliedLetter(customLetterInput);
+                              }
+                            }}
+                            style={{
+                              width: '48px',
+                              padding: '6px 10px',
+                              borderRadius: '10px',
+                              border: `1px solid ${appliedLetter ? '#D8727E' : '#F0E2E0'}`,
+                              backgroundColor: appliedLetter ? '#FBF1F0' : '#FFFFFF',
+                              fontSize: '0.82rem',
+                              fontWeight: 700,
+                              color: '#1F191B',
+                              textTransform: 'uppercase',
+                              textAlign: 'center',
+                              outline: 'none',
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setAppliedLetter(customLetterInput)}
+                            disabled={!customLetterInput}
+                            style={{
+                              padding: '6px 14px',
+                              borderRadius: '9999px',
+                              border: 'none',
+                              backgroundColor: customLetterInput ? '#8E3642' : '#E8DDD9',
+                              color: '#FFFFFF',
+                              fontSize: '0.78rem',
+                              fontWeight: 700,
+                              cursor: customLetterInput ? 'pointer' : 'default',
+                            }}
+                          >
+                            Apply
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomLetterInput('');
+                              setAppliedLetter('');
+                            }}
+                            style={{
+                              padding: '6px 14px',
+                              borderRadius: '9999px',
+                              border: '1px solid #F0E2E0',
+                              backgroundColor: '#FAF7F5',
+                              color: '#6B5E63',
+                              fontSize: '0.78rem',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                            }}
+                          >
+                            <RotateCcw size={12} />
+                            Reset
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -3651,19 +3879,35 @@ export default function WarehousePortal() {
           product={selectedProductForEdit}
           token={token}
           onClose={() => setSelectedProductForEdit(null)}
-          onSaveSuccess={() => {
-            // The edit can change filter membership, category grouping, sort
-            // position, and page counts, so refresh the current query from page 1.
-            // Category names/counts may have changed — invalidate the cache.
+          onSaveSuccess={(updatedProduct) => {
+            // An ordinary edit must NOT reset pagination: merge the saved
+            // record into the already loaded list in place (the modal hands
+            // over the authoritative product re-read from Django) and never
+            // refetch page 1. Loaded pages, current page counter and scroll
+            // position all stay untouched.
+            if (updatedProduct?.product_id) {
+              setRawProducts((prev) => prev.map((p) => (
+                (p.product_id || p.id) === updatedProduct.product_id
+                  ? { ...p, ...updatedProduct }
+                  : p
+              )));
+            }
+            // Category names/counts may have changed — that is a cheap meta
+            // refresh, not a product-list reload.
             invalidateCategoriesCache();
             loadCategories();
-            fetchProducts(1);
           }}
-          onDeleted={() => {
-            // Product deleted/archived: drop it from the list + counts everywhere.
+          onDeleted={({ productId }) => {
+            // Delete/archive: drop exactly this row from the loaded pages and
+            // adjust the matched count. Everything else stays visible and the
+            // pagination state is preserved (only a real filter change or the
+            // manual Refresh restarts from page 1).
+            setRawProducts((prev) => prev.filter(
+              (p) => (p.product_id || p.id) !== productId,
+            ));
+            setProductsTotalCount((prev) => Math.max(0, (prev || 0) - 1));
             invalidateCategoriesCache();
             loadCategories();
-            fetchProducts(1);
           }}
         />
       )}

@@ -370,13 +370,17 @@ class Command(BaseCommand):
                   'price': _round_rupee(float(price_map.get(str(p.product_id))))}
                  for p in cheapest[:5]]
 
-        # Categories: the two most common main categories in the live catalog.
+        # Categories: the two most common main categories in the live catalog,
+        # counted CASE/WHITESPACE-INSENSITIVELY so "Dress"/"dress" form one.
+        from catalog.normalize import normalize_category
         counts = {}
+        displays = {}
         for p in priced:
-            key = (p.main_category or '').strip()
+            key = normalize_category(p.main_category)
             if key:
                 counts[key] = counts.get(key, 0) + 1
-        categories = [c for c, _n in sorted(counts.items(),
+                displays.setdefault(key, (p.main_category or '').strip())
+        categories = [displays[c] for c, _n in sorted(counts.items(),
                                             key=lambda kv: (-kv[1], kv[0]))][:2]
 
         if len(combos) < 5 or len(gifts) < 5 or not categories:

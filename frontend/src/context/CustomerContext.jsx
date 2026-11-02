@@ -24,8 +24,10 @@ function optimisticBaseLine(items, product, pId) {
     (i) => i.product && String(i.product.product_id) === String(pId)
   );
   const source = template ? template.product : (items[0] && items[0].product) || {};
+  // Final selling price only: `discount_price` is a discount AMOUNT in
+  // currency now, so it must never be treated as a price here.
   const unitPrice = Number(
-    product.sale_price ?? product.selling_price ?? product.discount_price ??
+    product.sale_price ?? product.selling_price ??
     source.selling_price ?? source.sale_price
   ) || 0;
   return {

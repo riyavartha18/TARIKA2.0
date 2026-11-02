@@ -66,8 +66,9 @@ class WarehouseProductUpdateMappingTests(TestCase):
         # save(update_fields=[...]) raises ValueError for db_column names.
         self.assertEqual(
             sorted(WarehouseService.UPDATE_FIELD_MAP.keys()),
-            ['actual_price', 'available_quantity', 'discount_price', 'image',
-             'link', 'main_category', 'product_name', 'sub_category'],
+            ['actual_price', 'available_quantity', 'discount_price', 'discounted_price',
+             'image', 'initial_price', 'is_active', 'link', 'main_category',
+             'product_name', 'sub_category'],
         )
         for model_attr in WarehouseService.UPDATE_FIELD_MAP.values():
             self.assertIn(model_attr, product_field_names,
@@ -84,13 +85,16 @@ class WarehouseProductUpdateSerializerTests(TestCase):
             'sub_category': 'Western Wear',
             'image': 'https://example.com/img.jpg',
             'link': 'https://example.com/product',
+            'initial_price': 3499.5,
             'discount_price': 1499.5,
-            'actual_price': '1,999',
+            'actual_price': '2,000',
             'available_quantity': 25,
         })
         self.assertTrue(serializer.is_valid(), serializer.errors)
-        # actual_price stays text; numeric columns stay numeric
-        self.assertEqual(serializer.validated_data['actual_price'], '1,999')
+        # The final price is normalised into the TEXT column format and the
+        # mirror column value is resolved by Django, not trusted from React.
+        self.assertEqual(serializer.validated_data['actual_price'], '2000.00')
+        self.assertEqual(serializer.validated_data['discounted_price'], 2000.0)
         self.assertEqual(serializer.validated_data['available_quantity'], 25.0)
 
     def test_empty_product_name_rejected(self):
@@ -119,4 +123,161 @@ class WarehouseProductUpdateSerializerTests(TestCase):
             'product_name': 'Valid Name',
             'discount_price': 'free',
         })
+        self.assertFalse(serializer.is_valid())
+
+    def test_unparsable_discounted_price_rejected(self):
+        """actual_price is the FINAL selling price: must be numeric text."""
+        serializer = WarehouseProductUpdateSerializer(data={
+            'product_name': 'Valid Name',
+            'initial_price': 1000,
+            'actual_price': 'eight hundred',
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('actual_price', serializer.errors)
+
+
+def stored_product(initial=1000.0, discount_amount=200.0, final='800.00'):
+    """Unsaved Product row carrying the migrated three-field price layout."""
+    from catalog.models import Product
+    return Product(
+        product_id='P-PRICE-1',
+        product_name='Price Test Product',
+        initial_price=initial,
+        discount_price=discount_amount,
+        actual_price_text=final,
+        discounted_price=float(final) if final not in (None, '') else None,
+    )
+
+
+class WarehouseDiscountAmountInputTests(TestCase):
+    """Input method 1: warehouse enters the discount AMOUNT.
+
+    Django calculates the final price and percentage; the amount stays a
+    currency value in `discount_price` (never a percentage).
+    """
+
+    def test_amount_calculates_final_price_and_percentage(self):
+        # Spec example: ₹1,000 original, ₹200 amount -> ₹800 final, 20% OFF.
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 1000.0,
+                'discount_price': 200.0,
+            },
+            context={'product': stored_product()},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        resolved = serializer.validated_data
+        self.assertEqual(resolved['discount_price'], 200.0)
+        self.assertEqual(resolved['actual_price'], '800.00')
+        self.assertEqual(resolved['discounted_price'], 800.0)
+
+    def test_percentage_is_derived_not_stored(self):
+        product = stored_product(initial=1000.0, discount_amount=200.0, final='800.00')
+        self.assertEqual(product.discount_percentage, 20.0)
+        self.assertEqual(product.discount_price, 200.0)  # amount, not 20
+
+    def test_percentage_two_decimal_precision(self):
+        product = stored_product(initial=999.0, discount_amount=43.22222222,
+                                 final='955.78')
+        self.assertEqual(product.discount_percentage, 4.33)
+
+    def test_amount_exceeding_initial_rejected(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 500.0,
+                'discount_price': 600.0,
+            },
+            context={'product': stored_product(initial=500.0)},
+        )
+        self.assertFalse(serializer.is_valid())
+
+    def test_negative_amount_rejected(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={'product_name': 'Price Test Product', 'discount_price': -10.0},
+            context={'product': stored_product()},
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('discount_price', serializer.errors)
+
+
+class WarehouseDiscountedPriceInputTests(TestCase):
+    """Input method 2: warehouse enters the final DISCOUNTED PRICE.
+
+    Django calculates the discount amount from initial - final and stores it
+    in `discount_price`; the entered value is stored in `actual_price`.
+    """
+
+    def test_final_price_calculates_amount(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 1000.0,
+                'actual_price': '750',
+            },
+            context={'product': stored_product()},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        resolved = serializer.validated_data
+        self.assertEqual(resolved['discount_price'], 250.0)
+        self.assertEqual(resolved['actual_price'], '750.00')
+        self.assertEqual(resolved['discounted_price'], 750.0)
+
+    def test_final_price_exceeding_initial_rejected(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 500.0,
+                'actual_price': '501',
+            },
+            context={'product': stored_product(initial=500.0)},
+        )
+        self.assertFalse(serializer.is_valid())
+
+    def test_negative_final_price_rejected(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 500.0,
+                'actual_price': '-1',
+            },
+            context={'product': stored_product(initial=500.0)},
+        )
+        self.assertFalse(serializer.is_valid())
+
+    def test_synchronised_inputs_must_agree(self):
+        """Both input methods submitted: Django rejects disagreement."""
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 1000.0,
+                'discount_price': 200.0,
+                'actual_price': '900',
+            },
+            context={'product': stored_product()},
+        )
+        self.assertFalse(serializer.is_valid())
+
+    def test_original_price_only_keeps_stored_amount_and_recopies_final(self):
+        serializer = WarehouseProductUpdateSerializer(
+            data={
+                'product_name': 'Price Test Product',
+                'initial_price': 2000.0,
+            },
+            context={'product': stored_product(initial=1000.0, discount_amount=200.0)},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['discount_price'], 200.0)
+        self.assertEqual(serializer.validated_data['actual_price'], '1800.00')
+
+    def test_zero_initial_price_is_safe(self):
+        """Zero original price must never divide by zero."""
+        product = stored_product(initial=0.0, discount_amount=0.0, final='0.00')
+        self.assertEqual(product.discount_percentage, 0.0)
+        serializer = WarehouseProductUpdateSerializer(
+            data={'product_name': 'Price Test Product', 'discount_price': 10.0},
+            context={'product': product},
+        )
+        # A discount above a zero-priced product is invalid, not a crash.
         self.assertFalse(serializer.is_valid())

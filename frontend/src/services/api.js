@@ -198,6 +198,7 @@ function appendProductFilters(query, params = {}) {
     'size',
     'color',
     'sort',
+    'starts_with',
     'page',
   ].forEach((key) => {
     if (params[key] !== undefined && params[key] !== '') query.append(key, params[key]);
@@ -1953,5 +1954,111 @@ export async function validateCheckoutCoupon(token, couponCode, cartValue) {
     };
   } catch (err) {
     return { success: false, valid: false, error: 'Network error validating coupon.' };
+  }
+}
+
+/* ==========================================================================
+   CUSTOMER LIFETIME VALUE (CLV) API HELPERS  -  admin analysis dashboard
+   ========================================================================== */
+
+/** GET /api/clv/summary -> overview cards, cutoff date and future-CLV status. */
+export async function getClvSummary(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/clv/summary`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch CLV summary.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching CLV summary.' };
+  }
+}
+
+/** GET /api/clv/customers -> paginated per-customer CLV table (server-side filters). */
+export async function getClvCustomers(token, params = {}) {
+  try {
+    const query = new URLSearchParams();
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
+    if (params.search) query.append('search', params.search);
+    if (params.tier) query.append('tier', params.tier);
+    if (params.segment) query.append('segment', params.segment);
+    if (params.future_state) query.append('future_state', params.future_state);
+    if (params.future_min !== undefined && params.future_min !== null && params.future_min !== '') {
+      query.append('future_min', params.future_min);
+    }
+    if (params.future_max !== undefined && params.future_max !== null && params.future_max !== '') {
+      query.append('future_max', params.future_max);
+    }
+    if (params.sort) query.append('sort', params.sort);
+    if (params.dir) query.append('dir', params.dir);
+    const qs = query.toString();
+    const url = `${API_BASE_URL}/api/clv/customers${qs ? '?' + qs : ''}`;
+    const response = await fetch(url, { headers: authHeaders(token) });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch CLV customers.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching CLV customers.' };
+  }
+}
+
+/** GET /api/clv/customers/{id} -> one customer's CLV details. */
+export async function getClvCustomerDetail(token, customerId) {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/clv/customers/${encodeURIComponent(customerId)}`,
+      { headers: authHeaders(token) },
+    );
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch customer CLV.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching customer CLV.' };
+  }
+}
+
+/** GET /api/clv/segments -> value tiers + RFM segment-wise CLV analysis. */
+export async function getClvSegments(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/clv/segments`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch CLV segments.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching CLV segments.' };
+  }
+}
+
+/** POST /api/clv/recalculate -> rebuild CLV from current data (admin-only). */
+export async function recalculateClv(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/clv/recalculate`, {
+      method: 'POST', headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok && response.status !== 409) {
+      return { success: false, error: data.detail || 'Failed to start CLV recalculation.' };
+    }
+    return { success: true, status: data.status, message: data.message, conflict: response.status === 409 };
+  } catch (err) {
+    return { success: false, error: 'Network error starting CLV recalculation.' };
+  }
+}
+
+/** GET /api/clv/recalculate -> recalculation status (for polling). */
+export async function getClvRecalculateStatus(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/clv/recalculate`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch CLV status.' };
+    return { success: true, status: data.status };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching CLV status.' };
   }
 }

@@ -13,6 +13,7 @@ from admin.serializers import (
     ALLOWED_ROLES,
 )
 
+import math
 import uuid
 import datetime
 
@@ -549,7 +550,9 @@ class AdminProductListView(APIView):
                 'discount_price': p.discount_price,
                 'selling_price': p.selling_price,
                 'base_price': p.base_price,
+                'initial_price': p.initial_price,
                 'actual_price': p.actual_price_text,
+                'discount_percentage': p.discount_percentage,
                 'available_quantity': qty,
                 'total_stock': (int(qty) if qty is not None else None),
                 'in_stock': (qty or 0) > 0,
@@ -576,12 +579,17 @@ class AdminProductCreateView(APIView):
     ``public.products`` table. Only supported columns are written; a product_key
     is generated (unique) and stock is seeded from ``available_quantity``. There
     is no ``inventory`` / ``categories`` table, so no related rows are created.
+
+    Pricing follows the documented layout: ``initial_price`` is the original
+    price, ``discount_price`` is an optional discount AMOUNT in currency, and
+    Django always computes the final selling price (``actual_price`` =
+    initial - discount, 2 dp) — the client never writes it directly.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     SUPPORTED_FIELDS = {
         'product_name', 'main_category', 'sub_category', 'image', 'link',
-        'discount_price', 'actual_price', 'available_quantity',
+        'initial_price', 'discount_price', 'available_quantity',
     }
 
     def _generate_product_key(self):
@@ -631,13 +639,46 @@ class AdminProductCreateView(APIView):
                 return default
             return val
 
-        discount_price = _whole_non_negative('discount_price', 'Selling price', required=True)
+        def _price_number(field, label, required=False, default=None):
+            """Money input: any finite non-negative number, 2 dp precision."""
+            raw = data.get(field)
+            if raw is None or raw == '':
+                if required:
+                    errors[field] = [f'{label} is required.']
+                return default
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                errors[field] = [f'{label} must be a number.']
+                return default
+            if not math.isfinite(val):
+                errors[field] = [f'{label} must be a finite number.']
+                return default
+            if val < 0:
+                errors[field] = [f'{label} cannot be negative.']
+                return default
+            return val
+
+        initial_price = _price_number(
+            'initial_price', 'Initial price', required=True
+        )
+        discount_price = _price_number('discount_price', 'Discount amount', default=0.0)
         available_quantity = _whole_non_negative(
             'available_quantity', 'Available quantity', default=0.0
         )
 
         if errors:
             return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Django (not React) calculates the final selling price authoritatively.
+        from catalog.pricing import resolve_product_prices
+        try:
+            resolved = resolve_product_prices(initial_price, discount_price, None)
+        except ValueError as exc:
+            return Response(
+                {'errors': {'discount_price': [str(exc)]}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         product_key = (data.get('product_key') or '').strip() or self._generate_product_key()
         if Product.objects.filter(product_id=product_key).exists():
@@ -646,7 +687,6 @@ class AdminProductCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        actual_price_raw = data.get('actual_price')
         product = Product.objects.create(
             product_id=product_key,
             product_name=product_name,
@@ -654,8 +694,10 @@ class AdminProductCreateView(APIView):
             sub_category=(data.get('sub_category') or '').strip() or None,
             image=(data.get('image') or '').strip() or None,
             link=(data.get('link') or '').strip() or None,
-            discount_price=discount_price,
-            actual_price_text=(str(actual_price_raw).strip() if actual_price_raw not in (None, '') else None),
+            initial_price=resolved['initial_price'],
+            discount_price=resolved['discount_price'],
+            actual_price_text=f"{resolved['final_price']:.2f}",
+            discounted_price=resolved['final_price'],
             available_quantity=available_quantity,
             is_active=True,
         )
@@ -676,7 +718,9 @@ class AdminProductCreateView(APIView):
                 'discount_price': product.discount_price,
                 'selling_price': product.selling_price,
                 'base_price': product.base_price,
+                'initial_price': product.initial_price,
                 'actual_price': product.actual_price_text,
+                'discount_percentage': product.discount_percentage,
                 'available_quantity': product.available_quantity,
                 'total_stock': (int(product.available_quantity)
                                 if product.available_quantity is not None else None),

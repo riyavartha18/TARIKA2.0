@@ -107,15 +107,21 @@ class WarehouseProductDetailView(APIView):
     def put(self, request, product_id):
         # 1. Verify the product exists before touching anything
         try:
-            WarehouseService.get_product_detail(product_id)  # raises DoesNotExist if missing
+            existing_product = WarehouseService.get_product_detail(product_id)
         except Product.DoesNotExist:
             return Response(
                 {'detail': f'Product "{product_id}" not found.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # 2. Validate incoming data via Django serializer
-        write_serializer = WarehouseProductUpdateSerializer(data=request.data)
+        # 2. Validate incoming data via Django serializer. The stored product
+        # row is passed in context so a partial price payload (only discount
+        # amount OR only discounted price) is completed from persisted values
+        # and every final number is calculated server-side, never trusted
+        # from React.
+        write_serializer = WarehouseProductUpdateSerializer(
+            data=request.data, context={'product': existing_product}
+        )
         if not write_serializer.is_valid():
             return Response(
                 {'errors': write_serializer.errors},

@@ -74,8 +74,17 @@ class Product(models.Model):
     image = models.CharField(max_length=2000, blank=True, null=True, db_column='image')
     link = models.CharField(max_length=2000, blank=True, null=True, db_column='link')
     discount_price = models.FloatField(blank=True, null=True, db_column='discount_price')
-    # NOTE: the real column is TEXT, not numeric.
+    # Discount AMOUNT in currency (never a percentage); the percentage is
+    # always derived: discount_price / initial_price * 100.
+    # NOTE: the real `actual_price` column is TEXT, not numeric. After
+    # `ensure_product_price_schema` it holds the FINAL discounted selling
+    # price: actual_price = initial_price - discount_price.
     actual_price_text = models.TextField(blank=True, null=True, db_column='actual_price')
+    # Original product price, added by `ensure_product_price_schema`.
+    initial_price = models.FloatField(blank=True, null=True, db_column='initial_price')
+    # Mirror of the final selling price kept in sync on every write so the
+    # legacy `discounted_price` column never drifts from `actual_price`.
+    discounted_price = models.FloatField(blank=True, null=True, db_column='discounted_price')
     # Real stock/availability source for the new `public.products` schema.
     # There is no separate inventory table in this database; availability is
     # carried directly on the product row as a numeric quantity.
@@ -100,13 +109,37 @@ class Product(models.Model):
     # ------------------------------------------------------------------
     @property
     def selling_price(self):
-        """Current/discounted price -> real `discount_price` column."""
-        return self.discount_price
+        """Final discounted selling price -> real `actual_price` TEXT column."""
+        final = parse_product_price(self.actual_price_text)
+        if final is None:
+            # Un-migrated / missing text price: fall back to the mirror column.
+            return self.discounted_price
+        return final
 
     @property
     def base_price(self):
-        """List/original price -> real `actual_price` TEXT column, parsed."""
+        """Original price -> real `initial_price` column (TEXT actual_price
+        held the original before the price-schema migration, so fall back to
+        it for rows that were never migrated)."""
+        if self.initial_price is not None:
+            return self.initial_price
         return parse_product_price(self.actual_price_text)
+
+    @property
+    def discount_amount(self):
+        """Discount AMOUNT in currency stored in `discount_price` (never %)."""
+        return self.discount_price if self.discount_price is not None else 0.0
+
+    @property
+    def discount_percentage(self):
+        """Derived percentage: discount_price / initial_price * 100, max 2 dp.
+
+        Zero / missing original price returns 0.0 instead of dividing by zero.
+        """
+        initial = self.base_price
+        if not initial or initial <= 0:
+            return 0.0
+        return round(float(self.discount_amount) / float(initial) * 100, 2)
 
 
 class Inventory(models.Model):

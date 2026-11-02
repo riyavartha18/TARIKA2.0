@@ -16,6 +16,8 @@ class CatalogService:
         'link',
         'discount_price',
         'actual_price_text',
+        'initial_price',
+        'discounted_price',
         'available_quantity',
         'image',
     )
@@ -59,6 +61,7 @@ class CatalogService:
         size=None,
         color=None,
         subcategory_search=None,
+        starts_with=None,
     ):
         if queryset is None:
             queryset = cls.get_annotated_products_queryset()
@@ -103,6 +106,14 @@ class CatalogService:
             )
             queryset = queryset.filter(search_query)
 
+        # 3b. Custom letter filter ("Sort By Custom"): keep products whose
+        #     name starts with a single A-Z letter, matched case-insensitively
+        #     so 'a' and 'A' behave the same. Invalid input is ignored so the
+        #     regular listing keeps working.
+        letter = str(starts_with or '').strip()
+        if re.fullmatch(r'[A-Za-z]', letter):
+            queryset = queryset.filter(product_name__istartswith=letter)
+
         if subcategory_search:
             keyword = str(subcategory_search).strip()
             if keyword:
@@ -133,60 +144,62 @@ class CatalogService:
         min_p = cls._parse_price_filter(min_price)
         max_p = cls._parse_price_filter(max_price)
         sort_option = str(sort or '').lower().strip()
-        needs_base_price = (
+        needs_price_annotation = (
             min_p is not None or max_p is not None or
             (on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes')) or
             sort_option in ('price_low_high', 'price_high_low')
         )
-        if needs_base_price:
+        # `actual_price` (TEXT) now holds the FINAL discounted selling price
+        # (initial_price - discount_price), so the effective displayed price
+        # is the parsed TEXT column with the original price as fallback.
+        if needs_price_annotation:
             from django.db.models.expressions import RawSQL
             queryset = queryset.annotate(
-                parsed_base_price=RawSQL(
-                    "NULLIF(regexp_replace(products.actual_price, '[^0-9.]', '', 'g'), '')::float8",
+                parsed_selling_price=RawSQL(
+                    "COALESCE(NULLIF(regexp_replace(products.actual_price, "
+                    "'[^0-9.]', '', 'g'), '')::float8, products.initial_price)",
                     [],
                     output_field=FloatField(),
                 )
             )
 
-        # 4. Min price filter uses the effective displayed price: discount
-        # price when present, otherwise the parsed actual_price text column.
+        # 4. Min price filter uses the effective displayed (final) price.
         if min_p is not None:
-            queryset = queryset.filter(
-                Q(discount_price__gte=min_p) |
-                Q(discount_price__isnull=True, parsed_base_price__gte=min_p)
-            )
+            queryset = queryset.filter(parsed_selling_price__gte=min_p)
 
         # 5. Max price filter
         if max_p is not None:
-            queryset = queryset.filter(
-                Q(discount_price__lte=max_p) |
-                Q(discount_price__isnull=True, parsed_base_price__lte=max_p)
-            )
+            queryset = queryset.filter(parsed_selling_price__lte=max_p)
 
         # 6. In-stock filter uses the real `available_quantity` column
         #    (the new schema has no separate inventory table).
         if in_stock is not None and str(in_stock).strip().lower() in ('true', '1', 'yes'):
             queryset = queryset.filter(available_quantity__gt=0)
 
+        # "On sale" now means a real discount amount: discount_price is the
+        # discount in currency, so on sale <=> discount_price > 0.
         if on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes'):
-            queryset = queryset.filter(parsed_base_price__gt=F('discount_price'))
+            queryset = queryset.filter(discount_price__gt=0)
 
         # 7. Sorting (real schema has no launch_date / created_at columns,
         #    so 'newest' falls back to a stable product_key order)
         if sort is not None:
             if sort_option == 'price_low_high':
                 queryset = queryset.order_by(
-                    Coalesce(F('discount_price'), F('parsed_base_price')),
+                    'parsed_selling_price',
                     'product_name',
                     'product_id',
                 )
             elif sort_option == 'price_high_low':
                 queryset = queryset.order_by(
-                    Coalesce(F('discount_price'), F('parsed_base_price')).desc(),
+                    F('parsed_selling_price').desc(),
                     'product_name',
                     'product_id',
                 )
             elif sort_option == 'name':
+                queryset = queryset.order_by('product_name', 'product_id')
+            elif sort_option == 'custom_letter':
+                # Custom-letter mode lists the letter-matched names A to Z
                 queryset = queryset.order_by('product_name', 'product_id')
             elif sort_option == 'newest':
                 queryset = queryset.order_by('product_id')
@@ -238,32 +251,29 @@ class CatalogService:
     def get_sale_products(cls, limit=None):
         """
         Returns products currently on sale.
-        Primary criterion (unchanged logic): base_price > selling_price,
-        i.e. parsed actual_price (TEXT) > discount_price.
-        Fallback criterion: lowest clearance pricing (mirrors the original
+        Criterion: a positive discount AMOUNT (`discount_price` stores the
+        discount in currency, so on sale <=> discount_price > 0), deepest
+        discount first.
+        Fallback criterion: lowest final selling price (mirrors the original
         fallback when no discounted products exist).
         """
         base_qs = cls.get_annotated_products_queryset()
 
-        # Primary: products where actual_price (parsed) > discount_price.
-        # Use an annotate + filter approach with RawSQL-free parsing done in
-        # Python only when the queryset is small is NOT possible at 90k rows,
-        # so parse via SQL: strip non-numeric characters then cast to float.
-        from django.db.models.expressions import RawSQL
-
-        base_qs = base_qs.annotate(
-            parsed_base_price=RawSQL(
-                "NULLIF(regexp_replace(products.actual_price, '[^0-9.]', '', 'g'), '')::float8",
-                []
-            )
-        )
-
         sale_qs = base_qs.filter(
-            parsed_base_price__gt=F('discount_price')
-        ).order_by('discount_price', 'product_id')
+            discount_price__gt=0
+        ).order_by('-discount_price', 'product_id')
         if sale_qs.exists():
             return sale_qs[:limit] if limit else sale_qs
 
-        # Fallback: lowest price clearance (same as original fallback path)
-        clearance_qs = base_qs.order_by('discount_price', 'product_id')
+        # Fallback: lowest price clearance — cheapest final selling price
+        # first (parsed actual_price TEXT column).
+        from django.db.models.expressions import RawSQL
+
+        clearance_qs = base_qs.annotate(
+            parsed_selling_price=RawSQL(
+                "COALESCE(NULLIF(regexp_replace(products.actual_price, "
+                "'[^0-9.]', '', 'g'), '')::float8, products.initial_price)",
+                []
+            )
+        ).order_by('parsed_selling_price', 'product_id')
         return clearance_qs[:limit] if limit else clearance_qs

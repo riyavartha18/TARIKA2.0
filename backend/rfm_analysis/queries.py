@@ -14,6 +14,7 @@ mirror `utils.eligible_delivery_statuses` and the negative-price policy, and
 from django.db import connection
 
 from . import utils
+from .models import CustomerSegment
 
 
 # Aggregates one row per eligible buyer. Recency is measured against the
@@ -108,6 +109,76 @@ def fetch_total_customers():
     with connection.cursor() as cursor:
         cursor.execute(AGGREGATE_TOTALS_SQL)
         return int(cursor.fetchone()[0] or 0)
+
+
+# A single cheap pass over the eligible orders that uniquely fingerprints the
+# source data a run consumed: adding/removing an eligible order (a new purchase
+# or a cancellation/return that changes eligibility) moves the count; a new
+# buyer moves the distinct-buyer count; a newer purchase moves the max date.
+# The incremental refresh compares this against the fingerprint stored with the
+# last completed version to decide - without a dirty-customer queue - whether
+# anything actually changed. It is index-assisted by `orders_rfm_delivered_idx`.
+SOURCE_FINGERPRINT_SQL = """
+SELECT
+    COUNT(*)::bigint                              AS order_count,
+    COUNT(DISTINCT o.customer_id)::bigint         AS buyer_count,
+    MAX(to_date(o.purchase_date, 'DD-MM-YYYY'))::text AS max_date
+FROM public.orders o
+WHERE o.delivery_status = ANY(%s)
+  AND o.customer_id IS NOT NULL
+  AND o.purchase_date IS NOT NULL
+  AND (%s OR o.final_price >= 0)
+"""
+
+
+def compute_source_fingerprint():
+    """Short stable string fingerprint of the current eligible source data.
+
+    Returns '' on a backend without the `public.orders` table (e.g. the SQLite
+    used for unit tests), which the incremental path treats as "cannot prove
+    unchanged" and therefore refreshes.
+    """
+    if connection.vendor != 'postgresql':
+        return ''
+    statuses = utils.eligible_delivery_statuses()
+    exclude_negative = utils.EXCLUDE_NEGATIVE_FINAL_PRICE
+    with connection.cursor() as cursor:
+        cursor.execute(SOURCE_FINGERPRINT_SQL, [statuses, exclude_negative])
+        order_count, buyer_count, max_date = cursor.fetchone()
+    return f'{order_count}|{buyer_count}|{max_date or ""}'
+
+
+def fetch_dashboard_totals():
+    """Dashboard KPIs + segment distribution from the persisted result table.
+
+    Aggregation runs entirely in PostgreSQL over the small (one row per buyer)
+    `rfm_customer_segments` table - a ~20 ms index/seq scan on 100k rows - so a
+    completed dashboard render never depends on the ephemeral cache snapshot and
+    never re-scans the 1M-row orders table. This is what makes the RFM page open
+    instantly after a restart: it shows the latest *successfully completed*
+    analysis that is already stored, while any refresh happens in the background.
+
+    Returns (totals, distribution):
+      totals       - {buyer_count, total_orders, total_revenue, big_spender_count}
+      distribution - [{segment, count}, ...] ordered by label
+    """
+    from django.db.models import Count, DecimalField, Q, Sum, Value
+    from django.db.models.functions import Coalesce
+
+    totals = CustomerSegment.objects.aggregate(
+        buyer_count=Count('customer_id'),
+        total_orders=Coalesce(Sum('frequency'), Value(0)),
+        total_revenue=Coalesce(
+            Sum('monetary'), Value(0),
+            output_field=DecimalField(max_digits=16, decimal_places=2)),
+        big_spender_count=Count(
+            'customer_id', filter=Q(tags__contains=[utils.TAG_BIG_SPENDER])),
+    )
+    distribution = list(
+        CustomerSegment.objects.values('segment')
+        .annotate(count=Count('customer_id'))
+        .order_by('segment'))
+    return totals, distribution
 
 
 NEVER_PURCHASED_SQL = """

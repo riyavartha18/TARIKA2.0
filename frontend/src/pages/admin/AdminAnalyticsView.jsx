@@ -36,6 +36,8 @@ import {
 import '../../styles/admin-portal.css';
 import RfmAnalysisCard from './RfmAnalysisCard';
 import RfmDashboard from './AdminRFMView';
+import ClvAnalysisCard from './ClvAnalysisCard';
+import ClvDashboard from './AdminClvView';
 
 export default function AdminAnalyticsView() {
   const { token: authContextToken } = useAuth();
@@ -43,7 +45,7 @@ export default function AdminAnalyticsView() {
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
 
-  // Active view: 'overview' | 'demand_forecasting' | 'slow_inventory' | 'rfm'
+  // Active view: 'overview' | 'demand_forecasting' | 'slow_inventory' | 'rfm' | 'clv'
   const [activeView, setActiveView] = useState('overview');
 
   // Filters for product predictions (server-driven)
@@ -208,6 +210,10 @@ export default function AdminAnalyticsView() {
   // opening them is just a view switch (no eager heavy load on the overview).
   const handleOpenRfmView = () => setActiveView('rfm');
 
+  // The CLV card and dashboard fetch their own lightweight cached state, so
+  // opening them is just a view switch as well.
+  const handleOpenClvView = () => setActiveView('clv');
+
   const { summary = {} } = data || {};
 
   // Demand metrics come from the cached analytics model (whole-catalog truth);
@@ -326,10 +332,7 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-            {/* Description */}
-            <p style={{ color: '#6B5E63', fontSize: '0.95rem', lineHeight: 1.6, margin: '0 0 1.75rem 0' }}>
-              Classifies catalog products into demand tiers (High, Medium, Low) from live customer demand signals ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>wishlist_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>cart_count</code> , <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>purchase_count</code> ) to predict demand strength ( <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>units_sold</code> ), using a manual ID3 Decision Tree over <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>fact_product_analysis</code> joined to <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>products</code> on <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>product_key</code>.
-            </p>
+           
 
             {/* Demand Forecasting Visual Banner */}
             <div style={{ marginBottom: '2rem', borderRadius: '14px', overflow: 'hidden', background: '#FAF7F5', border: '1px solid rgba(216, 114, 126, 0.1)' }}>
@@ -434,10 +437,6 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-            {/* Description */}
-            <p style={{ color: '#6B5E63', fontSize: '0.95rem', lineHeight: 1.6, margin: '0 0 1.75rem 0' }}>
-              Identifies products whose current inventory is moving slowly based on historical sales velocity. Calculates <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>days_of_stock</code> from <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>current_stock</code> ÷ <code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>avg_daily_sales</code> and classifies each product-warehouse pair as <strong style={{ color: '#DC2626' }}>Very Slow</strong>, <strong style={{ color: '#D97706' }}>Slow</strong>, or <strong style={{ color: '#059669' }}>Normal</strong>.
-            </p>
 
             {/* Visual Banner for Slow-Moving Inventory */}
             <div style={{
@@ -515,6 +514,11 @@ export default function AdminAnalyticsView() {
              ================================================================ */}
           <RfmAnalysisCard onOpen={handleOpenRfmView} />
 
+          {/* ================================================================
+              CUSTOMER LIFETIME VALUE CARD
+             ================================================================ */}
+          <ClvAnalysisCard onOpen={handleOpenClvView} />
+
           </div>
         </div>
       )}
@@ -525,6 +529,15 @@ export default function AdminAnalyticsView() {
       {activeView === 'rfm' && (
         <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
           <RfmDashboard onBack={() => setActiveView('overview')} />
+        </div>
+      )}
+
+      {/* ==========================================================================
+          DEDICATED DETAILED VIEW: CUSTOMER LIFETIME VALUE DASHBOARD
+         ========================================================================== */}
+      {activeView === 'clv' && (
+        <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+          <ClvDashboard onBack={() => setActiveView('overview')} />
         </div>
       )}
 
@@ -545,12 +558,9 @@ export default function AdminAnalyticsView() {
                 <span>Back to Analytics Hub</span>
               </button>
               <div>
-                <h1 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.85rem', fontWeight: 700, color: '#1F191B', margin: '0 0 0.2rem 0' }}>
+                <h1 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.85rem', fontWeight: 700, color: '#1F191B', margin: 0 }}>
                   Demand Forecasting Results
                 </h1>
-                <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: 0 }}>
-                  Product demand tiers (High, Medium, Low) predicted by the ID3 model from customer demand signals.
-                </p>
               </div>
             </div>
           </div>

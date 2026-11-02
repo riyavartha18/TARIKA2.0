@@ -33,7 +33,7 @@ from cart.views import (
 
 
 def make_product(product_id='P10000', name='TARIKA Silk Kurti', stock=7,
-                 discount=1099.0, actual='1,499'):
+                 discount=400.0, actual='1,099', initial=1499.0):
     """An unsaved Product row - enough for the pure mapping code under test."""
     from catalog.models import Product
     return Product(
@@ -45,6 +45,7 @@ def make_product(product_id='P10000', name='TARIKA Silk Kurti', stock=7,
         link='https://example.test/link',
         discount_price=discount,
         actual_price_text=actual,
+        initial_price=initial,
         available_quantity=stock,
     )
 
@@ -88,7 +89,8 @@ class ProductPayloadTests(SimpleTestCase):
         self.assertEqual(payload['category_name'], "women's clothing")
         self.assertEqual(payload['category_id'], "women's-clothing")
         self.assertEqual(payload['primary_image'], 'https://example.test/p.jpg')
-        # selling_price is discount_price, base_price is the parsed TEXT column.
+        # selling_price is the FINAL price (parsed actual_price TEXT column),
+        # base_price is the original price (initial_price column).
         self.assertEqual(payload['selling_price'], 1099.0)
         self.assertEqual(payload['base_price'], 1499.0)
         self.assertEqual(payload['total_stock'], 7)
@@ -224,14 +226,18 @@ class CartStockGuardTests(SimpleTestCase):
 
     def test_available_stock_reads_the_real_column(self):
         self.assertEqual(CartService.get_available_stock(make_product(stock=4.0)), 4)
-        self.assertIsNone(CartService.get_available_stock(make_product(stock=None)))
+        # Unified null-stock policy (cart/services.py): a missing quantity is
+        # unknown and treated as 0 so it can never be silently sold.
+        self.assertEqual(CartService.get_available_stock(make_product(stock=None)), 0)
 
     def test_quantity_above_stock_is_rejected(self):
         with self.assertRaises(ValidationError):
             CartService._guard_quantity(make_product(stock=2), 5, current_in_cart=2)
 
-    def test_unrecorded_stock_is_not_blocked(self):
-        CartService._guard_quantity(make_product(stock=None), 40, current_in_cart=0)
+    def test_unrecorded_stock_blocks_sale(self):
+        # Unknown stock is never sold: treated as 0 available (policy above).
+        with self.assertRaises(ValidationError):
+            CartService._guard_quantity(make_product(stock=None), 40, current_in_cart=0)
 
     def test_absolute_line_cap_is_enforced(self):
         with self.assertRaises(ValidationError):
@@ -256,8 +262,10 @@ class CartSummaryTests(SimpleTestCase):
     """Subtotal and totals are recalculated from the stored rows."""
 
     def _item(self, cartkey, quantity, price):
+        # `price` is the FINAL selling price -> the actual_price TEXT column.
         item = CartItem(cartkey=cartkey, quantity=quantity)
-        item.product = make_product(product_id=cartkey, discount=price, stock=50)
+        item.product = make_product(product_id=cartkey, discount=0.0,
+                                    actual=str(price), stock=50)
         return item
 
     def test_summary_totals(self):

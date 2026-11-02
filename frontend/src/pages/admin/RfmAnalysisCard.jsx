@@ -75,13 +75,6 @@ export default function RfmAnalysisCard({ onOpen }) {
         </span>
       </div>
 
-      {/* Description */}
-      <p style={{ color: '#6B5E63', fontSize: '0.95rem', lineHeight: 1.6, margin: '0 0 1.75rem 0' }}>
-        Automatically groups every customer into value segments — Champions, Loyal, At-Risk and more — based on how
-        recently, how often, and how much they buy. Results are kept fresh in the background, so the latest completed
-        analysis is always shown.
-      </p>
-
       {/* Segment distribution preview */}
       <div style={{ marginBottom: '1.5rem', borderRadius: '14px', background: '#FAF7F5', border: '1px solid rgba(216, 114, 126, 0.1)', padding: '1.25rem' }}>
         {loading ? (

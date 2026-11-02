@@ -7,13 +7,15 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Count, Q
+from django.db.models import Count, Min, Q, Value
+from django.db.models.functions import Coalesce, Lower, Trim
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
 
 from accounts.permissions import IsCustomer
 from orders.models import Order
 from .models import Category, Product, Review, OrderItem
+from .normalize import normalize_category, canonical_display
 from .serializers import (
     CategorySerializer,
     ProductListSerializer,
@@ -95,38 +97,59 @@ class CategoryListView(APIView):
         # column so navigation and filtering use actual database values.
         # One grouped query returns main_category + sub_category counts together
         # (avoids a second per-category query for subcategory navigation).
+        #
+        # Grouping is CASE- AND WHITESPACE-INSENSITIVE: rows are grouped by the
+        # database-side LOWER(TRIM(col)) key, so "Dress", "dress" and " DRESS "
+        # collapse into a single category/subcategory instead of appearing as
+        # separate entries. A stable display name is chosen as MIN of the raw
+        # values, and no stored row is rewritten.
         rows = (
             Product.objects
             .filter(is_active=True)
             .exclude(main_category__isnull=True)
             .exclude(main_category='')
-            .values('main_category', 'sub_category')
-            .annotate(product_count=Count('product_id'))
-            .order_by('main_category')
+            .annotate(
+                main_key=Lower(Trim('main_category')),
+                sub_key=Lower(Coalesce(Trim('sub_category'), Value(''))),
+            )
+            .values('main_key', 'sub_key')
+            .annotate(
+                product_count=Count('product_id'),
+                main_display=Min('main_category'),
+                sub_display=Min('sub_category'),
+            )
+            .order_by('main_key', 'sub_key')
         )
         cat_map = {}
         for row in rows:
-            name = (row['main_category'] or '').strip()
-            if not name:
+            key = row['main_key'] or normalize_category(row['main_display'])
+            if not key:
                 continue
-            entry = cat_map.setdefault(name, {
-                'category_id': name,
-                'category_name': name,
-                'id': name,
-                'name': name,
-                'slug': name,
-                'image': CATEGORY_IMAGE_MAPPING.get(name.lower(), None),
+            display = canonical_display(row['main_display'])
+            entry = cat_map.setdefault(key, {
+                'category_id': display,
+                'category_name': display,
+                'id': display,
+                'name': display,
+                'slug': display,
+                'image': CATEGORY_IMAGE_MAPPING.get(key, None),
                 'product_count': 0,
-                'sub_categories': [],
+                '_subs': {},
             })
             entry['product_count'] += row['product_count']
-            sub_name = (row['sub_category'] or '').strip()
-            if sub_name and sub_name.lower() != name.lower():
-                entry['sub_categories'].append({
-                    'sub_category': sub_name,
-                    'product_count': row['product_count'],
-                })
-        data = sorted(cat_map.values(), key=lambda c: c['category_name'])
+            sub_key = row['sub_key']
+            sub_display = canonical_display(row['sub_display'])
+            if sub_key and sub_key != key:
+                sub = entry['_subs'].setdefault(
+                    sub_key, {'sub_category': sub_display, 'product_count': 0})
+                sub['product_count'] += row['product_count']
+
+        for entry in cat_map.values():
+            subs = sorted(entry.pop('_subs').values(),
+                          key=lambda s: s['sub_category'].lower())
+            entry['sub_categories'] = subs
+
+        data = sorted(cat_map.values(), key=lambda c: c['category_name'].lower())
         cache.set(cache_key, data, self.cache_timeout)
         return Response(data, status=status.HTTP_200_OK)
 
@@ -137,7 +160,9 @@ class ProductListView(APIView):
     Returns paginated list of active products with support for:
       - category / sub_category and text search over product name/category columns
       - min_price / max_price, stock, sale, size, and color filters
-      - sort: newest, price_low_high, price_high_low, name
+      - sort: newest, price_low_high, price_high_low, name, custom_letter
+      - starts_with: single A-Z letter limiting results to names starting with it
+        (case-insensitive; combines with every filter above and pagination)
     Responses contain at most 20 products; filtering and ordering happen before
     the database page slice.
     Publicly accessible.
@@ -157,6 +182,7 @@ class ProductListView(APIView):
         color = request.query_params.get('color')
         subcategory_search = request.query_params.get('subcategory_search')
         sort = request.query_params.get('sort')
+        starts_with = request.query_params.get('starts_with')
 
         queryset = CatalogService.filter_and_sort_products(
             category=category,
@@ -170,6 +196,7 @@ class ProductListView(APIView):
             size=size,
             color=color,
             subcategory_search=subcategory_search,
+            starts_with=starts_with,
         )
 
         queryset = queryset.only(*CatalogService.PRODUCT_LIST_FIELDS)

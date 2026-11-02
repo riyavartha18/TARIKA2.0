@@ -109,9 +109,13 @@ class StockCategoriesView(APIView):
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT DISTINCT main_category FROM products "
-                    "WHERE main_category IS NOT NULL AND main_category <> '' "
-                    "ORDER BY main_category"
+                    # One entry per case/whitespace-insensitive category, with a
+                    # stable display name (MIN of the trimmed raw values).
+                    "SELECT MIN(TRIM(main_category)) AS main_category "
+                    "FROM products "
+                    "WHERE main_category IS NOT NULL AND TRIM(main_category) <> '' "
+                    "GROUP BY LOWER(TRIM(main_category)) "
+                    "ORDER BY 1"
                 )
                 categories = [row[0] for row in cursor.fetchall()]
             return Response({'categories': categories}, status=status.HTTP_200_OK)

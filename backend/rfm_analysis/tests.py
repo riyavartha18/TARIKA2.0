@@ -8,16 +8,21 @@ is a pre-existing dataset table that has no counterpart under test settings.
 Run:  python manage.py test rfm_analysis --settings=test_settings
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.serializers import ValidationError as DRFValidationError
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+from accounts.models import Role
 
 from . import (benefits, cache_manager, campaign_engine, coupon_validation,
-               personalization, rfm_scoring, segment_store, segmentation, utils)
+               engine, personalization, rfm_scoring, segment_store, segmentation,
+               utils, views)
 from .models import (
     Campaign, CampaignRedemption, CampaignStatus, CustomerSegment, DiscountType,
     OfferCategory, RfmAnalysisState, UsageType,
@@ -969,3 +974,194 @@ class CampaignAudienceTests(TestCase):
             campaign_audience.audience_count([utils.SEGMENT_CHAMPIONS, utils.SEGMENT_AT_RISK], []), 3)
         self.assertEqual(
             campaign_audience.audience_count([utils.SEGMENT_CHAMPIONS], ['Big Spender']), 1)
+
+
+def _full_record(cid, segment, monetary, recency=10, freq=3,
+                 scores=(4, 3, 5), tags=None, first='2024-01-01',
+                 last='2026-01-01'):
+    r, f, m = scores
+    return {
+        'customer_id': cid, 'segment': segment, 'tags': tags or [],
+        'monetary': monetary, 'recency_days': recency, 'frequency': freq,
+        'r_score': r, 'f_score': f, 'm_score': m,
+        'first_purchase_date': first, 'last_purchase_date': last,
+    }
+
+
+class FullRfmResultStoreTests(TestCase):
+    """The dedicated latest-RFM-result table synchronizes every completed run.
+
+    Runs on the SQLite test backend, which exercises the ORM upsert path; the
+    PostgreSQL conditional-skip (Case D) is a production-only behaviour covered
+    by the same field-mapping contract.
+    """
+
+    def setUp(self):
+        cache_manager.cache.clear()
+        CustomerSegment.objects.all().delete()
+        RfmAnalysisState.objects.all().delete()
+
+    def test_full_result_fields_and_state_are_persisted(self):
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_CHAMPIONS, 500.0)],
+            version=5, analysis_date=date(2026, 11, 1),
+            source_fingerprint='10|3|2026-01-01')
+        row = CustomerSegment.objects.get(pk='A')
+        self.assertEqual(row.monetary, Decimal('500.00'))
+        self.assertEqual(row.recency, 10)
+        self.assertEqual(row.frequency, 3)
+        self.assertEqual((row.r_score, row.f_score, row.m_score), (4, 3, 5))
+        self.assertEqual(row.rfm_score, '435')
+        self.assertEqual(row.first_purchase_date, date(2024, 1, 1))
+        self.assertEqual(row.last_purchase_date, date(2026, 1, 1))
+        self.assertEqual(row.version, 5)
+        self.assertIsNotNone(row.updated_at)
+        state = RfmAnalysisState.objects.get(pk=RfmAnalysisState.SINGLETON_ID)
+        self.assertEqual(state.source_fingerprint, '10|3|2026-01-01')
+        self.assertEqual(state.buyer_count, 1)
+
+    def test_changed_segment_and_monetary_replace_previous_values(self):
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_POTENTIAL_LOYALISTS, 100.0)], version=1)
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_CHAMPIONS, 300.0)], version=2)
+        row = CustomerSegment.objects.get(pk='A')
+        self.assertEqual(row.segment, utils.SEGMENT_CHAMPIONS)
+        self.assertEqual(row.monetary, Decimal('300.00'))
+        self.assertEqual(row.version, 2)
+
+    def test_new_customer_inserted_and_existing_updated(self):
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 100.0)], version=1)
+        stats = segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 120.0),
+             _full_record('B', utils.SEGMENT_NEW, 50.0)],
+            version=2, return_stats=True)
+        self.assertTrue(CustomerSegment.objects.filter(pk='B').exists())
+        self.assertEqual(CustomerSegment.objects.get(pk='A').monetary,
+                         Decimal('120.00'))
+        self.assertEqual(stats['buyers'], 2)
+
+    def test_full_refresh_removes_buyers_no_longer_eligible(self):
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 100.0),
+             _full_record('B', utils.SEGMENT_LOYAL, 50.0)], version=1)
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 100.0)], version=2)
+        self.assertTrue(CustomerSegment.objects.filter(pk='A').exists())
+        self.assertFalse(CustomerSegment.objects.filter(pk='B').exists())
+
+    def test_incremental_refresh_keeps_absent_rows(self):
+        # Case F: a partial (incremental) batch must not delete buyers simply
+        # because they were absent from it (no eligibility re-check here).
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 100.0),
+             _full_record('B', utils.SEGMENT_LOYAL, 50.0)], version=1)
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_LOYAL, 130.0)], version=2, full=False)
+        self.assertTrue(CustomerSegment.objects.filter(pk='B').exists())
+
+
+class RfmResultsEndpointTests(TestCase):
+    """GET /api/analytics/rfm/results serves the persisted table, paginated."""
+
+    def setUp(self):
+        cache_manager.cache.clear()
+        CustomerSegment.objects.all().delete()
+        RfmAnalysisState.objects.all().delete()
+
+    def _admin(self):
+        user = mock.Mock()
+        user.is_authenticated = True
+        user.is_active = True
+        user.role = Role.ADMIN
+        return user
+
+    def _get(self, params, user):
+        request = APIRequestFactory().get('/api/analytics/rfm/results', params)
+        force_authenticate(request, user=user)
+        response = views.RfmResultsView.as_view()(request)
+        response.render()
+        return response
+
+    def test_returns_latest_result_per_customer(self):
+        segment_store.store_records(
+            [_full_record('A', utils.SEGMENT_CHAMPIONS, 500.0)], version=4)
+        response = self._get({}, self._admin())
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['available'])
+        self.assertEqual(response.data['version'], 4)
+        self.assertEqual(response.data['count'], 1)
+        row = response.data['results'][0]
+        self.assertEqual(row['customer_id'], 'A')
+        self.assertEqual(row['monetary'], 500.0)
+        self.assertEqual(row['rfm_score'], '435')
+        self.assertEqual(row['calculation_version'], 4)
+
+    def test_pagination_and_segment_filter(self):
+        segment_store.store_records(
+            [_full_record(f'C{i:03d}', utils.SEGMENT_CHAMPIONS if i % 2 else
+                          utils.SEGMENT_AT_RISK, 100.0 + i)
+             for i in range(10)], version=1)
+        response = self._get({'page': 1, 'page_size': 3}, self._admin())
+        self.assertEqual(len(response.data['results']), 3)
+        self.assertEqual(response.data['total_pages'], 4)
+
+        response = self._get({'segment': utils.SEGMENT_AT_RISK}, self._admin())
+        self.assertEqual(response.data['count'], 5)
+
+    def test_endpoint_is_admin_only(self):
+        customer = mock.Mock()
+        customer.is_authenticated = True
+        customer.is_active = True
+        customer.role = Role.CUSTOMER
+        response = self._get({}, customer)
+        self.assertEqual(response.status_code, 403)
+
+
+class RfmRefreshEndpointTests(TestCase):
+    """POST recalculate (full) and incremental-refresh drive the engine."""
+
+    def _admin(self):
+        user = mock.Mock()
+        user.is_authenticated = True
+        user.is_active = True
+        user.role = Role.ADMIN
+        return user
+
+    def _post(self, view_cls):
+        request = APIRequestFactory().post('/api/analytics/rfm/x')
+        force_authenticate(request, user=self._admin())
+        response = view_cls.as_view()(request)
+        response.render()
+        return response
+
+    def test_recalculate_starts_full_background_run(self):
+        with mock.patch.object(engine, 'start_background_run',
+                               return_value=(True, {'status': 'queued'})) as starter:
+            response = self._post(views.RfmRecalculateView)
+        self.assertEqual(response.status_code, 202)
+        starter.assert_called_once_with(full=True)
+
+    def test_incremental_noop_when_source_unchanged(self):
+        with mock.patch.object(engine, 'source_changed_since_last_run',
+                               return_value=False):
+            response = self._post(views.RfmIncrementalRefreshView)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'up_to_date')
+
+    def test_incremental_starts_refresh_when_source_changed(self):
+        with mock.patch.object(engine, 'source_changed_since_last_run',
+                               return_value=True), \
+             mock.patch.object(engine, 'start_background_run',
+                               return_value=(True, {'status': 'queued'})) as starter:
+            response = self._post(views.RfmIncrementalRefreshView)
+        self.assertEqual(response.status_code, 202)
+        starter.assert_called_once_with(full=False)
+
+    def test_recalculate_conflict_when_already_running(self):
+        with mock.patch.object(engine, 'start_background_run',
+                               return_value=(False, {'status': 'running'})):
+            response = self._post(views.RfmRecalculateView)
+        self.assertEqual(response.status_code, 409)
+

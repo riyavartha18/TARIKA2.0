@@ -117,6 +117,10 @@ class ProductListSerializer(serializers.ModelSerializer):
     link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    # Discount AMOUNT in currency (`discount_price` column) plus the derived
+    # percentage — the percentage is never stored, always computed.
+    discount_price = serializers.FloatField(read_only=True)
+    discount_percentage = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     # Raw nullable stock value straight from `available_quantity` — lets the
@@ -136,6 +140,8 @@ class ProductListSerializer(serializers.ModelSerializer):
             'link',
             'base_price',
             'selling_price',
+            'discount_price',
+            'discount_percentage',
             'in_stock',
             'total_stock',
             'available_quantity',
@@ -148,12 +154,16 @@ class ProductListSerializer(serializers.ModelSerializer):
         return name.replace(' ', '-') if name else None
 
     def get_base_price(self, obj):
-        # Real `actual_price` TEXT column, parsed to float by the model property.
+        # Original price: real `initial_price` column via the model property.
         return obj.base_price
 
     def get_selling_price(self, obj):
-        # Real `discount_price` column, exposed via the model property.
+        # Final discounted selling price: `actual_price` TEXT column, parsed
+        # by the model property (actual = initial - discount amount).
         return obj.selling_price
+
+    def get_discount_percentage(self, obj):
+        return obj.discount_percentage
 
     def get_total_stock(self, obj):
         # New schema carries availability directly on the product row
@@ -202,6 +212,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    # Discount AMOUNT in currency + derived percentage (never stored as %).
+    discount_price = serializers.FloatField(read_only=True)
+    discount_percentage = serializers.SerializerMethodField()
     in_stock = serializers.SerializerMethodField()
     total_stock = serializers.SerializerMethodField()
     inventory_breakdown = serializers.SerializerMethodField()
@@ -220,6 +233,8 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'link',
             'base_price',
             'selling_price',
+            'discount_price',
+            'discount_percentage',
             'in_stock',
             'total_stock',
             'inventory_breakdown',
@@ -237,6 +252,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     def get_selling_price(self, obj):
         return obj.selling_price
+
+    def get_discount_percentage(self, obj):
+        return obj.discount_percentage
 
     def get_total_stock(self, obj):
         # New schema carries availability on the product row (`available_quantity`).

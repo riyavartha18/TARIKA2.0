@@ -98,6 +98,11 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     Exposes the real `public.products` columns (plus the legacy keys the React
     edit form consumes). Stock/availability are computed from the live
     `available_quantity` value returned by Supabase.
+
+    Price layout: `initial_price` = original price, `discount_price` =
+    discount AMOUNT in currency, `actual_price` = FINAL discounted selling
+    price (TEXT column), `discount_percentage` is always derived
+    (amount / initial * 100, max 2 dp) and never stored.
     """
     category_id = serializers.SerializerMethodField()
     category_name = serializers.CharField(source='main_category', read_only=True)
@@ -106,7 +111,9 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    initial_price = serializers.FloatField(read_only=True)
     discount_price = serializers.FloatField(read_only=True)
+    discount_percentage = serializers.SerializerMethodField()
     # Real `actual_price` column is TEXT — exposed verbatim for the edit form.
     actual_price = serializers.CharField(source='actual_price_text', read_only=True)
     in_stock = serializers.SerializerMethodField()
@@ -129,7 +136,9 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
             'product_name',
             'base_price',
             'selling_price',
+            'initial_price',
             'discount_price',
+            'discount_percentage',
             'actual_price',
             'available_quantity',
             # Inventory / availability (computed by Django)
@@ -149,6 +158,9 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
 
     def get_selling_price(self, obj):
         return obj.selling_price
+
+    def get_discount_percentage(self, obj):
+        return obj.discount_percentage
 
     def get_total_stock(self, obj):
         """Live stock straight from the product's `available_quantity` column."""
@@ -182,9 +194,19 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     Write serializer for PUT /api/warehouse/products/<product_key>/.
     Validates exactly the editable columns of the real `public.products`
     schema — all business rules are enforced here in Django, not in React.
-    `discount_price` is a double precision number; `actual_price` is TEXT in
-    the database and stays text here; `available_quantity` is a whole-unit,
-    non-negative stock count. Any field that is not a real, supported column is
+
+    Price layout (authoritative, resolved and recalculated server-side):
+      * `initial_price`  -> original product price (double precision)
+      * `discount_price` -> discount AMOUNT in currency, never a percentage
+      * `actual_price`   -> FINAL discounted selling price (TEXT column)
+        with `actual_price = initial_price - discount_price` (2 dp).
+
+    Both warehouse input methods are supported and cross-checked here:
+      1. discount amount entered   -> final price is calculated;
+      2. discounted price entered  -> discount amount is calculated;
+      3. both entered              -> they must agree to the cent.
+    Missing inputs fall back to the stored product row (passed via
+    `context['product']`). Any field that is not a real, supported column is
     rejected outright (never silently ignored), so a stale legacy payload from
     the admin editor fails loudly instead of quietly persisting nothing.
     """
@@ -193,6 +215,7 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     sub_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
     image = serializers.CharField(max_length=2000, allow_blank=True, required=False, allow_null=True)
     link = serializers.CharField(max_length=2000, allow_blank=True, required=False, allow_null=True)
+    initial_price = serializers.FloatField(required=False, allow_null=True)
     discount_price = serializers.FloatField(required=False, allow_null=True)
     actual_price = serializers.CharField(max_length=255, allow_blank=True, required=False, allow_null=True)
     available_quantity = serializers.FloatField(required=False, allow_null=True)
@@ -222,11 +245,39 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     def validate_sub_category(self, value):
         return (value or '').strip() or None
 
+    def validate_initial_price(self, value):
+        """Original price must be a finite, non-negative number if provided."""
+        value = self._clean_number(value, 'Initial price')
+        if value is not None and value < 0:
+            raise serializers.ValidationError('Initial price cannot be negative.')
+        return value
+
     def validate_discount_price(self, value):
-        """Discount price must be a finite, non-negative number if provided."""
+        """Discount AMOUNT must be a finite, non-negative number if provided.
+        It is currency, never a percentage."""
         value = self._clean_number(value, 'Discount price')
         if value is not None and value < 0:
             raise serializers.ValidationError('Discount price cannot be negative.')
+        return value
+
+    def validate_actual_price(self, value):
+        """`actual_price` is the FINAL selling price. The column is TEXT, so
+        accept numeric text ('800', '1,099') but reject anything unparsable
+        when a value is supplied. A leading minus is a real negative price
+        and must be rejected (the lenient column parser would strip it)."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return value
+        import re
+        if re.search(r'-\s*\d', str(value)):
+            raise serializers.ValidationError(
+                'Discounted price cannot be negative.')
+        from catalog.models import parse_product_price
+        parsed = parse_product_price(value)
+        if parsed is None:
+            raise serializers.ValidationError(
+                'Discounted price must be a numeric value (e.g. 800 or 1,099).')
+        if not math.isfinite(parsed):
+            raise serializers.ValidationError('Discounted price must be a finite number.')
         return value
 
     def validate_available_quantity(self, value):
@@ -254,6 +305,46 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
                 field: ['This field is not supported by the product schema.']
                 for field in unknown
             })
+
+        # ---- Authoritative price resolution (Django, not React) ----------
+        from catalog.models import parse_product_price
+        from catalog.pricing import resolve_product_prices
+
+        touches_price = any(
+            key in attrs for key in ('initial_price', 'discount_price', 'actual_price')
+        )
+        if not touches_price:
+            return attrs
+
+        existing = (self.context or {}).get('product')
+        # 'present but explicitly null' keeps the stored value: the edit form
+        # always submits the full price triple, so a null here only comes
+        # from a partial payload and must not wipe the stored original price.
+        initial = attrs.get('initial_price')
+        if initial is None and existing is not None:
+            initial = existing.initial_price if existing.initial_price is not None \
+                else existing.base_price
+
+        amount = attrs['discount_price'] if 'discount_price' in attrs else None
+        final_input = attrs.get('actual_price')
+        final = parse_product_price(final_input) if final_input not in (None, '') else None
+        if final is None and 'actual_price' not in attrs and amount is None and existing is not None:
+            # Only the original price was submitted: keep the stored discount
+            # amount and recalculate the final price from it.
+            amount = existing.discount_price
+
+        try:
+            resolved = resolve_product_prices(initial, amount, final)
+        except ValueError as exc:
+            raise serializers.ValidationError({'non_field_errors': [str(exc)]})
+
+        attrs['initial_price'] = resolved['initial_price']
+        attrs['discount_price'] = resolved['discount_price']
+        # Keep the TEXT column format the listings already parse: plain
+        # numeric text rounded to 2 decimal places.
+        attrs['actual_price'] = f"{resolved['final_price']:.2f}"
+        # Mirror column kept in sync by the service layer.
+        attrs['discounted_price'] = resolved['final_price']
         return attrs
 
 

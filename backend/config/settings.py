@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'stock_to_be_ordered.apps.StockToBeOrderedConfig',
     'recommendations.apps.RecommendationsConfig',
     'rfm_analysis.apps.RfmAnalysisConfig',
+    'clv.apps.ClvConfig',
 ]
 
 MIDDLEWARE = [

@@ -50,6 +50,13 @@ urlpatterns = [
         )
     ),
     path('api/', include(('rfm_analysis.urls', 'rfm_analysis'), namespace='rfm_analysis')),
+    path(
+        'api/clv/',
+        include(
+            ('clv.urls', 'clv'),
+            namespace='clv'
+        )
+    ),
 ]
 
 # Reload URLconf: registered warehouse app routes

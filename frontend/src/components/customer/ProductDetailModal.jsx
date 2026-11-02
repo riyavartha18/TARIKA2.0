@@ -16,7 +16,7 @@ import {
   Edit3,
 } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
-import { getProductPricing } from '../../utils/pricing';
+import { getProductPricing, formatDiscountPercentage } from '../../utils/pricing';
 import { useAuth } from '../../auth/AuthContext';
 import ProductCard from './ProductCard';
 import { submitProductReview, getProductRecommendations, getProductDetail } from '../../services/api';
@@ -230,7 +230,7 @@ export default function ProductDetailModal() {
   const productId = product.product_id || product.id;
   const wishlisted = isWishlisted(productId);
 
-  const { basePrice, currentPrice, discountAmount, isOnSale } = getProductPricing(product);
+  const { basePrice, currentPrice, discountAmount, discountPercentage, isOnSale } = getProductPricing(product);
 
   // Rating and reviews from database / local state
   const reviewCount = localReviews.length;
@@ -451,7 +451,7 @@ export default function ProductDetailModal() {
               />
               {isOnSale && (
                 <span className="product-badge-sale" style={{ top: '16px', left: '16px' }}>
-                  ₹{discountAmount.toLocaleString('en-IN')} OFF
+                  {formatDiscountPercentage(discountPercentage)} OFF
                 </span>
               )}
             </div>

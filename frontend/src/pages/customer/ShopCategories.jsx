@@ -181,9 +181,19 @@ export default function ShopCategories() {
     ]
   );
 
-  // Fetch the first page whenever the active filters change
+  // Fetch the first page whenever the active filters change. A query
+  // signature makes the reset intentional-only: appended "Load More" pages
+  // must survive anything that re-fires this effect with identical filters
+  // (a recreated callback, unrelated state churn). Only a real
+  // search/filter/sort change — or a fresh mount — restarts from the first
+  // 20 records.
+  const lastQuerySig = useRef(null);
+
   useEffect(() => {
     if (!selectedCategory) return;
+    const params = buildProductParams(1);
+    const sig = JSON.stringify(params);
+    if (lastQuerySig.current === sig) return;
     const seq = ++reqSeq.current;
 
     async function fetchCategoryProducts() {
@@ -191,19 +201,22 @@ export default function ShopCategories() {
       setLoadingMore(false);
       setProductsError(null);
       try {
-        const res = await getProducts(buildProductParams(1));
+        const res = await getProducts(params);
         if (seq !== reqSeq.current) return; // a newer request already started
         if (res.success) {
+          lastQuerySig.current = sig;
           setRawProducts(res.products || []);
           setPage(1);
           setHasMore(Boolean(res.hasNext));
         } else {
+          lastQuerySig.current = null; // allow a retry with the same filters
           setRawProducts([]);
           setHasMore(false);
           setProductsError(res.error || 'Failed to load products.');
         }
       } catch (err) {
         if (seq === reqSeq.current) {
+          lastQuerySig.current = null;
           console.error('Error fetching category products', err);
           setProductsError('Unable to load products. Please try again.');
         }

@@ -9,6 +9,11 @@ app_name = 'rfm_analysis'
 urlpatterns = [
     # ---- Admin analytics ----
     path('analytics/rfm/run', views.RfmRunView.as_view(), name='rfm-run'),
+    path('analytics/rfm/recalculate', views.RfmRecalculateView.as_view(),
+         name='rfm-recalculate'),
+    path('analytics/rfm/incremental-refresh', views.RfmIncrementalRefreshView.as_view(),
+         name='rfm-incremental-refresh'),
+    path('analytics/rfm/results', views.RfmResultsView.as_view(), name='rfm-results'),
     path('analytics/rfm/summary', views.RfmSummaryView.as_view(), name='rfm-summary'),
     path('analytics/rfm/segments', views.RfmSegmentsView.as_view(), name='rfm-segments'),
     path('analytics/rfm/segments/<str:segment>', views.RfmSegmentDetailView.as_view(),

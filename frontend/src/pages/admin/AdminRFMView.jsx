@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../auth/AuthContext';
 import { getRfmSummary, getRfmSegmentCustomers } from '../../services/api';
-import { ArrowLeft, Search, Loader2 } from 'lucide-react';
+import { ArrowLeft, Search, Loader2, X } from 'lucide-react';
 
 // Light palette kept only for the unchanged "View Customers" detail screen.
 const PALETTE = {
@@ -24,22 +25,22 @@ const DARK = {
   barSecondary: '#D8727E',
 };
 
-const STATUS_LABEL = {
-  never_run: 'Preparing…',
-  queued: 'Queued…',
-  running: 'Analyzing…',
-  completed: 'Up to date',
-  failed: 'Retry scheduled',
-};
-
 const formatMoney = (value) =>
   `₹${Number(value || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 
-const formatDateTime = (iso) => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+// Indian compact notation (K / L / Cr) for the big monetary totals; the exact
+// rupee amount stays available on hover via the tooltip.
+const trimZeros = (s) => (s.includes('.') ? s.replace(/\.?0+$/, '').replace(/\.$/, '') : s);
+const formatCompactMoney = (value) => {
+  const n = Number(value || 0);
+  const abs = Math.abs(n);
+  if (abs >= 1e7) return `₹${trimZeros((n / 1e7).toFixed(2))} Cr`;
+  if (abs >= 1e5) return `₹${trimZeros((n / 1e5).toFixed(2))} L`;
+  if (abs >= 1e3) return `₹${trimZeros((n / 1e3).toFixed(2))} K`;
+  return formatMoney(n);
 };
+const exactMoney = (value) =>
+  `₹${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const useDebounced = (value, delay = 350) => {
   const [debounced, setDebounced] = useState(value);
@@ -89,13 +90,14 @@ function Divider() {
 }
 
 // Compact label + medium value metric (no icon, no card decoration). The value
-// counts up on load unless the user prefers reduced motion.
-function DarkMetric({ label, value, format }) {
+// counts up on load unless the user prefers reduced motion. `title` shows the
+// exact amount behind a compact display.
+function DarkMetric({ label, value, format, title }) {
   const reduced = usePrefersReducedMotion();
   const animated = useCountUp(Number(value) || 0, { enabled: !reduced });
   const fmt = format || ((v) => Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
   return (
-    <div style={{ padding: '0.2rem 0' }}>
+    <div title={title} style={{ padding: '0.2rem 0' }}>
       <div style={{ fontSize: '0.72rem', color: DARK.label, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
       <div style={{ fontSize: '1.45rem', fontWeight: 650, color: DARK.value, lineHeight: 1.15, fontVariantNumeric: 'tabular-nums' }}>{fmt(animated)}</div>
     </div>
@@ -184,10 +186,6 @@ export default function AdminRFMView({ onBack }) {
     );
   }
 
-  if (activeSegment) {
-    return <SegmentDetail segment={activeSegment} token={token} onBack={() => setActiveSegment(null)} />;
-  }
-
   const totals = summary?.totals || {};
   const available = summary?.available;
   const buyers = Number(summary?.buyer_count || totals.total_eligible_buyers || 0) || 1;
@@ -229,15 +227,8 @@ export default function AdminRFMView({ onBack }) {
           )}
           <div>
             <h2 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.35rem', fontWeight: 650, color: DARK.value, margin: 0, letterSpacing: '-0.01em' }}>Customer RFM Analysis</h2>
-            <p style={{ margin: '0.2rem 0 0', fontSize: '0.82rem', color: DARK.label }}>
-              Actual customer data from Neon PostgreSQL
-              {available ? ` • ${STATUS_LABEL[summary.run_status?.status] || 'Up to date'}` : ' • Preparing…'}
-            </p>
           </div>
         </div>
-        {available && (
-          <span style={{ fontSize: '0.7rem', color: DARK.label }}>Updated {formatDateTime(summary.computed_at)}</span>
-        )}
       </div>
 
       <Divider />
@@ -253,7 +244,7 @@ export default function AdminRFMView({ onBack }) {
           <div className="rfm-metrics">
             <DarkMetric label="Total Customers" value={Number(totals.total_customers || 0)} />
             <DarkMetric label="Active Buyers" value={Number(totals.total_eligible_buyers || 0)} />
-            <DarkMetric label="Total Monetary Value" value={Number(totals.total_eligible_revenue || 0)} format={(v) => formatMoney(v)} />
+            <DarkMetric label="Total Monetary Value" value={Number(totals.total_eligible_revenue || 0)} format={(v) => formatCompactMoney(v)} title={exactMoney(totals.total_eligible_revenue)} />
             <DarkMetric label="Average Frequency" value={avgFrequency} format={(v) => v.toFixed(1)} />
           </div>
 
@@ -302,18 +293,26 @@ export default function AdminRFMView({ onBack }) {
           {error && <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#B3261E' }}>{error}</div>}
         </>
       )}
+
+      {/* Clicking any segment bar opens that segment's actual customers in a
+          full-screen modal (durable persisted RFM classification). */}
+      {activeSegment && (
+        <SegmentCustomersModal
+          segment={activeSegment}
+          token={token}
+          onClose={() => setActiveSegment(null)}
+        />
+      )}
     </div>
   );
 }
 
-// Only identity and the readable 1-5 scores are shown; raw metrics/percentiles
-// stay on the server (they still drive the segment but are not displayed).
+// Only identity is shown: the individual Recency / Frequency / Value scores are
+// no longer displayed per customer. The RFM calculation and the segment it
+// produces still run unchanged on the server (Segment column, filtering).
 const DETAIL_COLUMNS = [
   { key: 'customer_name', label: 'Customer', sortable: false },
   { key: 'customer_id', label: 'Customer ID', sortable: true },
-  { key: 'r_score', label: 'Recency', sortable: true },
-  { key: 'f_score', label: 'Frequency', sortable: true },
-  { key: 'm_score', label: 'Value', sortable: true },
 ];
 
 function SkeletonRows() {
@@ -326,7 +325,12 @@ function SkeletonRows() {
   );
 }
 
-function SegmentDetail({ segment, token, onBack }) {
+// Full-screen modal listing the ACTUAL customers of one RFM segment. The list
+// comes from the persisted RFM classification (rfm_customer_segments), so the
+// members are exactly the customers the segment bar was computed from. Shows
+// customer name + ID for identification, the total count, search and
+// pagination. Portal + high z-index keep the dashboard fully hidden behind it.
+function SegmentCustomersModal({ segment, token, onClose }) {
   const [rows, setRows] = useState([]);
   const [meta, setMeta] = useState({ count: 0, page: 1, total_pages: 1 });
   const [searchInput, setSearchInput] = useState('');
@@ -363,22 +367,19 @@ function SegmentDetail({ segment, token, onBack }) {
     else { setSort(field); setDir('asc'); }
   };
 
-  const columns = useMemo(
-    () => (segment === 'Never Purchased' ? DETAIL_COLUMNS.slice(0, 2) : DETAIL_COLUMNS),
-    [segment],
-  );
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      <style>{`@keyframes rfm-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} } .rfm-skeleton-row{ animation: rfm-shimmer 1.2s infinite; }`}</style>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flexWrap: 'wrap' }}>
-        <button type="button" onClick={onBack} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 10, padding: '0.5rem 0.8rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, color: PALETTE.muted }}>
-          <ArrowLeft size={16} /> Back
+  return createPortal(
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(31,25,27,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3000, padding: '1rem' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: '#fff', borderRadius: 18, maxWidth: 860, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: '1.5rem 1.6rem', position: 'relative' }}>
+        <style>{`@keyframes rfm-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} } .rfm-skeleton-row{ animation: rfm-shimmer 1.2s infinite; }`}</style>
+        <button type="button" onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: '1rem', right: '1rem', border: 'none', background: 'transparent', cursor: 'pointer', color: PALETTE.faint }}>
+          <X size={18} />
         </button>
-        <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.2rem', color: PALETTE.ink, margin: 0 }}>{segment}</h3>
-        <span style={{ color: PALETTE.faint, fontSize: '0.82rem' }}>{Number(meta.count).toLocaleString()} customers</span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8rem', flexWrap: 'wrap', paddingRight: '2rem' }}>
+          <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.2rem', color: PALETTE.ink, margin: 0 }}>{segment}</h3>
+          <span style={{ color: PALETTE.faint, fontSize: '0.82rem' }}>
+            {Number(meta.count).toLocaleString('en-IN')} customers in this segment
+          </span>
+          <div style={{ marginLeft: 'auto', position: 'relative' }}>
             <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: PALETTE.faint }} />
             <input
               value={searchInput}
@@ -388,51 +389,52 @@ function SegmentDetail({ segment, token, onBack }) {
             />
           </div>
         </div>
-      </div>
 
-      {error && <div style={{ color: '#B3261E', fontSize: '0.85rem' }}>{error}</div>}
+        {error && <div style={{ color: '#B3261E', fontSize: '0.85rem', margin: '0.8rem 0 0' }}>{error}</div>}
 
-      <div style={{ overflowX: 'auto', backgroundColor: '#fff', border: `1px solid ${PALETTE.border}`, borderRadius: 14 }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
-          <thead>
-            <tr style={{ backgroundColor: '#FBF5F4' }}>
-              {columns.map((col) => (
-                <th key={col.key} onClick={() => col.sortable && toggleSort(col.key)} style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700, cursor: col.sortable ? 'pointer' : 'default', whiteSpace: 'nowrap' }}>
-                  {col.label}{col.sortable && sort === col.key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}
-                </th>
-              ))}
-              <th style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700 }}>Segment</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && rows.length === 0 ? null : rows.map((r) => (
-              <tr key={r.customer_id} style={{ borderTop: `1px solid ${PALETTE.border}`, opacity: loading ? 0.55 : 1 }}>
-                {columns.map((col) => (
-                  <td key={col.key} style={{ padding: '0.65rem 0.9rem', color: PALETTE.ink, whiteSpace: 'nowrap' }}>
-                    {r[col.key] ?? '—'}
-                  </td>
+        <div style={{ overflowX: 'auto', backgroundColor: '#fff', border: `1px solid ${PALETTE.border}`, borderRadius: 14, marginTop: '1rem' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#FBF5F4' }}>
+                {DETAIL_COLUMNS.map((col) => (
+                  <th key={col.key} onClick={() => col.sortable && toggleSort(col.key)} style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700, cursor: col.sortable ? 'pointer' : 'default', whiteSpace: 'nowrap' }}>
+                    {col.label}{col.sortable && sort === col.key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </th>
                 ))}
-                <td style={{ padding: '0.65rem 0.9rem' }}>
-                  <span style={{ backgroundColor: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>{r.segment}</span>
-                  {(r.tags || []).map((t) => (
-                    <span key={t} style={{ marginLeft: 4, backgroundColor: 'rgba(184,80,94,0.10)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.7rem' }}>{t}</span>
-                  ))}
-                </td>
+                <th style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700 }}>Segment</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {loading && rows.length === 0 && <SkeletonRows />}
-        {!loading && rows.length === 0 && (
-          <div style={{ padding: '2rem', textAlign: 'center', color: PALETTE.faint, fontSize: '0.85rem' }}>No customers found.</div>
-        )}
-      </div>
+            </thead>
+            <tbody>
+              {loading && rows.length === 0 ? null : rows.map((r) => (
+                <tr key={r.customer_id} style={{ borderTop: `1px solid ${PALETTE.border}`, opacity: loading ? 0.55 : 1 }}>
+                  {DETAIL_COLUMNS.map((col) => (
+                    <td key={col.key} style={{ padding: '0.65rem 0.9rem', color: PALETTE.ink, whiteSpace: 'nowrap' }}>
+                      {r[col.key] ?? '—'}
+                    </td>
+                  ))}
+                  <td style={{ padding: '0.65rem 0.9rem' }}>
+                    <span style={{ backgroundColor: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>{r.segment}</span>
+                    {(r.tags || []).map((t) => (
+                      <span key={t} style={{ marginLeft: 4, backgroundColor: 'rgba(184,80,94,0.10)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.7rem' }}>{t}</span>
+                    ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {loading && rows.length === 0 && <SkeletonRows />}
+          {!loading && rows.length === 0 && (
+            <div style={{ padding: '2rem', textAlign: 'center', color: PALETTE.faint, fontSize: '0.85rem' }}>No customers found.</div>
+          )}
+        </div>
 
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.6rem' }}>
-        <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={meta.page <= 1} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page <= 1 ? 'not-allowed' : 'pointer', opacity: meta.page <= 1 ? 0.4 : 1 }}>Previous</button>
-        <span style={{ color: PALETTE.muted, fontSize: '0.85rem' }}>Page {meta.page} of {meta.total_pages}</span>
-        <button type="button" onClick={() => setPage((p) => Math.min(meta.total_pages, p + 1))} disabled={meta.page >= meta.total_pages} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page >= meta.total_pages ? 'not-allowed' : 'pointer', opacity: meta.page >= meta.total_pages ? 0.4 : 1 }}>Next</button>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.6rem', marginTop: '0.8rem' }}>
+          <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={meta.page <= 1} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page <= 1 ? 'not-allowed' : 'pointer', opacity: meta.page <= 1 ? 0.4 : 1 }}>Previous</button>
+          <span style={{ color: PALETTE.muted, fontSize: '0.85rem' }}>Page {meta.page} of {meta.total_pages}</span>
+          <button type="button" onClick={() => setPage((p) => Math.min(meta.total_pages, p + 1))} disabled={meta.page >= meta.total_pages} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page >= meta.total_pages ? 'not-allowed' : 'pointer', opacity: meta.page >= meta.total_pages ? 0.4 : 1 }}>Next</button>
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

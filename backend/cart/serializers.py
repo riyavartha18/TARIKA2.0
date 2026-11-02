@@ -26,7 +26,7 @@ def _stock_of(product):
 
 
 def _unit_price(product):
-    """Current selling price: `discount_price`, else the parsed list price."""
+    """Final discounted selling price, else the original price."""
     price = getattr(product, 'selling_price', None)
     if price is None:
         price = getattr(product, 'base_price', None)
@@ -45,6 +45,8 @@ def build_product_payload(product):
             'base_price': 0,
             'selling_price': 0,
             'sale_price': 0,
+            'discount_price': 0,
+            'discount_percentage': 0,
             'primary_image': None,
             'image': None,
             'link': None,
@@ -65,11 +67,14 @@ def build_product_payload(product):
         'category_id': category_id,
         'category_name': category_name or None,
         'sub_category': product.sub_category,
-        # `base_price` is the list price parsed from the TEXT actual_price.
+        # `base_price` is the ORIGINAL price (`initial_price` column).
         'base_price': product.base_price if product.base_price is not None else unit_price,
         'selling_price': unit_price,
         # Alias kept for the shared pricing helper.
         'sale_price': unit_price,
+        # Discount AMOUNT in currency + derived percentage (never stored as %).
+        'discount_price': product.discount_amount,
+        'discount_percentage': product.discount_percentage,
         'primary_image': image,
         'image': image,
         'link': product.link,

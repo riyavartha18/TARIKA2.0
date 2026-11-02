@@ -85,7 +85,9 @@ export default function ProductListingPage({ type }) {
     loadCategories();
   }, []);
 
-  const fetchProductPage = useCallback((pageNum) => {
+  // Build the server query for one page (kept separate from the fetch so the
+  // effect below can compare an actual query signature, not callback identity).
+  const buildListParams = useCallback((pageNum) => {
     const params = {
       page_size: 20,
       page: pageNum,
@@ -95,13 +97,26 @@ export default function ProductListingPage({ type }) {
     if (currentSearch) params.search = currentSearch;
     if (onlyInStock) params.in_stock = 'true';
     if (maxPrice) params.max_price = maxPrice;
+    return params;
+  }, [selectedCategory, currentSearch, onlyInStock, maxPrice, selectedSort]);
+
+  const fetchProductPage = useCallback((pageNum) => {
+    const params = buildListParams(pageNum);
     if (sectionType === 'new-in') return getNewArrivals(20, params);
     if (sectionType === 'trending') return getTrending(20, params);
     if (sectionType === 'sale') return getSale(20, params);
     return getProducts(params);
-  }, [selectedCategory, currentSearch, onlyInStock, maxPrice, selectedSort, sectionType]);
+  }, [buildListParams, sectionType]);
+
+  // Refetch page one only when the query genuinely changes: appended
+  // "Load More" pages must survive anything that re-fires this effect with
+  // identical filters (a recreated callback, unrelated state churn). Only a
+  // real search/filter/sort change — or a fresh mount — resets to 20 records.
+  const lastQuerySig = useRef(null);
 
   useEffect(() => {
+    const sig = JSON.stringify({ sectionType, params: buildListParams(1) });
+    if (lastQuerySig.current === sig) return;
     const seq = ++reqSeq.current;
     let active = true;
     async function loadData() {
@@ -112,16 +127,19 @@ export default function ProductListingPage({ type }) {
         const res = await fetchProductPage(1);
         if (!active || seq !== reqSeq.current) return;
         if (res.success) {
+          lastQuerySig.current = sig;
           setProducts(res.products || []);
           setPage(1);
           setHasMore(Boolean(res.hasNext));
         } else {
+          lastQuerySig.current = null; // allow a retry with the same filters
           setProducts([]);
           setHasMore(false);
           setProductsError(res.error || 'Failed to load products.');
         }
       } catch (err) {
         if (active && seq === reqSeq.current) {
+          lastQuerySig.current = null;
           console.error('Error loading products', err);
           setProductsError('Unable to load products. Please try again.');
         }
@@ -134,7 +152,7 @@ export default function ProductListingPage({ type }) {
     return () => {
       active = false;
     };
-  }, [fetchProductPage]);
+  }, [fetchProductPage, buildListParams, sectionType]);
 
   const handleLoadMore = async () => {
     if (loadingMore || !hasMore) return;

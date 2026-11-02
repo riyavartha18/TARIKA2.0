@@ -18,13 +18,14 @@ from rest_framework.response import Response
 from rest_framework.serializers import ValidationError as DRFValidationError
 
 from accounts.permissions import IsAdmin, IsAuthenticatedUser, IsCustomer
+from accounts.models import Customer
 from cart.models import CartItem
 from cart.services import CustomerResolver
 from catalog.pricing import get_product_selling_price_map
 
 from . import (cache_manager, campaign_audience, coupon_validation, engine,
-               personalization, queries, utils)
-from .models import Campaign, CampaignStatus
+               personalization, queries, segment_store, utils)
+from .models import Campaign, CampaignStatus, CustomerSegment
 from .serializers import CampaignSerializer
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,29 @@ SORTABLE_FIELDS = {
     'customer_id', 'recency_days', 'frequency', 'monetary',
     'r_percentile', 'f_percentile', 'm_percentile',
     'r_score', 'f_score', 'm_score',
+}
+
+# Sortable columns of the persisted RFM *results* table (physical model fields,
+# each backed by an index or the primary key so filter + order stays a scan).
+RESULTS_SORT_FIELDS = {
+    'customer_id': 'customer_id',
+    'recency': 'recency',
+    'frequency': 'frequency',
+    'monetary': 'monetary',
+    'r_score': 'r_score',
+    'f_score': 'f_score',
+    'm_score': 'm_score',
+    'rfm_score': 'rfm_score',
+    'segment': 'segment',
+}
+
+# Frontend drill-down sort keys mapped onto persisted result columns (the table
+# stores the 1-5 band scores, not raw percentiles; the detail table only ever
+# sorts by these stored fields).
+SEGMENT_SORT_FIELDS = {
+    'customer_id': 'customer_id', 'recency': 'recency', 'recency_days': 'recency',
+    'frequency': 'frequency', 'monetary': 'monetary',
+    'r_score': 'r_score', 'f_score': 'f_score', 'm_score': 'm_score',
 }
 
 
@@ -53,6 +77,46 @@ def _parse_pagination(request):
         page, page_size = 1, 25
     page_size = min(max(page_size, 1), 200)
     return page, page_size
+
+
+def _segment_search_q(search):
+    """Q matching a customer id, and (best effort) a real name via the mapping.
+
+    `public.customers` is an unmanaged dataset table, so the name branch is
+    guarded: on a backend without it the search simply falls back to ids.
+    """
+    from django.db.models import Q
+    q = Q(customer_id__icontains=search)
+    try:
+        q |= Q(customer_id__in=Customer.objects.filter(
+            customer_name__icontains=search).values('customer_id'))
+    except Exception:  # noqa: BLE001 - name search is a non-critical enhancement
+        pass
+    return q
+
+
+def _names_for(customer_ids):
+    """{customer_id: customer_name} for one page (single bulk query)."""
+    if not customer_ids:
+        return {}
+    try:
+        return {c.customer_id: c.customer_name
+                for c in Customer.objects.filter(customer_id__in=customer_ids)}
+    except Exception:  # noqa: BLE001 - names are display-only
+        return {}
+
+
+def _segment_row(row, names):
+    """Project a persisted CustomerSegment into the drill-down table shape."""
+    return {
+        'customer_id': row.customer_id,
+        'customer_name': names.get(row.customer_id),
+        'segment': row.segment,
+        'tags': row.tags or [],
+        'r_score': row.r_score,
+        'f_score': row.f_score,
+        'm_score': row.m_score,
+    }
 
 
 class AdminRFMView(APIView):
@@ -88,16 +152,20 @@ class RfmRunView(AdminRFMView):
 class RfmSummaryView(AdminRFMView):
     """GET /api/analytics/rfm/summary -> aggregate KPIs and segment cards.
 
-    Reading this endpoint also drives the automatic refresh (Section 2): a
-    background run is started when no analysis exists or the latest one is
-    older than the threshold, but the response always reflects the latest
-    successfully completed snapshot (never a partial run).
+    Served from the *persisted* RFM result table via SQL aggregation, so the
+    page shows the latest completed analysis immediately - even right after a
+    restart, and without waiting for (or triggering inline) the expensive order
+    scan. A background refresh keeps the table current (Section 2) and is
+    nudged by `ensure_latest`, but the response never blocks on it: a run in
+    flight simply means `refreshing=True` while the last completed results are
+    shown. The assembled aggregate is cached per analysis version, so repeated
+    opens are a pure in-process cache read.
     """
 
     def get(self, request):
         freshness = engine.ensure_latest()
-        meta = cache_manager.get_meta()
-        if not meta:
+        state = segment_store.get_state()
+        if state is None:
             return Response({
                 'available': False,
                 'refreshing': True,
@@ -105,48 +173,88 @@ class RfmSummaryView(AdminRFMView):
                 'message': 'Preparing the RFM analysis. This runs automatically in the background.',
             }, status=status.HTTP_200_OK)
 
-        counts = meta['segment_counts']
-        totals = meta['totals']
+        version = state.version
+        payload = cache_manager.get_dashboard_totals(version)
+        if payload is None:
+            try:
+                totals, distribution = queries.fetch_dashboard_totals()
+                total_customers = queries.fetch_total_customers()
+            except DatabaseError as exc:
+                return _safe_db_error(request, exc)
+            payload = {
+                'totals': totals,
+                'distribution': distribution,
+                'total_customers': total_customers,
+            }
+            cache_manager.set_dashboard_totals(version, payload)
+
+        totals = payload['totals']
+        buyer_count = totals['buyer_count'] or 0
+        never_purchased = max(payload['total_customers'] - buyer_count, 0)
+        counts = {row['segment']: row['count'] for row in payload['distribution']}
+
         segment_cards = [
             {'segment': label, 'count': counts.get(label, 0)}
             for label in utils.PRIMARY_SEGMENTS
         ]
-        segment_cards.append({
-            'segment': utils.SEGMENT_NEVER_PURCHASED,
-            'count': totals.get('never_purchased_customers', 0),
-        })
+        segment_cards.append({'segment': utils.SEGMENT_NEVER_PURCHASED,
+                              'count': never_purchased})
 
         return Response({
             'available': True,
-            'version': meta['version'],
-            'analysis_date': meta['analysis_date'],
-            'computed_at': meta.get('computed_at'),
+            'version': version,
+            'analysis_date': (state.analysis_date.isoformat()
+                              if state.analysis_date else None),
+            'computed_at': state.completed_at.isoformat(),
             'refreshing': freshness['refreshing'],
             'run_status': cache_manager.get_run_status(),
-            'totals': totals,
-            'buyer_count': meta['buyer_count'],
-            'big_spender_count': meta['big_spender_count'],
+            'source': 'persisted_results',
+            'totals': {
+                'total_customers': payload['total_customers'],
+                'total_eligible_buyers': buyer_count,
+                'never_purchased_customers': never_purchased,
+                'total_eligible_orders': totals['total_orders'],
+                'total_eligible_revenue': (round(float(totals['total_revenue'] or 0), 2)),
+            },
+            'buyer_count': buyer_count,
+            'big_spender_count': totals['big_spender_count'] or 0,
             'segments': segment_cards,
-            'compute_ms': meta.get('compute_ms'),
         }, status=status.HTTP_200_OK)
 
 
 class RfmSegmentsView(AdminRFMView):
-    """GET /api/analytics/rfm/segments -> segment counts only."""
+    """GET /api/analytics/rfm/segments -> segment counts only.
+
+    Same persisted-table aggregation as the summary (shares the cached payload),
+    so it never triggers a recalculation and stays correct after a restart.
+    """
 
     def get(self, request):
-        meta = cache_manager.get_meta()
-        if not meta:
+        state = segment_store.get_state()
+        if state is None:
             return Response({'available': False, 'segments': []},
                             status=status.HTTP_200_OK)
-        counts = meta['segment_counts']
+
+        payload = cache_manager.get_dashboard_totals(state.version)
+        if payload is None:
+            try:
+                totals, distribution = queries.fetch_dashboard_totals()
+                total_customers = queries.fetch_total_customers()
+            except DatabaseError as exc:
+                return _safe_db_error(request, exc)
+            payload = {'totals': totals, 'distribution': distribution,
+                       'total_customers': total_customers}
+            cache_manager.set_dashboard_totals(state.version, payload)
+
+        counts = {row['segment']: row['count'] for row in payload['distribution']}
         return Response({
             'available': True,
-            'version': meta['version'],
+            'version': state.version,
             'segments': [{'segment': label, 'count': counts.get(label, 0)}
                          for label in utils.PRIMARY_SEGMENTS],
-            'never_purchased': meta['totals'].get('never_purchased_customers', 0),
-            'big_spender_count': meta['big_spender_count'],
+            'never_purchased': max(payload['total_customers']
+                                   - (payload['totals']['buyer_count'] or 0), 0),
+            'big_spender_count': payload['totals']['big_spender_count'] or 0,
         }, status=status.HTTP_200_OK)
 
 
@@ -165,58 +273,53 @@ class RfmSegmentDetailView(AdminRFMView):
         segment = (segment or '').strip()
 
         page, page_size = _parse_pagination(request)
-        search = (request.query_params.get('search') or '').strip().lower()
+        search = (request.query_params.get('search') or '').strip()
         sort = (request.query_params.get('sort') or 'customer_id').lower()
         direction = (request.query_params.get('dir') or 'asc').lower()
-        if sort not in SORTABLE_FIELDS:
-            sort = 'customer_id'
+        order_col = SEGMENT_SORT_FIELDS.get(sort, 'customer_id')
+
+        state = segment_store.get_state()
+        version = state.version if state else None
+
+        if segment == utils.SEGMENT_NEVER_PURCHASED:
+            return self._never_purchased_page(request, page, page_size, search, version)
 
         # Big Spenders is a secondary tag, not a primary segment: its list is
         # the buyers who carry the tag, regardless of their primary segment.
         if segment == utils.TAG_BIG_SPENDER:
-            rows, version = cache_manager.get_segment_base(segment, sort, direction)
-            if rows is None:
-                return Response({'available': False, 'results': [], 'count': 0},
-                                status=status.HTTP_200_OK)
-            return self._respond(segment, rows, page, page_size, search, version)
-
-        if segment not in utils.ALL_SEGMENTS:
+            queryset = CustomerSegment.objects.filter(
+                tags__contains=[utils.TAG_BIG_SPENDER])
+        elif segment in utils.ALL_SEGMENTS:
+            queryset = CustomerSegment.objects.filter(segment=segment)
+        else:
             return Response({'detail': 'Unknown segment.'},
                             status=status.HTTP_404_NOT_FOUND)
 
-        if segment == utils.SEGMENT_NEVER_PURCHASED:
-            return self._never_purchased_page(request, page, page_size, search)
-
-        rows, version = cache_manager.get_segment_base(segment, sort, direction)
-        if rows is None:
-            return Response({'available': False, 'results': [], 'count': 0},
-                            status=status.HTTP_200_OK)
-        return self._respond(segment, rows, page, page_size, search, version)
-
-    def _respond(self, label, base_rows, page, page_size, search, version):
-        rows = base_rows
         if search:
-            rows = [
-                r for r in base_rows
-                if search in str(r['customer_id']).lower()
-                or search in str(r.get('customer_name') or '').lower()
-            ]
-        total = len(rows)
+            queryset = queryset.filter(_segment_search_q(search))
+        ordering = f'-{order_col}' if direction == 'desc' else order_col
+        if order_col != 'customer_id':
+            queryset = queryset.order_by(ordering, 'customer_id')
+        else:
+            queryset = queryset.order_by(ordering)
+
+        total = queryset.count()
         start = (page - 1) * page_size
-        page_rows = [cache_manager.project_row(r) for r in rows[start:start + page_size]]
+        rows = list(queryset[start:start + page_size])
+        names = _names_for([r.customer_id for r in rows])
         return Response({
-            'available': True,
-            'segment': label,
+            'available': state is not None,
+            'segment': segment,
             'version': version,
             'count': total,
             'page': page,
             'page_size': page_size,
             'total_pages': (total + page_size - 1) // page_size if page_size else 1,
-            'results': page_rows,
+            'results': [_segment_row(r, names) for r in rows],
         }, status=status.HTTP_200_OK)
 
-    def _never_purchased_page(self, request, page, page_size, search):
-        version = cache_manager.get_latest_version()
+    def _never_purchased_page(self, request, page, page_size, search, version=None):
+        version = version if version is not None else cache_manager.get_latest_version()
         rows = cache_manager.get_never_purchased(version)
         if rows is None:
             try:
@@ -254,6 +357,145 @@ class RfmSegmentDetailView(AdminRFMView):
             'total_pages': (total + page_size - 1) // page_size if page_size else 1,
             'results': rows[start:start + page_size],
         }, status=status.HTTP_200_OK)
+
+
+class RfmResultsView(AdminRFMView):
+    """GET /api/analytics/rfm/results -> paginated latest persisted RFM results.
+
+    Read straight from the durable result table (`rfm_customer_segments`), not
+    the cache snapshot: it is server-side paginated, filtered by segment and
+    searched by customer id, and sorted on indexed columns - so the browser
+    never receives all ~100k rows and no order-table scan happens per request.
+    Each row is the customer's latest successfully calculated result.
+    """
+
+    def get(self, request):
+        page, page_size = _parse_pagination(request)
+        segment = (request.query_params.get('segment') or '').strip()
+        search = (request.query_params.get('search') or '').strip()
+        sort = (request.query_params.get('sort') or 'customer_id').lower()
+        direction = (request.query_params.get('dir') or 'asc').lower()
+        order_field = RESULTS_SORT_FIELDS.get(sort, 'customer_id')
+        ordering = f'-{order_field}' if direction == 'desc' else order_field
+
+        queryset = CustomerSegment.objects.all()
+        if segment and segment != 'ALL':
+            queryset = queryset.filter(segment=segment)
+        if search:
+            queryset = queryset.filter(customer_id__icontains=search)
+        # Stable tie-break so paging never repeats or skips a row.
+        if order_field != 'customer_id':
+            queryset = queryset.order_by(ordering, 'customer_id')
+        else:
+            queryset = queryset.order_by(ordering)
+
+        total = queryset.count()
+        start = (page - 1) * page_size
+        rows = [_project_result(r) for r in queryset[start:start + page_size]]
+
+        state = segment_store.get_state()
+        return Response({
+            'available': state is not None,
+            'version': state.version if state else None,
+            'analysis_date': (state.analysis_date.isoformat()
+                              if state and state.analysis_date else None),
+            'calculated_at': (state.completed_at.isoformat()
+                              if state else None),
+            'buyer_count': state.buyer_count if state else 0,
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if page_size else 1,
+            'results': rows,
+        }, status=status.HTTP_200_OK)
+
+
+def _project_result(row):
+    """Serialize one persisted RFM result row for the results endpoint."""
+    return {
+        'customer_id': row.customer_id,
+        'recency': row.recency,
+        'frequency': row.frequency,
+        'monetary': (float(row.monetary) if row.monetary is not None else None),
+        'r_score': row.r_score,
+        'f_score': row.f_score,
+        'm_score': row.m_score,
+        'rfm_score': row.rfm_score,
+        'segment': row.segment,
+        'tags': row.tags or [],
+        'first_purchase_date': (row.first_purchase_date.isoformat()
+                                if row.first_purchase_date else None),
+        'last_purchase_date': (row.last_purchase_date.isoformat()
+                               if row.last_purchase_date else None),
+        'calculation_version': row.version,
+        'calculated_at': (row.computed_at.isoformat() if row.computed_at else None),
+        'updated_at': (row.updated_at.isoformat() if row.updated_at else None),
+    }
+
+
+class RfmRecalculateView(AdminRFMView):
+    """POST /api/analytics/rfm/recalculate -> admin-only FULL refresh.
+
+    Runs the complete pipeline over the live order history and UPSERTs every
+    eligible customer's result, updating the calculation state only after the
+    whole run commits (a second in-flight request is refused with 409). Use it
+    for a manual refresh, a methodology/version change, or a reconciliation.
+    """
+
+    def post(self, request):
+        accepted, run_status = engine.start_background_run(full=True)
+        if not accepted:
+            return Response({
+                'message': 'An RFM analysis is already running.',
+                'status': run_status,
+            }, status=status.HTTP_409_CONFLICT)
+        return Response({
+            'message': 'Full RFM recalculation started.',
+            'mode': 'full',
+            'status': run_status,
+        }, status=status.HTTP_202_ACCEPTED)
+
+    def get(self, request):
+        return Response({'status': cache_manager.get_run_status()},
+                        status=status.HTTP_200_OK)
+
+
+class RfmIncrementalRefreshView(AdminRFMView):
+    """POST /api/analytics/rfm/incremental-refresh -> synchronize changed data.
+
+    Recalculates and re-persists only affected customers: it first compares a cheap
+    fingerprint of the eligible order data against the last completed run. When
+    nothing changed it is an immediate no-op (200 'up_to_date'); when it did, a
+    refresh is scheduled whose conditional UPSERT inserts new buyers and updates
+    only buyers whose metrics/segment/monetary actually changed (unchanged rows
+    are left untouched). A full scan is still required to keep the population-
+    wide percentile scores correct - a documented consequence of quantile
+    scoring, so this endpoint is the admin/internal synchronization hook.
+    """
+
+    def post(self, request):
+        if not engine.source_changed_since_last_run():
+            return Response({
+                'message': 'No source changes since the last completed analysis.',
+                'status': 'up_to_date',
+                'version': segment_store.latest_version(),
+            }, status=status.HTTP_200_OK)
+
+        accepted, run_status = engine.start_background_run(full=False)
+        if not accepted:
+            return Response({
+                'message': 'An RFM analysis is already running.',
+                'status': run_status,
+            }, status=status.HTTP_409_CONFLICT)
+        return Response({
+            'message': 'Incremental RFM refresh started.',
+            'mode': 'incremental',
+            'status': run_status,
+        }, status=status.HTTP_202_ACCEPTED)
+
+    def get(self, request):
+        return Response({'status': cache_manager.get_run_status()},
+                        status=status.HTTP_200_OK)
 
 
 class CampaignListCreateView(AdminRFMView):

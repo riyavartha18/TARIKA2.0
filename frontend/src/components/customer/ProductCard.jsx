@@ -1,7 +1,7 @@
 import React, { useState, memo } from 'react';
 import { Heart, ShoppingBag, Zap, Check, Eye } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
-import { getProductPricing } from '../../utils/pricing';
+import { getProductPricing, formatDiscountPercentage } from '../../utils/pricing';
 
 function ProductCard({ product, onCardClick }) {
   const { isWishlisted, toggleWishlist, addToBag, openProductDetail } = useCustomer();
@@ -13,7 +13,7 @@ function ProductCard({ product, onCardClick }) {
   const wishlisted = isWishlisted(productId);
   const productName = product.product_name || product.name || 'Artisanal Garment';
 
-  const { basePrice, currentPrice, discountAmount, isOnSale } = getProductPricing(product);
+  const { basePrice, currentPrice, discountAmount, discountPercentage, isOnSale } = getProductPricing(product);
 
   // Club special price (5% lower than current price for VIP feel)
   const clubPrice = Math.round(currentPrice * 0.95);
@@ -76,7 +76,7 @@ function ProductCard({ product, onCardClick }) {
         {/* Sale Discount Badge */}
         {isOnSale && discountAmount > 0 && (
           <span className="product-badge-sale">
-            ₹{Math.round(discountAmount).toLocaleString('en-IN')} OFF
+            {formatDiscountPercentage(discountPercentage)} OFF
           </span>
         )}
 
