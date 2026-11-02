@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import demandForecastingVisual from '../../assets/demand_forecasting_visual.png';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -41,6 +42,7 @@ import ClvDashboard from './AdminClvView';
 
 export default function AdminAnalyticsView() {
   const { token: authContextToken } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
@@ -197,6 +199,22 @@ export default function AdminAnalyticsView() {
     if (categoriesList.length === 0) {
       fetchCategories();
     }
+  };
+
+  // Deep link used by the Admin Dashboard "View More":
+  // /admin/analysis?view=demand-forecasting opens this very module instead of the
+  // hub, so Demand Forecasting stays a single page with a single route. Leaving
+  // it clears the parameter again so the URL keeps describing what is on screen.
+  useEffect(() => {
+    if (searchParams.get('view') === 'demand-forecasting') {
+      handleOpenDetailView();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleBackToHub = () => {
+    setActiveView('overview');
+    if (searchParams.get('view')) setSearchParams({}, { replace: true });
   };
 
   const handleOpenSlowInventoryView = () => {
@@ -550,7 +568,7 @@ export default function AdminAnalyticsView() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
               <button
-                onClick={() => setActiveView('overview')}
+                onClick={handleBackToHub}
                 className="tarika-btn-outline"
                 style={{ padding: '0.55rem 1.1rem', fontSize: '0.82rem' }}
               >
@@ -845,7 +863,7 @@ export default function AdminAnalyticsView() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
               <button
-                onClick={() => setActiveView('overview')}
+                onClick={handleBackToHub}
                 className="tarika-btn-outline"
                 style={{ padding: '0.55rem 1.1rem', fontSize: '0.82rem' }}
               >

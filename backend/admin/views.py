@@ -1,11 +1,13 @@
 from django.db.models import Sum, Count, Q
 from django.db.models.functions import Coalesce
 from django.db import connection, transaction
+from django.core.cache import cache
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
+from admin import performance_map
 from admin.serializers import (
     AdminStaffCreateSerializer,
     AdminStaffUpdateSerializer,
@@ -19,7 +21,7 @@ import datetime
 
 from accounts.models import Employee, Customer, Role, Warehouse, AppUser
 from catalog.models import Product, Inventory, Category, Manufacturer
-from catalog.cache import bump_catalog_version
+from catalog.cache import bump_catalog_version, get_catalog_version
 from catalog.serializers import CATEGORY_IMAGE_MAPPING
 from warehouse.models import Order, Delivery, Return
 from warehouse.services import WarehouseService
@@ -205,6 +207,42 @@ class AdminDashboardStatsView(APIView):
                 'from public.products.'
             ),
         }, status=status.HTTP_200_OK)
+
+
+class AdminProductPerformanceMapView(APIView):
+    """
+    Admin-only Product Performance Map for the dashboard.
+
+    Plots every real ``products.sub_category`` of the active catalog as a point
+    on a 2x2 map: X = delivered units sold, Y = delivered revenue, bubble size =
+    product count. The quadrant cut-offs are the medians of the current
+    per-subcategory totals (see ``admin/performance_map.py`` for the metric and
+    classification rules), so no threshold or figure is ever hardcoded, and
+    returned / in-transit orders are never counted as sales.
+
+    Read-only: nothing here writes to the database. The aggregate scans the
+    million-row ``orders`` table, so it is cached under the catalog version that
+    every checkout and product mutation already bumps, with a TTL backstop.
+    """
+    permission_classes = [IsAuthenticatedUser, IsAdmin]
+
+    CACHE_TTL_SECONDS = 900
+
+    def get(self, request):
+        cache_key = f'admin:performance_map:v{get_catalog_version()}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            payload = dict(cached)
+            payload['cached'] = True
+            return Response(payload, status=status.HTTP_200_OK)
+
+        payload = performance_map.build_performance_map(
+            performance_map.load_subcategory_rows()
+        )
+        payload['source'] = performance_map.build_source_meta()
+        payload['cached'] = False
+        cache.set(cache_key, payload, self.CACHE_TTL_SECONDS)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class AdminStaffListView(APIView):

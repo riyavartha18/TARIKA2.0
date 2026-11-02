@@ -11,6 +11,10 @@ import AdminSectionPlaceholder from './AdminSectionPlaceholder';
 import '../../styles/tarika.css';
 import '../../styles/admin-portal.css';
 
+// /admin/analysis is the alias the dashboard's "View More" link uses for the
+// Admin Analysis modules, so the sidebar and header both describe it as such.
+const SECTION_ALIASES = { analysis: 'analytics' };
+
 export default function AdminPortal() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -22,7 +26,8 @@ export default function AdminPortal() {
 
   // Determine active section from current URL (e.g. /admin/staff -> 'staff')
   const pathSegments = location.pathname.split('/').filter(Boolean);
-  const currentSubPath = pathSegments[1] || 'dashboard';
+  const rawSubPath = pathSegments[1] || 'dashboard';
+  const currentSubPath = SECTION_ALIASES[rawSubPath] || rawSubPath;
   const activeSection = ADMIN_NAV_ITEMS.some((item) => item.id === currentSubPath)
     ? currentSubPath
     : 'dashboard';

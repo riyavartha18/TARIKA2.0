@@ -1059,6 +1059,27 @@ export async function getAdminDashboardStats(token) {
 }
 
 /**
+ * Fetch the Product Performance Map: every real products.sub_category of the
+ * active catalog, measured on delivered sales/revenue and classified into the
+ * four performance quadrants by the backend (admin/performance_map.py).
+ */
+export async function getAdminProductPerformance(token) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/admin/product-performance/`, { headers });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to load the product performance map.' };
+    }
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching the product performance map.' };
+  }
+}
+
+/**
  * Fetch the aggregated sales history (units sold over time) for ONE product,
  * from real delivered orders. granularity: 'day' | 'week' | 'month'.
  */
