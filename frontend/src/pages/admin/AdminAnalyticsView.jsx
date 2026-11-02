@@ -70,7 +70,6 @@ export default function AdminAnalyticsView() {
   const [slowData, setSlowData] = useState(null);
   const [slowSearchQuery, setSlowSearchQuery] = useState('');
   const [slowStatusFilter, setSlowStatusFilter] = useState('ALL');
-  const [slowWarehouseFilter, setSlowWarehouseFilter] = useState('ALL');
 
   // Product detail drawer (image click) + sales-history graph
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -227,26 +226,28 @@ export default function AdminAnalyticsView() {
   // === Slow-Moving Inventory Filtering (client-side) ===
   const slowItems = slowData?.items || [];
   const slowSummary = slowData?.summary || {};
-  const slowWarehouses = slowData?.warehouses || [];
 
   const filteredSlowItems = slowItems.filter((item) => {
     const matchesSearch =
-      item.product_name.toLowerCase().includes(slowSearchQuery.toLowerCase()) ||
-      item.category_name.toLowerCase().includes(slowSearchQuery.toLowerCase());
+      (item.product_name || '').toLowerCase().includes(slowSearchQuery.toLowerCase()) ||
+      (item.category_name || '').toLowerCase().includes(slowSearchQuery.toLowerCase());
     const matchesStatus = slowStatusFilter === 'ALL' || item.movement_status === slowStatusFilter;
-    const matchesWarehouse = slowWarehouseFilter === 'ALL' || String(item.warehouse_id) === slowWarehouseFilter;
-    return matchesSearch && matchesStatus && matchesWarehouse;
+    return matchesSearch && matchesStatus;
   });
 
-  // Movement status badge style helper
+  // Movement status badge style helper — 4 tiers
   const getStatusStyle = (status) => {
     switch (status) {
-      case 'VERY SLOW':
-        return { backgroundColor: '#FEF2F2', color: '#DC2626', borderColor: '#FCA5A5' };
+      case 'FAST MOVING':
+        return { backgroundColor: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' };
+      case 'NORMAL':
+        return { backgroundColor: '#EFF6FF', color: '#2563EB', borderColor: '#BFDBFE' };
       case 'SLOW':
         return { backgroundColor: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' };
-      case 'NORMAL':
-        return { backgroundColor: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' };
+      case 'VERY SLOW':
+        return { backgroundColor: '#FEF2F2', color: '#DC2626', borderColor: '#FCA5A5' };
+      case 'OUT OF STOCK':
+        return { backgroundColor: '#F5F3FF', color: '#7C3AED', borderColor: '#DDD6FE' };
       default:
         return { backgroundColor: '#F3F4F6', color: '#6B7280', borderColor: '#D1D5DB' };
     }
@@ -312,7 +313,6 @@ export default function AdminAnalyticsView() {
                   </span>
                 </div>
               </div>
-
               <span
                 style={{
                   display: 'inline-flex',
@@ -332,8 +332,6 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-           
-
             {/* Demand Forecasting Visual Banner */}
             <div style={{ marginBottom: '2rem', borderRadius: '14px', overflow: 'hidden', background: '#FAF7F5', border: '1px solid rgba(216, 114, 126, 0.1)' }}>
               <img
@@ -348,7 +346,6 @@ export default function AdminAnalyticsView() {
               <span style={{ fontSize: '0.9rem', color: '#6B5E63' }}>
                 Open product-level demand predictions
               </span>
-
               <button
                 style={{
                   background: 'linear-gradient(135deg, #B8505E 0%, #8E3642 100%)',
@@ -410,14 +407,13 @@ export default function AdminAnalyticsView() {
                 </div>
                 <div>
                   <h2 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.6rem', fontWeight: 700, color: '#1F191B', margin: 0, lineHeight: 1.2 }}>
-                    Slow-Moving Inventory
+                    Inventory Velocity
                   </h2>
                   <span style={{ fontSize: '0.75rem', color: '#9E8F94', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    FEATURE #2 &bull; INVENTORY VELOCITY ANALYSIS
+                    FEATURE #2 &bull; MOVEMENT ANALYSIS
                   </span>
                 </div>
               </div>
-
               <span
                 style={{
                   display: 'inline-flex',
@@ -437,42 +433,49 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-
-            {/* Visual Banner for Slow-Moving Inventory */}
+            {/* Visual Banner — 4 movement tiers */}
             <div style={{
               marginBottom: '2rem',
               borderRadius: '14px',
               overflow: 'hidden',
-              background: 'linear-gradient(135deg, #FEF3C7 0%, #FDE68A 40%, #FBBF24 100%)',
-              border: '1px solid rgba(216, 114, 126, 0.1)',
-              padding: '2rem',
+              background: 'linear-gradient(135deg, #ECFDF5 0%, #EFF6FF 35%, #FFFBEB 65%, #FEF2F2 100%)',
+              border: '1px solid rgba(0, 0, 0, 0.06)',
+              padding: '1.75rem',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: '2rem',
+              gap: '1.5rem',
               flexWrap: 'wrap'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <Archive size={28} style={{ color: '#92400E' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Flame size={24} style={{ color: '#059669' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#92400E' }}>Very Slow</div>
-                  <div style={{ fontSize: '0.8rem', color: '#78350F' }}>0 sales or 180+ days stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#059669' }}>Fast Moving</div>
+                  <div style={{ fontSize: '0.76rem', color: '#065F46' }}>≤ 15 days</div>
                 </div>
               </div>
-              <div style={{ width: '1px', height: '40px', background: 'rgba(146, 64, 14, 0.2)' }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <TrendingDown size={28} style={{ color: '#B45309' }} />
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Box size={24} style={{ color: '#2563EB' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#92400E' }}>Slow</div>
-                  <div style={{ fontSize: '0.8rem', color: '#78350F' }}>60–180 days of stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#2563EB' }}>Normal</div>
+                  <div style={{ fontSize: '0.76rem', color: '#1E40AF' }}>16–60 days</div>
                 </div>
               </div>
-              <div style={{ width: '1px', height: '40px', background: 'rgba(146, 64, 14, 0.2)' }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <Box size={28} style={{ color: '#15803D' }} />
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <TrendingDown size={24} style={{ color: '#D97706' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#15803D' }}>Normal</div>
-                  <div style={{ fontSize: '0.8rem', color: '#166534' }}>≤ 60 days of stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#D97706' }}>Slow</div>
+                  <div style={{ fontSize: '0.76rem', color: '#92400E' }}>61–180 days</div>
+                </div>
+              </div>
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Archive size={24} style={{ color: '#DC2626' }} />
+                <div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#DC2626' }}>Very Slow</div>
+                  <div style={{ fontSize: '0.76rem', color: '#991B1B' }}>No sales or 180+</div>
                 </div>
               </div>
             </div>
@@ -482,7 +485,6 @@ export default function AdminAnalyticsView() {
               <span style={{ fontSize: '0.9rem', color: '#6B5E63' }}>
                 Open product-level inventory velocity analysis
               </span>
-
               <button
                 style={{
                   background: 'linear-gradient(135deg, #D97706 0%, #B45309 100%)',
@@ -938,30 +940,44 @@ export default function AdminAnalyticsView() {
                 </div>
               </div>
 
-              {/* Summary Metrics Grid */}
+              {/* Summary Metrics Grid — 5 tiles for 4 tiers */}
               <div className="admin-metrics-grid" style={{ marginBottom: '1.5rem' }}>
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title">Total Inventory</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem' }}>{slowSummary.total_inventory || 0}</p>
-                  <p className="admin-metric-subtext">Product-warehouse entries</p>
+                  <p className="admin-metric-title">Total Products</p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem' }}>{(slowSummary.total_inventory || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Analyzed from catalog</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#DC2626' }}>Very Slow</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#DC2626' }}>{slowSummary.very_slow || 0}</p>
-                  <p className="admin-metric-subtext">No sales or 180+ days stock</p>
+                  <p className="admin-metric-title" style={{ color: '#059669' }}>
+                    <Flame size={13} style={{ verticalAlign: '-2px' }} /> Fast Moving
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#059669' }}>{(slowSummary.fast_moving || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">≤ 15 days of stock</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#D97706' }}>Slow</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#D97706' }}>{slowSummary.slow || 0}</p>
-                  <p className="admin-metric-subtext">60–180 days of stock</p>
+                  <p className="admin-metric-title" style={{ color: '#2563EB' }}>
+                    <Activity size={13} style={{ verticalAlign: '-2px' }} /> Normal
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#2563EB' }}>{(slowSummary.normal || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">16–60 days of stock</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#059669' }}>Normal</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#059669' }}>{slowSummary.normal || 0}</p>
-                  <p className="admin-metric-subtext">Healthy movement ≤ 60 days</p>
+                  <p className="admin-metric-title" style={{ color: '#D97706' }}>
+                    <TrendingDown size={13} style={{ verticalAlign: '-2px' }} /> Slow
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#D97706' }}>{(slowSummary.slow || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">61–180 days of stock</p>
+                </div>
+
+                <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
+                  <p className="admin-metric-title" style={{ color: '#DC2626' }}>
+                    <AlertTriangle size={13} style={{ verticalAlign: '-2px' }} /> Very Slow
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#DC2626' }}>{(slowSummary.very_slow || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">180+ days or no sales</p>
                 </div>
               </div>
 
@@ -989,113 +1005,118 @@ export default function AdminAnalyticsView() {
                     />
                   </div>
 
-                  {/* Movement Status Filter Pills */}
-                  <div style={{ display: 'flex', gap: '0.35rem', background: '#FAF7F5', padding: '0.25rem', borderRadius: '8px', border: '1px solid rgba(216, 114, 126, 0.2)' }}>
-                    {['ALL', 'VERY SLOW', 'SLOW', 'NORMAL'].map((lvl) => (
-                      <button
-                        key={lvl}
-                        onClick={() => setSlowStatusFilter(lvl)}
-                        style={{
-                          padding: '0.35rem 0.85rem',
-                          fontSize: '0.78rem',
-                          fontWeight: 700,
-                          borderRadius: '6px',
-                          border: 'none',
-                          cursor: 'pointer',
-                          background: slowStatusFilter === lvl ? '#FFFFFF' : 'transparent',
-                          color: slowStatusFilter === lvl ? '#D97706' : '#6B5E63',
-                          boxShadow: slowStatusFilter === lvl ? '0 2px 6px rgba(0,0,0,0.06)' : 'none',
-                          transition: 'all 0.2s ease',
-                          whiteSpace: 'nowrap'
-                        }}
-                      >
-                        {lvl}
-                      </button>
-                    ))}
+                  {/* Movement Status Filter Pills — 4 tiers */}
+                  <div style={{ display: 'flex', gap: '0.35rem', background: '#FAF7F5', padding: '0.25rem', borderRadius: '8px', border: '1px solid rgba(216, 114, 126, 0.2)', flexWrap: 'wrap' }}>
+                    {['ALL', 'FAST MOVING', 'NORMAL', 'SLOW', 'VERY SLOW'].map((lvl) => {
+                      const activeColors = {
+                        'ALL':         { color: '#B8505E', bg: '#FFFFFF' },
+                        'FAST MOVING': { color: '#059669', bg: '#FFFFFF' },
+                        'NORMAL':      { color: '#2563EB', bg: '#FFFFFF' },
+                        'SLOW':        { color: '#D97706', bg: '#FFFFFF' },
+                        'VERY SLOW':   { color: '#DC2626', bg: '#FFFFFF' },
+                      };
+                      const ac = activeColors[lvl];
+                      const isActive = slowStatusFilter === lvl;
+                      return (
+                        <button
+                          key={lvl}
+                          onClick={() => setSlowStatusFilter(lvl)}
+                          style={{
+                            padding: '0.35rem 0.85rem',
+                            fontSize: '0.78rem',
+                            fontWeight: 700,
+                            borderRadius: '6px',
+                            border: 'none',
+                            cursor: 'pointer',
+                            background: isActive ? ac.bg : 'transparent',
+                            color: isActive ? ac.color : '#6B5E63',
+                            boxShadow: isActive ? '0 2px 6px rgba(0,0,0,0.06)' : 'none',
+                            transition: 'all 0.2s ease',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          {lvl === 'ALL' ? 'All' : lvl}
+                        </button>
+                      );
+                    })}
                   </div>
-
-                  {/* Warehouse Dropdown */}
-                  <select
-                    value={slowWarehouseFilter}
-                    onChange={(e) => setSlowWarehouseFilter(e.target.value)}
-                    style={{
-                      padding: '0.6rem 0.85rem',
-                      fontSize: '0.85rem',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(216, 114, 126, 0.25)',
-                      backgroundColor: '#FAF7F5',
-                      color: '#1F191B',
-                      outline: 'none'
-                    }}
-                  >
-                    <option value="ALL">All Warehouses ({slowWarehouses.length})</option>
-                    {slowWarehouses.map((wh) => (
-                      <option key={wh.warehouse_id} value={String(wh.warehouse_id)}>{wh.warehouse_name}</option>
-                    ))}
-                  </select>
                 </div>
               </div>
 
-              {/* Slow-Moving Inventory Table */}
+              {/* Inventory Velocity Table — redesigned with 4-tier status badges */}
               <div className="admin-table-wrapper">
                 <table className="admin-table">
                   <thead>
                     <tr>
                       <th>Product</th>
                       <th>Category</th>
-                      <th>Warehouse</th>
                       <th>Current Stock</th>
                       <th>Sales Last 30 Days</th>
                       <th>Avg Daily Sales</th>
                       <th>Days of Stock</th>
                       <th>Movement Status</th>
-                      <th>Recommended Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredSlowItems.length > 0 ? (
                       filteredSlowItems.map((item, idx) => {
                         const badgeStyle = getStatusStyle(item.movement_status);
-                        const daysDisplay = item.days_of_stock >= 999999 ? '∞' : item.days_of_stock;
+                        const daysRaw = item.days_of_stock;
+                        const daysDisplay = daysRaw >= 999999 ? '∞' : (daysRaw ?? 0);
+                        const daysColor =
+                          daysRaw >= 999999 ? '#DC2626'
+                          : daysRaw > 180   ? '#DC2626'
+                          : daysRaw > 60    ? '#D97706'
+                          : daysRaw > 15    ? '#2563EB'
+                          : '#059669';
 
                         return (
-                          <tr key={`${item.product_id}-${item.warehouse_id}-${idx}`}>
+                          <tr key={`${item.product_key}-${idx}`}>
                             <td>
                               <strong style={{ color: '#1F191B', fontWeight: 600 }}>{item.product_name}</strong>
                             </td>
                             <td>
-                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>{item.category_name}</span>
-                            </td>
-                            <td>
-                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>{item.warehouse_name}</span>
-                            </td>
-                            <td>
-                              <span style={{ fontWeight: 700, color: '#1F191B' }}>{item.current_stock}</span>
-                            </td>
-                            <td>
-                              <span style={{ fontWeight: 600, color: item.sales_last_30_days === 0 ? '#DC2626' : '#1F191B' }}>
-                                {item.sales_last_30_days}
+                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>
+                                {item.category_name}{item.sub_category ? ` · ${item.sub_category}` : ''}
                               </span>
                             </td>
                             <td>
-                              <span style={{ color: '#6B5E63' }}>{item.avg_daily_sales}</span>
+                              <span style={{ fontWeight: 700, color: '#1F191B' }}>
+                                {(item.current_stock ?? 0).toLocaleString('en-IN')}
+                              </span>
+                            </td>
+                            <td>
+                              <span style={{ fontWeight: 600, color: (item.sales_last_30_days ?? 0) === 0 ? '#DC2626' : '#1F191B' }}>
+                                {(item.sales_last_30_days ?? 0).toLocaleString('en-IN')}
+                              </span>
+                            </td>
+                            <td>
+                              <span style={{ color: '#6B5E63' }}>{item.avg_daily_sales ?? '0.00'}</span>
+                            </td>
+                            <td>
+                              <span style={{ fontWeight: 700, color: daysColor }}>
+                                {typeof daysDisplay === 'number' ? daysDisplay.toLocaleString('en-IN') : daysDisplay}
+                              </span>
                             </td>
                             <td>
                               <span style={{
+                                ...badgeStyle,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.35rem',
+                                padding: '0.3rem 0.8rem',
+                                borderRadius: '9999px',
+                                border: `1px solid ${badgeStyle.borderColor}`,
+                                fontSize: '0.78rem',
                                 fontWeight: 700,
-                                color: daysDisplay === '∞' ? '#DC2626' : item.days_of_stock > 180 ? '#DC2626' : item.days_of_stock > 60 ? '#D97706' : '#059669'
+                                letterSpacing: '0.02em',
+                                whiteSpace: 'nowrap',
                               }}>
-                                {daysDisplay}
-                              </span>
-                            </td>
-                            <td>
-                              <span className="admin-metric-status" style={badgeStyle}>
+                                <span style={{
+                                  width: '7px', height: '7px', borderRadius: '50%',
+                                  backgroundColor: badgeStyle.color, flexShrink: 0
+                                }} />
                                 {item.movement_status}
-                              </span>
-                            </td>
-                            <td>
-                              <span style={{ fontSize: '0.82rem', color: '#6B5E63', fontStyle: 'italic' }}>
-                                {item.recommended_action}
                               </span>
                             </td>
                           </tr>
@@ -1103,7 +1124,7 @@ export default function AdminAnalyticsView() {
                       })
                     ) : (
                       <tr>
-                        <td colSpan="9" style={{ textAlign: 'center', padding: '3rem 1rem', color: '#9E8F94' }}>
+                        <td colSpan="7" style={{ textAlign: 'center', padding: '3rem 1rem', color: '#9E8F94' }}>
                           No inventory items found matching the selected filters.
                         </td>
                       </tr>
@@ -1112,9 +1133,9 @@ export default function AdminAnalyticsView() {
                 </table>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63' }}>
-                <span>Showing <strong>{filteredSlowItems.length}</strong> of {slowSummary.total_inventory || 0} inventory entries</span>
-                <span>Dataset Source: <code style={{ fontSize: '0.75rem' }}>public.inventory</code> + <code style={{ fontSize: '0.75rem' }}>public.order_items</code> (Supabase)</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <span>Showing <strong>{filteredSlowItems.length}</strong> of {(slowSummary.total_inventory || 0).toLocaleString('en-IN')} products</span>
+                <span>Data: <code style={{ fontSize: '0.75rem' }}>public.products</code> + <code style={{ fontSize: '0.75rem' }}>public.orders</code> (Neon PostgreSQL)</span>
               </div>
             </>
           )}

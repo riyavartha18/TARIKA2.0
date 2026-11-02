@@ -327,129 +327,81 @@ class SlowMovingInventoryView(APIView):
     """
     Slow-Moving Inventory Analysis.
 
-    The original implementation joined the ``inventory``, ``order_items``,
-    ``categories`` and ``warehouses`` tables and keyed stock by a per-warehouse
-    ``inventory.stock_quantity``. None of those tables exist in the connected
-    ``public`` schema (verified against the live database), and stock now lives
-    directly on ``products.available_quantity``. Velocity analysis would need
-    per-product sales over time, which the current single-snapshot ``orders``
-    table (no ``order_date``/``order_items``) cannot supply.
+    Queries products.available_quantity for current stock and aggregates
+    delivered orders (last 30 days) for sales velocity.
 
-    Rather than return fabricated figures, the feature is clearly retired with an
-    explicit 503. Demand-driven replenishment (Stock to Be Ordered) is the
-    supported, schema-correct replacement and already surfaces low/zero-stock and
-    high-demand products.
+    Movement classification (4 tiers):
+      FAST MOVING  – days_of_stock <= 15
+      NORMAL       – days_of_stock <= 60
+      SLOW         – days_of_stock <= 180
+      VERY SLOW    – days_of_stock > 180, or zero sales with stock > 0
+
+    Field names are aligned with the frontend expectations:
+      current_stock, sales_last_30_days, avg_daily_sales, days_of_stock
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     def get(self, request):
         try:
-            # Parse date range parameters (defaults to last 30 days)
-            end_param = request.query_params.get('end_date')
-            start_param = request.query_params.get('start_date')
             today = datetime.utcnow().date()
-            if end_param:
-                try:
-                    end_date = datetime.strptime(end_param, '%d-%m-%Y').date()
-                except Exception:
-                    return Response({'error': 'Invalid end_date format, expected DD-MM-YYYY.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
-            else:
-                end_date = today
-            if start_param:
-                try:
-                    start_date = datetime.strptime(start_param, '%d-%m-%Y').date()
-                except Exception:
-                    return Response({'error': 'Invalid start_date format, expected DD-MM-YYYY.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
-            else:
-                start_date = end_date - timedelta(days=30)
+            end_date = today
+            start_date = end_date - timedelta(days=30)
 
-            # Query parameters
-            group_by = (request.query_params.get('group_by') or 'product').strip().lower()
-            allowed_groups = {'product', 'sub_category', 'main_category', 'overall'}
-            if group_by not in allowed_groups:
-                group_by = 'product'
-
-            search = request.query_params.get('search', '').strip()
-            category = request.query_params.get('category', '').strip()
-            sub_category = request.query_params.get('sub_category', '').strip()
-            movement_status = request.query_params.get('movement_status', '').strip().upper()
-
-            limit = int(request.query_params.get('limit', 100) or 100)
-            offset = int(request.query_params.get('offset', 0) or 0)
+            search = request.query_params.get("search", "").strip()
+            category = request.query_params.get("category", "").strip()
+            movement_status_filter = (
+                request.query_params.get("movement_status", "").strip().upper()
+            )
+            limit = int(request.query_params.get("limit", 500) or 500)
+            offset = int(request.query_params.get("offset", 0) or 0)
 
             # Build product filter WHERE clause
             product_where_clauses = []
             product_sql_params = []
             if search:
                 product_where_clauses.append(
-                    "(LOWER(p.name) LIKE %s OR LOWER(p.main_category) LIKE %s OR LOWER(p.sub_category) LIKE %s)"
+                    "(LOWER(p.name) LIKE %s"
+                    " OR LOWER(p.main_category) LIKE %s"
+                    " OR LOWER(p.sub_category) LIKE %s)"
                 )
                 like = f"%{search.lower()}%"
                 product_sql_params.extend([like, like, like])
-            if category and category.upper() != 'ALL':
+            if category and category.upper() != "ALL":
                 product_where_clauses.append("LOWER(p.main_category) = %s")
                 product_sql_params.append(category.lower())
-            if sub_category and sub_category.upper() != 'ALL':
-                product_where_clauses.append("LOWER(p.sub_category) = %s")
-                product_sql_params.append(sub_category.lower())
-            where_sql = ''
+
+            where_sql = ""
             if product_where_clauses:
-                where_sql = 'WHERE ' + ' AND '.join(product_where_clauses)
+                where_sql = "WHERE " + " AND ".join(product_where_clauses)
 
-            # Build SELECT and GROUP clauses per aggregation level
-            if group_by == 'product':
-                select_clause = (
-                    "p.product_key, p.name AS product_name, p.main_category, p.sub_category, "
-                    "p.available_quantity AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "oa.units_sold, oa.first_sale, oa.last_sale"
-                )
-                group_clause = ""
-            elif group_by == 'sub_category':
-                select_clause = (
-                    "p.sub_category, SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = "GROUP BY p.sub_category"
-            elif group_by == 'main_category':
-                select_clause = (
-                    "p.main_category, SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = "GROUP BY p.main_category"
-            else:  # overall
-                select_clause = (
-                    "SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = ""
-
-            # Build the full SQL with an aggregated orders sub‑query (oa)
+            # Aggregated sales sub-query for the last 30 days.
+            # The orders table uses product_id (TEXT), NOT product_key.
             order_agg_sql = (
-                "SELECT o.product_id AS product_key, "
-                "SUM(o.quantity)::bigint AS units_sold, "
-                "MIN(to_date(o.purchase_date, 'DD-MM-YYYY')) AS first_sale, "
-                "MAX(to_date(o.purchase_date, 'DD-MM-YYYY')) AS last_sale "
-                "FROM orders o "
-                "WHERE o.delivery_status = 'Delivered' "
-                "AND o.purchase_date ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$' "
-                "AND to_date(o.purchase_date, 'DD-MM-YYYY') BETWEEN %s AND %s "
-                "GROUP BY o.product_id"
+                "SELECT o.product_id AS product_key,"
+                " SUM(o.quantity)::bigint AS units_sold"
+                " FROM orders o"
+                " WHERE o.delivery_status = 'Delivered'"
+                " AND o.purchase_date ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$'"
+                " AND to_date(o.purchase_date, 'DD-MM-YYYY') BETWEEN %s AND %s"
+                " GROUP BY o.product_id"
             )
-            sql_params = [start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')]
+            sql_params = [
+                start_date.strftime("%Y-%m-%d"),
+                end_date.strftime("%Y-%m-%d"),
+            ]
 
             sql = f"""
-                SELECT {select_clause}
+                SELECT
+                    p.product_key,
+                    p.name            AS product_name,
+                    p.main_category,
+                    p.sub_category,
+                    COALESCE(p.available_quantity, 0) AS current_stock,
+                    COALESCE(oa.units_sold, 0)        AS sales_last_30_days
                 FROM products p
                 LEFT JOIN ({order_agg_sql}) oa ON p.product_key = oa.product_key
                 {where_sql}
-                {group_clause}
-                ORDER BY units_sold DESC
+                ORDER BY sales_last_30_days DESC, current_stock DESC
                 LIMIT %s OFFSET %s
             """
             sql_params.extend(product_sql_params)
@@ -460,282 +412,90 @@ class SlowMovingInventoryView(APIView):
                 cols = [c[0] for c in cursor.description]
                 rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
 
-            # Post‑process rows and build summary
-            days_span = (end_date - start_date).days or 1
+            days_span = 30
             items = []
             summary = {
-                'analysis_date': datetime.utcnow().strftime('%d-%m-%Y'),
-                'analysis_period_days': days_span,
-                'total_products': 0,
-                'total_inventory': 0,
-                'very_slow': 0,
-                'slow': 0,
-                'normal': 0,
-                'out_of_stock': 0,
-                'total_stock_units': 0,
-                'total_inventory_value': 0,
+                "total_inventory": 0,
+                "fast_moving": 0,
+                "normal": 0,
+                "slow": 0,
+                "very_slow": 0,
+                "out_of_stock": 0,
             }
+
             for r in rows:
-                stock = float(r.get('stock') or 0)
-                units = float(r.get('units_sold') or 0)
-                price = float(r.get('price') or 0)
-                avg_daily = units / days_span if days_span else 0
-                days_of_stock = stock / avg_daily if avg_daily else None
-                # movement classification
+                stock = float(r.get("current_stock") or 0)
+                units = float(r.get("sales_last_30_days") or 0)
+                avg_daily = round(units / days_span, 2)
+
+                if avg_daily > 0:
+                    days_of_stock = round(stock / avg_daily, 2)
+                else:
+                    days_of_stock = 999999 if stock > 0 else 0
+
+                # Four-tier movement classification
                 if stock <= 0:
-                    movement = 'OUT OF STOCK'
+                    movement = "OUT OF STOCK"
                 elif units == 0:
-                    movement = 'VERY SLOW'
-                elif days_of_stock is not None:
-                    if days_of_stock > 180:
-                        movement = 'VERY SLOW'
-                    elif days_of_stock > 60:
-                        movement = 'SLOW'
-                    else:
-                        movement = 'NORMAL'
+                    movement = "VERY SLOW"
+                elif days_of_stock <= 15:
+                    movement = "FAST MOVING"
+                elif days_of_stock <= 60:
+                    movement = "NORMAL"
+                elif days_of_stock <= 180:
+                    movement = "SLOW"
                 else:
-                    movement = 'NORMAL'
-                # recommended action
-                if movement == 'OUT OF STOCK':
-                    recommendation = 'Order restock'
-                elif movement in ('VERY SLOW', 'SLOW'):
-                    recommendation = 'Consider promotion / discount'
-                else:
-                    recommendation = 'Maintain stock'
+                    movement = "VERY SLOW"
+
                 item = {
-                    'product_key': r.get('product_key'),
-                    'product_name': r.get('product_name'),
-                    'image': r.get('image'),
-                    'category_name': r.get('main_category'),
-                    'main_category': r.get('main_category'),
-                    'sub_category': r.get('sub_category'),
-                    'stock': int(stock),
-                    'units_sold': int(units),
-                    'last_sale_date': r.get('last_sale').strftime('%d-%m-%Y') if r.get('last_sale') else None,
-                    'average_daily_sales': round(avg_daily, 2),
-                    'days_of_stock': round(days_of_stock, 2) if days_of_stock is not None else None,
-                    'inventory_value': round(stock * price, 2),
-                    'movement_status': movement,
-                    'recommended_action': recommendation,
+                    "product_key": r.get("product_key"),
+                    "product_name": r.get("product_name") or "Unknown Product",
+                    "category_name": r.get("main_category") or "",
+                    "sub_category": r.get("sub_category") or "",
+                    "current_stock": int(stock),
+                    "sales_last_30_days": int(units),
+                    "avg_daily_sales": avg_daily,
+                    "days_of_stock": days_of_stock,
+                    "movement_status": movement,
                 }
                 items.append(item)
-                # update summary counters
-                summary['total_products'] += 1
-                summary['total_inventory'] += 1
-                summary['total_stock_units'] += stock
-                summary['total_inventory_value'] += stock * price
-                if movement == 'OUT OF STOCK':
-                    summary['out_of_stock'] += 1
-                elif movement == 'VERY SLOW':
-                    summary['very_slow'] += 1
-                elif movement == 'SLOW':
-                    summary['slow'] += 1
-                elif movement == 'NORMAL':
-                    summary['normal'] += 1
 
-            return Response({
-                'success': True,
-                'summary': summary,
-                'items': items,
-                'pagination': {'limit': limit, 'offset': offset, 'total': summary['total_products']},
-            }, status=status.HTTP_200_OK)
+                summary["total_inventory"] += 1
+                if movement == "OUT OF STOCK":
+                    summary["out_of_stock"] += 1
+                elif movement == "FAST MOVING":
+                    summary["fast_moving"] += 1
+                elif movement == "NORMAL":
+                    summary["normal"] += 1
+                elif movement == "SLOW":
+                    summary["slow"] += 1
+                elif movement == "VERY SLOW":
+                    summary["very_slow"] += 1
+
+            # Apply movement_status filter post-query
+            if movement_status_filter and movement_status_filter != "ALL":
+                items = [i for i in items if i["movement_status"] == movement_status_filter]
+
+            return Response(
+                {
+                    "success": True,
+                    "analysis_date": end_date.strftime("%d-%m-%Y"),
+                    "sales_window_start": start_date.strftime("%d-%m-%Y"),
+                    "summary": summary,
+                    "items": items,
+                    "warehouses": [],  # No warehouse table in database schema
+                    "pagination": {
+                        "limit": limit,
+                        "offset": offset,
+                        "total": summary["total_inventory"],
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+
         except Exception as exc:
-            return Response({
-                'error': f'Error generating slow inventory analysis: {str(exc)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            end_param = request.query_params.get('end_date')
-            start_param = request.query_params.get('start_date')
-            today = datetime.utcnow().date()
-            if end_param:
-                try:
-                    end_date = datetime.strptime(end_param, '%d-%m-%Y').date()
-                except Exception:
-                    return Response({'error': 'Invalid end_date format, expected DD-MM-YYYY.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
-            else:
-                end_date = today
-            if start_param:
-                try:
-                    start_date = datetime.strptime(start_param, '%d-%m-%Y').date()
-                except Exception:
-                    return Response({'error': 'Invalid start_date format, expected DD-MM-YYYY.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
-            else:
-                start_date = end_date - timedelta(days=30)
+            return Response(
+                {"error": f"Error generating slow inventory analysis: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-            # Query parameters
-            group_by = (request.query_params.get('group_by') or 'product').strip().lower()
-            allowed_groups = {'product', 'sub_category', 'main_category', 'overall'}
-            if group_by not in allowed_groups:
-                group_by = 'product'
-
-            search = request.query_params.get('search', '').strip()
-            category = request.query_params.get('category', '').strip()
-            sub_category = request.query_params.get('sub_category', '').strip()
-            movement_status = request.query_params.get('movement_status', '').strip().upper()
-
-            limit = int(request.query_params.get('limit', 100) or 100)
-            offset = int(request.query_params.get('offset', 0) or 0)
-
-            # Build base WHERE clauses for orders (only delivered, valid dates, date range)
-            order_where_clauses = [
-                "o.delivery_status = 'Delivered'",
-                "o.purchase_date ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$'",
-                "to_date(o.purchase_date, 'DD-MM-YYYY') BETWEEN %s AND %s",
-            ]
-            order_sql_params = [
-                start_date.strftime('%Y-%m-%d'),
-                end_date.strftime('%Y-%m-%d'),
-            ]
-            # Product filters (search / category / sub_category)
-            product_where_clauses = []
-            product_sql_params = []
-            if search:
-                product_where_clauses.append(
-                    "(LOWER(p.name) LIKE %s OR LOWER(p.main_category) LIKE %s OR LOWER(p.sub_category) LIKE %s)"
-                )
-                like = f"%{search.lower()}%"
-                product_sql_params.extend([like, like, like])
-            if category and category.upper() != 'ALL':
-                product_where_clauses.append("LOWER(p.main_category) = %s")
-                product_sql_params.append(category.lower())
-            if sub_category and sub_category.upper() != 'ALL':
-                product_where_clauses.append("LOWER(p.sub_category) = %s")
-                product_sql_params.append(sub_category.lower())
-
-            where_sql = ''
-            if product_where_clauses:
-                where_sql = 'WHERE ' + ' AND '.join(product_where_clauses)
-
-            # Select & group clauses per aggregation level
-            # Select & group clauses per aggregation level using pre‑aggregated orders
-            if group_by == 'product':
-                select_clause = (
-                    "p.product_key, p.name AS product_name, p.main_category, p.sub_category, "
-                    "p.available_quantity AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "oa.units_sold, oa.first_sale, oa.last_sale"
-                )
-                group_clause = ""
-            elif group_by == 'sub_category':
-                select_clause = (
-                    "p.sub_category, SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = "GROUP BY p.sub_category"
-            elif group_by == 'main_category':
-                select_clause = (
-                    "p.main_category, SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = "GROUP BY p.main_category"
-            else:  # overall
-                select_clause = (
-                    "SUM(p.available_quantity) AS stock, "
-                    "COALESCE(p.discount_price, NULLIF(regexp_replace(p.actual_price, '[^0-9.]', '', 'g'), '')::float8) AS price, "
-                    "SUM(oa.units_sold) AS units_sold, MIN(oa.first_sale) AS first_sale, MAX(oa.last_sale) AS last_sale"
-                )
-                group_clause = ""
-
-            sql = f"""
-                SELECT {select_clause}
-                FROM products p
-                LEFT JOIN orders o ON p.product_key = o.product_key
-                {where_sql}
-                {group_clause}
-                ORDER BY units_sold DESC
-                LIMIT %s OFFSET %s
-            """
-            sql_params.extend([limit, offset])
-
-            with connection.cursor() as cursor:
-                cursor.execute(sql, sql_params)
-                cols = [c[0] for c in cursor.description]
-                rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
-
-            # Post‑process rows
-            days_span = (end_date - start_date).days or 1
-            items = []
-            # Summary counters
-            summary = {
-                'total_inventory': 0,
-                'very_slow': 0,
-                'slow': 0,
-                'normal': 0,
-                'out_of_stock': 0,
-                'total_stock_units': 0,
-                'total_inventory_value': 0,
-                'date_range': f"{start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}",
-            }
-            for r in rows:
-                stock = float(r.get('stock') or 0)
-                units = float(r.get('units_sold') or 0)
-                price = float(r.get('price') or 0)
-                avg_daily = units / days_span if days_span else 0
-                days_of_stock = stock / avg_daily if avg_daily else None
-                # movement classification
-                if stock <= 0:
-                    movement = 'OUT OF STOCK'
-                elif units == 0:
-                    movement = 'VERY SLOW'
-                elif days_of_stock is not None:
-                    if days_of_stock > 180:
-                        movement = 'VERY SLOW'
-                    elif days_of_stock > 60:
-                        movement = 'SLOW'
-                    else:
-                        movement = 'NORMAL'
-                else:
-                    movement = 'NORMAL'
-                # recommended action
-                if movement == 'OUT OF STOCK':
-                    recommendation = 'Order restock'
-                elif movement in ('VERY SLOW', 'SLOW'):
-                    recommendation = 'Consider promotion / discount'
-                else:
-                    recommendation = 'Maintain stock'
-                item = {
-                    'product_key': r.get('product_key'),
-                    'product_name': r.get('product_name'),
-                    'category_name': r.get('main_category'),
-                    'main_category': r.get('main_category'),
-                    'sub_category': r.get('sub_category'),
-                    'stock': int(stock),
-                    'units_sold': int(units),
-                    'last_sale_date': r.get('last_sale').strftime('%d-%m-%Y') if r.get('last_sale') else None,
-                    'average_daily_sales': round(avg_daily, 2),
-                    'days_of_stock': round(days_of_stock, 2) if days_of_stock is not None else None,
-                    'inventory_value': round(stock * price, 2),
-                    'movement_status': movement,
-                    'recommended_action': recommendation,
-                }
-                items.append(item)
-                # update summary
-                summary['total_inventory'] += 1
-                summary['total_stock_units'] += stock
-                summary['total_inventory_value'] += stock * price
-                if movement == 'OUT OF STOCK':
-                    summary['out_of_stock'] += 1
-                elif movement == 'VERY SLOW':
-                    summary['very_slow'] += 1
-                elif movement == 'SLOW':
-                    summary['slow'] += 1
-                elif movement == 'NORMAL':
-                    summary['normal'] += 1
-            # Add pagination totals
-            summary['total'] = summary['total_inventory']
-
-
-            return Response({
-                'success': True,
-                'group_by': group_by,
-                'summary': summary,
-                'items': items,
-                'pagination': {'limit': limit, 'offset': offset},
-            }, status=status.HTTP_200_OK)
-        except Exception as exc:
-            return Response({
-                'error': f'Error generating slow inventory analysis: {str(exc)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
