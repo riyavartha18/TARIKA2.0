@@ -17,6 +17,151 @@ from . import utils
 from .models import CustomerSegment
 
 
+def _big_spender_param():
+    import json
+    return json.dumps([utils.TAG_BIG_SPENDER])
+
+
+# The whole dashboard aggregate - overall KPIs, the six-segment distribution and
+# the K-Means cluster profiles - computed in ONE pass over the small result
+# table via GROUPING SETS. The remote Neon database is the bottleneck (every
+# round trip is ~250 ms while the aggregate itself runs in ~20 ms), so turning
+# three separate queries into one is the main latency win; the caller then caches
+# the result per (version, clustering epoch) so warm reads need no query at all.
+#
+# Row kinds, from the two GROUPING() flags:
+#   g_segment=1, g_kmeans=1 -> the overall totals row
+#   g_segment=0             -> one segment-distribution row
+#   g_kmeans=0              -> one cluster row (kmeans_cluster_id NULL skipped)
+DASHBOARD_BUNDLE_SQL = """
+SELECT
+    GROUPING(segment)                    AS g_segment,
+    GROUPING(kmeans_cluster_id)          AS g_kmeans,
+    segment,
+    kmeans_cluster_id,
+    kmeans_category,
+    COUNT(*)::bigint                     AS row_count,
+    COALESCE(SUM(frequency), 0)::bigint  AS sum_frequency,
+    COALESCE(SUM(monetary), 0)           AS sum_monetary,
+    AVG(recency)::float                  AS avg_recency,
+    AVG(frequency)::float                AS avg_frequency,
+    AVG(monetary)::float                 AS avg_monetary,
+    COUNT(*) FILTER (WHERE tags @> %s::jsonb)::bigint AS big_spender_count
+FROM rfm_customer_segments
+GROUP BY GROUPING SETS ( (), (segment), (kmeans_cluster_id, kmeans_category) )
+ORDER BY g_segment, g_kmeans, segment, kmeans_cluster_id
+"""
+
+
+def _empty_bundle():
+    return {
+        'totals': {'buyer_count': 0, 'total_orders': 0,
+                   'total_revenue': 0, 'big_spender_count': 0},
+        'distribution': [],
+        'kmeans_clusters': [],
+    }
+
+
+def fetch_dashboard_bundle():
+    """One-query dashboard aggregate bundle (Postgres) or ORM fallback.
+
+    Returns ``{'totals', 'distribution', 'kmeans_clusters'}``. The shape is
+    identical across vendors so the (cached) summary view is backend-agnostic.
+    """
+    if connection.vendor != 'postgresql':
+        return _fetch_dashboard_bundle_orm()
+
+    bundle = _empty_bundle()
+    with connection.cursor() as cursor:
+        cursor.execute(DASHBOARD_BUNDLE_SQL, [_big_spender_param()])
+        columns = [c.name for c in cursor.description]
+        rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
+
+    for row in rows:
+        if row['g_segment'] == 1 and row['g_kmeans'] == 1:
+            bundle['totals'] = {
+                'buyer_count': int(row['row_count'] or 0),
+                'total_orders': int(row['sum_frequency'] or 0),
+                'total_revenue': round(float(row['sum_monetary'] or 0), 2),
+                'big_spender_count': int(row['big_spender_count'] or 0),
+            }
+        elif row['g_segment'] == 0:
+            bundle['distribution'].append(
+                {'segment': row['segment'], 'count': int(row['row_count'] or 0)})
+        elif row['g_kmeans'] == 0 and row['kmeans_cluster_id'] is not None:
+            bundle['kmeans_clusters'].append({
+                'cluster_id': row['kmeans_cluster_id'],
+                'category': row['kmeans_category'] or '',
+                'customer_count': int(row['row_count'] or 0),
+                'avg_recency': _round_or_none(row['avg_recency'], 2),
+                'avg_frequency': _round_or_none(row['avg_frequency'], 2),
+                'avg_monetary': _round_or_none(row['avg_monetary'], 2),
+            })
+
+    bundle['distribution'].sort(key=lambda d: d['segment'])
+    bundle['kmeans_clusters'].sort(key=lambda c: c['cluster_id'])
+    return bundle
+
+
+def _round_or_none(value, digits):
+    return round(float(value), digits) if value is not None else None
+
+
+def _fetch_dashboard_bundle_orm():
+    """Backend-agnostic fallback (SQLite tests): same shape, a few ORM reads."""
+    from django.db.models import Avg, Count, DecimalField, Q, Sum, Value
+    from django.db.models.functions import Coalesce
+
+    totals = CustomerSegment.objects.aggregate(
+        buyer_count=Count('customer_id'),
+        total_orders=Coalesce(Sum('frequency'), Value(0)),
+        total_revenue=Coalesce(
+            Sum('monetary'), Value(0),
+            output_field=DecimalField(max_digits=16, decimal_places=2)),
+        big_spender_count=Count(
+            'customer_id', filter=Q(tags__contains=[utils.TAG_BIG_SPENDER])),
+    )
+    distribution = [
+        {'segment': row['segment'], 'count': row['count']}
+        for row in CustomerSegment.objects.values('segment')
+        .annotate(count=Count('customer_id')).order_by('segment')
+    ]
+    cluster_rows = (
+        CustomerSegment.objects
+        .exclude(kmeans_cluster_id__isnull=True)
+        .values('kmeans_cluster_id', 'kmeans_category')
+        .annotate(
+            customer_count=Count('customer_id'),
+            avg_recency=Avg('recency'),
+            avg_frequency=Avg('frequency'),
+            avg_monetary=Avg('monetary'),
+        )
+        .order_by('kmeans_cluster_id')
+    )
+    kmeans_clusters = [
+        {
+            'cluster_id': r['kmeans_cluster_id'],
+            'category': r['kmeans_category'] or '',
+            'customer_count': r['customer_count'],
+            'avg_recency': _round_or_none(r['avg_recency'], 2),
+            'avg_frequency': _round_or_none(r['avg_frequency'], 2),
+            'avg_monetary': _round_or_none(r['avg_monetary'], 2),
+        }
+        for r in cluster_rows
+    ]
+    return {
+        'totals': {
+            'buyer_count': totals['buyer_count'] or 0,
+            'total_orders': totals['total_orders'] or 0,
+            'total_revenue': round(float(totals['total_revenue'] or 0), 2),
+            'big_spender_count': totals['big_spender_count'] or 0,
+        },
+        'distribution': distribution,
+        'kmeans_clusters': kmeans_clusters,
+    }
+
+
+
 # Aggregates one row per eligible buyer. Recency is measured against the
 # analysis date (the greater of the DB's current date and the latest purchase
 # date, so future-dated rows can never yield a negative Recency).

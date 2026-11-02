@@ -204,6 +204,18 @@ class CustomerSegment(models.Model):
     # Latest segment label and secondary tags (e.g. Big Spender).
     segment = models.CharField(max_length=40)
     tags = models.JSONField(default=list, blank=True)
+    # K-Means++ (k=4) clustering result over the *standardized* RFM features.
+    # These two columns are completely independent of the rule-based `segment`
+    # above and are never consumed by CLV or campaign targeting: the cluster id
+    # is the raw numeric K-Means output (0-3, no business meaning) and the
+    # category is the business label mapped from that cluster's *unscaled* RFM
+    # profile. Both are nullable so a buyer that has not been clustered yet (or
+    # has no eligible RFM metrics) simply carries no value, and a clustering
+    # rerun overwrites the same row instead of adding a duplicate. The original
+    # recency/frequency/monetary columns above are left exactly as the RFM run
+    # wrote them - the standardized values used for clustering are never stored.
+    kmeans_cluster_id = models.PositiveIntegerField(null=True, blank=True)
+    kmeans_category = models.CharField(max_length=40, blank=True, default='')
     # Purchase-date bookends kept alongside the metrics so the paginated RFM
     # results endpoint is fully served from this table (no order scan). CLV does
     # not consume these - it derives them from `orders` - so they are optional.
@@ -229,10 +241,59 @@ class CustomerSegment(models.Model):
             # spenders); this keeps that filter+order an index scan.
             models.Index(fields=['segment', 'monetary'],
                          name='rfm_segment_by_monetary'),
+            # K-Means cluster counts / profiles are aggregated by category and
+            # cluster id whenever the dashboard or a rerun reads them back.
+            models.Index(fields=['kmeans_category', 'kmeans_cluster_id'],
+                         name='rfm_kmeans_by_category'),
         ]
 
     def __str__(self):
         return f"{self.customer_id} -> {self.segment}"
+
+
+class KmeansRunState(models.Model):
+    """Single row describing the latest completed K-Means++ clustering run.
+
+    The per-buyer labels live on `CustomerSegment` (one row per buyer, always the
+    latest assignment). This row carries the *run* bookkeeping the page needs to
+    explain those labels honestly and to know whether they are current:
+
+    * `rfm_version` / `clustered` - which analysis version was clustered and how
+      many buyers it covered, so a later RFM refresh (new buyers, moved metrics)
+      can be reported as "clustering is out of date" instead of silently
+      presenting stale groups.
+    * `mapping` - cluster id -> business category with its unscaled RFM/tenure
+      profile and the mapping confidence. Cluster ids carry no business meaning,
+      so this is the audit trail of how the labels were derived.
+    * `scaler` - the fitted StandardScaler mean/scale, proving the standardized
+      space was used for clustering only and never stored per buyer.
+
+    Keeping it in its own table (rather than columns on the singleton analysis
+    state) means clustering can be re-run without touching any RFM run bookkeeping.
+    """
+    SINGLETON_ID = 1
+    id = models.PositiveIntegerField(primary_key=True)
+    algorithm = models.CharField(max_length=64, default='KMeans(k-means++)')
+    # RFM analysis version whose persisted metrics this clustering consumed.
+    rfm_version = models.PositiveIntegerField(default=0)
+    # Effective cluster count (<= the requested four) and buyers assigned.
+    n_clusters = models.PositiveIntegerField(default=0)
+    clustered = models.PositiveIntegerField(default=0)
+    # [{'cluster_id', 'category', 'confidence', 'customer_count', ...profile}]
+    mapping = models.JSONField(default=list, blank=True)
+    # Business categories the data could not support - reported, never forced.
+    unsupported_categories = models.JSONField(default=list, blank=True)
+    # Fitted scaler statistics {'mean': [...], 'scale': [...]} of the three
+    # standardized features. Reporting only: never written to the RFM columns.
+    scaler = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField()
+    completed_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'rfm_kmeans_run_state'
+
+    def __str__(self):
+        return f'K-Means on RFM v{self.rfm_version} ({self.clustered} buyers)'
 
 
 class RfmAnalysisState(models.Model):

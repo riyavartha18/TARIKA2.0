@@ -525,7 +525,6 @@ def build_analytics_summary(force_refresh=False):
             'algorithm': 'Manual ID3 Decision Tree Classifier (Entropy & Information Gain)',
             'features': DecisionTreeEngine.FEATURE_NAMES,
             'target': 'units_sold tercile demand bucket',
-            'source_tables': ['public.fact_product_analysis', 'public.products'],
             'training_products': model['training_products'],
             'training_combinations': model['training_rows'],
             'total_products_analyzed': total_products,

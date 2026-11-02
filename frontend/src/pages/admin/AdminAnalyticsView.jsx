@@ -573,7 +573,7 @@ export default function AdminAnalyticsView() {
                 Running Demand Prediction Engine...
               </h3>
               <p style={{ color: '#6B5E63', fontSize: '0.9rem', margin: 0 }}>
-                Processing historical demand data from Supabase...
+                Processing historical demand data…
               </p>
             </div>
           )}
@@ -780,7 +780,7 @@ export default function AdminAnalyticsView() {
                               <span className="df-chip" title="Units sold"><TrendingUp size={12} /> {fmtNum(p.units_sold)} sold</span>
                               <span className="df-chip" title="Cart count"><ShoppingCart size={12} /> {fmtNum(p.cart_count)}</span>
                               <span className="df-chip" title="Wishlist count"><Heart size={12} /> {fmtNum(p.wishlist_count)}</span>
-                              <span className="df-chip" title="Total Revenue (fact_product_analysis.total_sales)"><IndianRupee size={12} /> Total Revenue {fmtNum(Math.round(p.total_sales))}</span>
+                              <span className="df-chip" title="Total Revenue"><IndianRupee size={12} /> Total Revenue {fmtNum(Math.round(p.total_sales))}</span>
                             </div>
 
                             <div className="df-stock" style={{ color: lowStock ? '#DC2626' : '#1F191B' }}>
@@ -828,9 +828,8 @@ export default function AdminAnalyticsView() {
                 </div>
               )}
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63' }}>
+              <div style={{ marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63' }}>
                 <span>Showing <strong>{productItems.length}</strong> of {productPagination.total_filtered?.toLocaleString('en-IN') ?? totalCount.toLocaleString('en-IN')} products</span>
-                <span>Dataset Source: <code style={{ fontSize: '0.75rem' }}>public.fact_product_analysis</code> + <code style={{ fontSize: '0.75rem' }}>public.products</code></span>
               </div>
             </>
           )}

@@ -1,5 +1,5 @@
 from django.test import SimpleTestCase
-from demand_prediction import engine
+from demand_prediction import engine, views
 from demand_prediction.engine import DecisionTreeEngine
 
 
@@ -82,3 +82,19 @@ class DemandPredictionEngineTest(SimpleTestCase):
             self.assertIn('product_predictions', results)
             for pred in results['product_predictions'][:5]:
                 self.assertIn(pred['predicted_demand'], ['High', 'Medium', 'Low'])
+
+
+class DemandSellingPriceSQLTest(SimpleTestCase):
+    """The product-fetch selling price must be computed from the columns that
+    actually exist (no `initial_price`) and never go negative."""
+
+    def test_selling_price_does_not_reference_missing_initial_price(self):
+        sql = views._SELLING_PRICE_SQL
+        self.assertNotIn('initial_price', sql)
+
+    def test_selling_price_subtracts_discount_from_parsed_actual_price(self):
+        sql = views._SELLING_PRICE_SQL
+        self.assertIn('d.actual_price', sql)
+        self.assertIn('d.discount_price', sql)
+        # Floored at 0 so a discount can never produce a negative price.
+        self.assertTrue(sql.startswith('GREATEST(0,'))

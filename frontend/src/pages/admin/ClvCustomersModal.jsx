@@ -34,22 +34,6 @@ const useDebounced = (value, delay = 350) => {
   return debounced;
 };
 
-const TIER_COLORS = {
-  'High Value': { bg: 'rgba(184,80,94,0.16)', color: '#8E3642' },
-  'Medium Value': { bg: 'rgba(216,114,126,0.12)', color: '#B8505E' },
-  'Low Value': { bg: 'rgba(31,25,27,0.06)', color: '#6B5E63' },
-};
-
-function TierBadge({ tier }) {
-  if (!tier) return <span style={{ color: PALETTE.faint }}>—</span>;
-  const c = TIER_COLORS[tier] || TIER_COLORS['Low Value'];
-  return (
-    <span style={{ backgroundColor: c.bg, color: c.color, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700, whiteSpace: 'nowrap' }}>
-      {tier}
-    </span>
-  );
-}
-
 // Windowed page numbers: always show 1, gap, window around current, gap, last.
 function pageWindow(current, total) {
   if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
@@ -113,8 +97,8 @@ function PaginationBar({ page, totalPages, count, onChange }) {
 
 // Full-screen popup listing the ACTUAL customers behind one clicked bar of
 // the Customer Value Distribution chart, or behind a tier button click.
-// Shows Customer ID, Customer Name, Future CLV (₹), Historical CLV (₹),
-// and CLV Tier. Supports search by name/ID, server-side pagination (50/page),
+// Shows Customer ID, Customer Name, Future CLV (₹) and Historical CLV (₹).
+// Supports search by name/ID, server-side pagination (50/page),
 // numbered pages with Previous/Next arrows, and a close button.
 // No per-row action button — clicking a row opens the customer detail popup.
 export default function ClvCustomersModal({ token, category, onClose, onOpenDetail }) {
@@ -296,9 +280,6 @@ export default function ClvCustomersModal({ token, category, onClose, onOpenDeta
                       {col.label}{col.sortable && sort === col.key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}
                     </th>
                   ))}
-                  <th style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700 }}>
-                    CLV Tier
-                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -328,9 +309,6 @@ export default function ClvCustomersModal({ token, category, onClose, onOpenDeta
                           : (r[col.key] ?? '—')}
                       </td>
                     ))}
-                    <td style={{ padding: '0.65rem 0.9rem' }}>
-                      <TierBadge tier={r.clv_tier} />
-                    </td>
                   </tr>
                 ))}
               </tbody>

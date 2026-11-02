@@ -19,6 +19,12 @@ urlpatterns = [
     path('analytics/rfm/segments/<str:segment>', views.RfmSegmentDetailView.as_view(),
          name='rfm-segment-detail'),
 
+    # ---- K-Means++ (k=4) RFM clustering ----
+    path('analytics/rfm/clusters/customers', views.RfmClusterCustomersView.as_view(),
+         name='rfm-cluster-customers'),
+    path('analytics/rfm/clusters', views.RfmClustersView.as_view(),
+         name='rfm-clusters'),
+
     # ---- Admin campaign management ----
     path('campaigns/', views.CampaignListCreateView.as_view(), name='campaign-list-create'),
     path('campaigns/<int:campaign_id>/', views.CampaignDetailView.as_view(),

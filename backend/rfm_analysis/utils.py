@@ -41,6 +41,13 @@ RFM_SNAPSHOT_META_KEY = 'rfm:analysis:snapshot:meta:{version}'
 RFM_SNAPSHOT_RECORDS_KEY = 'rfm:analysis:snapshot:records:{version}'
 RFM_RUN_STATUS_KEY = 'rfm:analysis:run_status'
 RFM_RUN_LOCK_KEY = 'rfm:analysis:run_lock'
+# Memo of the single-row analysis state (version/dates/buyer_count), so the
+# dashboard summary path knows which cached bundle to read without a per-request
+# round trip to the remote database. Rewritten by a completed run.
+RFM_ANALYSIS_STATE_MEMO_KEY = 'rfm:analysis:state_memo'
+# Bumped when a K-Means clustering run persists new labels; part of the cached
+# dashboard bundle key so a rerun is seen immediately.
+RFM_KMEANS_EPOCH_KEY = 'rfm:kmeans:epoch'
 # Bumped whenever an admin creates, edits, publishes, pauses or deletes a
 # campaign. It is part of every per-customer offer cache key, so a campaign
 # change is visible to customers on their very next request instead of after
@@ -51,6 +58,13 @@ RFM_CAMPAIGN_EPOCH_KEY = 'rfm:campaigns:epoch'
 # page can be served entirely from cache - no segment query at all - until
 # either a campaign or the segmentation actually changes.
 RFM_ANALYSIS_EPOCH_KEY = 'rfm:analysis:epoch'
+# Memo of the single-row K-Means run state (RFM version, mapping, timestamps),
+# so the dashboard can explain and age the stored labels without a per-request
+# round trip to the remote database. Rewritten by every completed clustering run.
+RFM_KMEANS_STATE_MEMO_KEY = 'rfm:kmeans:state_memo'
+# Guard against two clustering runs overlapping on the same ~100k rows.
+RFM_KMEANS_RUN_LOCK_KEY = 'rfm:kmeans:run_lock'
+KMEANS_RUN_LOCK_TTL_SECONDS = int(os.getenv('RFM_KMEANS_RUN_LOCK_TTL_SECONDS', 15 * 60))
 # Cooldown marker for the customer-side self-heal (a customer request may start
 # a background analysis when none exists yet). Without it, traffic arriving while
 # runs keep failing could repeatedly launch a full-population computation.
@@ -106,6 +120,37 @@ PRIMARY_SEGMENTS = [
 ALL_SEGMENTS = PRIMARY_SEGMENTS + [SEGMENT_NEVER_PURCHASED]
 
 SECONDARY_TAGS = [TAG_BIG_SPENDER]
+
+
+# ---------------------------------------------------------------------------
+# K-Means++ clustering vocabulary (labels only - the algorithm lives in
+# `clustering.py`). These four business categories are the label a numeric
+# K-Means cluster is mapped to *after* clustering, from the cluster's unscaled
+# RFM profile. They are separate from the six rule-based segments above and are
+# never read by CLV or campaign targeting.
+#
+# The four categories are spending / frequency / dormancy descriptions, chosen
+# so the label is always backed by the cluster's real RFM numbers. They are NOT
+# tied to a fixed cluster id: which id carries which label is re-derived from
+# the profiles on every run (see `clustering.map_clusters_to_categories`).
+# ---------------------------------------------------------------------------
+KMEANS_N_CLUSTERS = int(os.getenv('RFM_KMEANS_N_CLUSTERS', 4))
+KMEANS_RANDOM_STATE = int(os.getenv('RFM_KMEANS_RANDOM_STATE', 42))
+KMEANS_N_INIT = int(os.getenv('RFM_KMEANS_N_INIT', 10))
+
+KMEANS_CATEGORY_MODERATE_SPENDING = 'Moderate Spending'
+KMEANS_CATEGORY_HIGH_SPENDING = 'High Spending'
+KMEANS_CATEGORY_AT_RISK = 'At Risk'
+KMEANS_CATEGORY_FREQUENT_BUYERS = 'Frequent Buyers'
+
+# Order is display order, not priority; every entry is one of the four labels
+# the four clusters are mapped onto.
+KMEANS_CATEGORIES = [
+    KMEANS_CATEGORY_MODERATE_SPENDING,
+    KMEANS_CATEGORY_HIGH_SPENDING,
+    KMEANS_CATEGORY_AT_RISK,
+    KMEANS_CATEGORY_FREQUENT_BUYERS,
+]
 
 
 def snapshot_meta_key(version):

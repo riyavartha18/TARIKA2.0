@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { getRfmSummary } from '../../services/api';
-import { SEGMENT_META } from '../../data/rfmSegments';
+import { KMEANS_CATEGORY_META } from '../../data/rfmSegments';
 import { Users, CheckCircle2, Loader2, ChevronRight } from 'lucide-react';
 
 // Compact RFM overview card for the Admin Analysis page. It follows the same
@@ -34,12 +34,11 @@ export default function RfmAnalysisCard({ onOpen }) {
   }, [available, load]);
 
   const totals = summary?.totals || {};
-  const base = Number(totals.total_customers || 0) || 1;
-  // Show the four biggest primary groups in the preview strip.
-  const preview = (summary?.segments || [])
-    .filter((s) => s.segment !== 'Never Purchased')
-    .sort((a, b) => (b.count || 0) - (a.count || 0))
-    .slice(0, 4);
+  const kmeans = summary?.kmeans;
+  const clusters = kmeans?.clusters || [];
+  // Percentages are relative to the clustered buyer population, so the four
+  // K-Means shares add up to ~100% exactly as the dashboard reports them.
+  const base = Number(kmeans?.total || totals.total_eligible_buyers || 0) || 1;
 
   return (
     <div
@@ -66,7 +65,7 @@ export default function RfmAnalysisCard({ onOpen }) {
               RFM Customer Segmentation
             </h2>
             <span style={{ fontSize: '0.75rem', color: '#9E8F94', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              FEATURE #3 &bull; CUSTOMER VALUE GROUPING
+              FEATURE #3 &bull; K-MEANS CUSTOMER GROUPING
             </span>
           </div>
         </div>
@@ -89,21 +88,32 @@ export default function RfmAnalysisCard({ onOpen }) {
               <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#6B5E63' }}>{Number(totals.total_customers || 0).toLocaleString()} customers analyzed</span>
               <span style={{ fontSize: '0.78rem', color: '#9E8F94' }}>{Number(totals.total_eligible_buyers || 0).toLocaleString()} buyers</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-              {preview.map((s) => {
-                const pct = Math.round((Number(s.count || 0) / base) * 100);
-                const meta = SEGMENT_META[s.segment] || { color: '#B8505E' };
-                return (
-                  <div key={s.segment} style={{ display: 'flex', alignItems: 'center', gap: '0.7rem' }}>
-                    <span style={{ fontSize: '0.8rem', color: '#1F191B', fontWeight: 600, width: 140, flexShrink: 0 }}>{s.segment}</span>
-                    <span style={{ flex: 1, height: 8, borderRadius: 6, background: 'rgba(31,25,27,0.06)', overflow: 'hidden' }}>
-                      <span style={{ display: 'block', height: '100%', width: `${Math.min(100, pct)}%`, background: meta.color, borderRadius: 6 }} />
-                    </span>
-                    <span style={{ fontSize: '0.78rem', color: '#6B5E63', fontWeight: 700, width: 60, textAlign: 'right' }}>{Number(s.count || 0).toLocaleString()}</span>
-                  </div>
-                );
-              })}
-            </div>
+            {clusters.length === 0 ? (
+              <div style={{ minHeight: 96, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9E8F94', fontSize: '0.85rem', textAlign: 'center' }}>
+                No K-Means clustering yet.<br />Open the dashboard to run it over the stored RFM values.
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#6B5E63', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.6rem' }}>
+                  K-Means segmentation (4 clusters)
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                  {clusters.slice(0, 4).map((c) => {
+                    const pct = Math.round((Number(c.customer_count || 0) / base) * 100);
+                    const meta = KMEANS_CATEGORY_META[c.category] || { color: '#B8505E' };
+                    return (
+                      <div key={`${c.category}-${c.cluster_id}`} style={{ display: 'flex', alignItems: 'center', gap: '0.7rem' }}>
+                        <span style={{ fontSize: '0.8rem', color: '#1F191B', fontWeight: 600, width: 140, flexShrink: 0 }}>{c.category}</span>
+                        <span style={{ flex: 1, height: 8, borderRadius: 6, background: 'rgba(31,25,27,0.06)', overflow: 'hidden' }}>
+                          <span style={{ display: 'block', height: '100%', width: `${Math.min(100, pct)}%`, background: meta.color, borderRadius: 6 }} />
+                        </span>
+                        <span style={{ fontSize: '0.78rem', color: '#6B5E63', fontWeight: 700, width: 60, textAlign: 'right' }}>{Number(c.customer_count || 0).toLocaleString()}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>

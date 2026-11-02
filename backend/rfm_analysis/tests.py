@@ -20,14 +20,31 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import Role
 
-from . import (benefits, cache_manager, campaign_engine, coupon_validation,
-               engine, personalization, rfm_scoring, segment_store, segmentation,
-               utils, views)
+from . import (benefits, cache_manager, campaign_engine, clustering,
+               coupon_validation, engine, personalization, rfm_scoring,
+               segment_store, segmentation, utils, views)
 from .models import (
     Campaign, CampaignRedemption, CampaignStatus, CustomerSegment, DiscountType,
-    OfferCategory, RfmAnalysisState, UsageType,
+    KmeansRunState, OfferCategory, RfmAnalysisState, UsageType,
 )
 from .serializers import CampaignSerializer
+
+
+def _role_user(role):
+    """An authenticated, active user stub with one of the project's roles."""
+    user = mock.Mock()
+    user.is_authenticated = True
+    user.is_active = True
+    user.role = role
+    return user
+
+
+def _admin_user():
+    return _role_user(Role.ADMIN)
+
+
+def _customer_user():
+    return _role_user(Role.CUSTOMER)
 
 
 def _score(recency, frequency, monetary):
@@ -1164,4 +1181,430 @@ class RfmRefreshEndpointTests(TestCase):
                                return_value=(False, {'status': 'running'})):
             response = self._post(views.RfmRecalculateView)
         self.assertEqual(response.status_code, 409)
+
+
+class KMeansClusteringTests(TestCase):
+    """K-Means++ (k=4) over the persisted RFM values, without touching CLV's
+    inputs. Runs on the SQLite test backend against `rfm_customer_segments`."""
+
+    def setUp(self):
+        cache_manager.cache.clear()
+        CustomerSegment.objects.all().delete()
+        RfmAnalysisState.objects.all().delete()
+        KmeansRunState.objects.all().delete()
+        self.admin = _admin_user()
+        self.customer = _customer_user()
+        self._seed_four_groups()
+
+    def _seed_four_groups(self):
+        # Four well-separated RFM groups so K-Means genuinely finds four
+        # clusters and the profile mapping has a clear, mutually-exclusive
+        # answer for each spending / frequency / dormancy label:
+        #   High      - by far the highest Monetary (top average spend)
+        #   Frequent  - by far the highest Frequency (repeat buyers)
+        #   Moderate  - the middle residual on all three dimensions
+        #   At Risk   - the least recent (most dormant) group
+        groups = {
+            'high': dict(recency=10, freq=8, money=9000),
+            'frequent': dict(recency=8, freq=25, money=3000),
+            'moderate': dict(recency=20, freq=5, money=1500),
+            'atrisk': dict(recency=320, freq=4, money=1800),
+        }
+        records = []
+        counter = 0
+        for name, g in groups.items():
+            for i in range(60):
+                counter += 1
+                records.append({
+                    'customer_id': f'C{counter:04d}',
+                    # A rule-based segment (irrelevant to clustering) so the
+                    # stored row looks like a real completed RFM result.
+                    'segment': utils.SEGMENT_LOYAL,
+                    'tags': [],
+                    'monetary': g['money'] + (i % 7) * (g['money'] * 0.01),
+                    'recency_days': g['recency'] + (i % 5),
+                    'frequency': g['freq'] + (i % 3),
+                    'r_score': 3, 'f_score': 3, 'm_score': 3,
+                    'first_purchase_date': '2024-01-01',
+                    'last_purchase_date': '2026-01-01',
+                })
+        segment_store.store_records(records, version=1)
+
+    def _original_metrics(self):
+        return {r.customer_id: (r.recency, r.frequency, r.monetary)
+                for r in CustomerSegment.objects.all()}
+
+    def test_four_clusters_requested_and_all_buyers_assigned(self):
+        result = clustering.run_clustering(save=True)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['requested_clusters'], 4)
+        self.assertEqual(result['effective_clusters'], 4)
+        self.assertEqual(len(result['clusters']), 4)
+
+        total = sum(c['customer_count'] for c in result['clusters'])
+        self.assertEqual(total, CustomerSegment.objects.count())
+        # Every buyer has both a cluster id and a mapped category.
+        self.assertEqual(
+            CustomerSegment.objects.filter(
+                kmeans_cluster_id__isnull=True).count(), 0)
+        self.assertEqual(
+            CustomerSegment.objects.exclude(
+                kmeans_category='').count(), CustomerSegment.objects.count())
+
+    def test_scaler_only_touches_rfm_and_originals_are_preserved(self):
+        before = self._original_metrics()
+        clustering.run_clustering(save=True)
+        after = self._original_metrics()
+        # Original Recency / Frequency / Monetary are byte-for-byte unchanged.
+        self.assertEqual(before, after)
+        # Scaling used exactly the three RFM features (never CLV).
+        self.assertEqual(len(clustering.load_rfm_dataset()[1][0]), 3)
+
+    def test_mapping_is_from_profiles_not_cluster_id(self):
+        result = clustering.run_clustering(save=True)
+        by_cat = {c['category']: c for c in result['clusters']}
+        self.assertEqual(set(by_cat), set(utils.KMEANS_CATEGORIES))
+        # Business interpretation holds regardless of which numeric id K-Means
+        # happened to hand out: At Risk is the most dormant, High Spending the
+        # top-spending and Frequent Buyers the most frequent group, and the
+        # frequent cluster is genuinely recent compared with the dormant one.
+        self.assertEqual(
+            by_cat[utils.KMEANS_CATEGORY_AT_RISK]['avg_recency'],
+            max(c['avg_recency'] for c in result['clusters']))
+        self.assertEqual(
+            by_cat[utils.KMEANS_CATEGORY_HIGH_SPENDING]['avg_monetary'],
+            max(c['avg_monetary'] for c in result['clusters']))
+        self.assertEqual(
+            by_cat[utils.KMEANS_CATEGORY_FREQUENT_BUYERS]['avg_frequency'],
+            max(c['avg_frequency'] for c in result['clusters']))
+        self.assertLess(
+            by_cat[utils.KMEANS_CATEGORY_FREQUENT_BUYERS]['avg_recency'],
+            by_cat[utils.KMEANS_CATEGORY_AT_RISK]['avg_recency'])
+
+    def test_rerun_updates_rows_without_duplicates(self):
+        clustering.run_clustering(save=True)
+        count_first = CustomerSegment.objects.count()
+        first = {r.customer_id: (r.kmeans_cluster_id, r.kmeans_category)
+                 for r in CustomerSegment.objects.all()}
+
+        clustering.run_clustering(save=True)   # same seeded algorithm
+        count_second = CustomerSegment.objects.count()
+        second = {r.customer_id: (r.kmeans_cluster_id, r.kmeans_category)
+                  for r in CustomerSegment.objects.all()}
+
+        self.assertEqual(count_first, count_second)   # no duplicate customers
+        self.assertEqual(first, second)               # stable, seeded result
+
+    def test_rule_based_segment_and_rfm_store_are_untouched(self):
+        # Clustering must not disturb the six-way segment CLV depends on.
+        clustering.run_clustering(save=True)
+        for row in CustomerSegment.objects.all():
+            self.assertEqual(row.segment, utils.SEGMENT_LOYAL)
+            self.assertIsNotNone(row.monetary)
+
+    def test_dry_run_persists_nothing(self):
+        result = clustering.run_clustering(save=False)
+        self.assertTrue(result['available'])
+        self.assertEqual(
+            CustomerSegment.objects.filter(
+                kmeans_cluster_id__isnull=True).count(),
+            CustomerSegment.objects.count())
+
+    def test_empty_population_is_handled(self):
+        CustomerSegment.objects.all().delete()
+        result = clustering.run_clustering(save=True)
+        self.assertFalse(result['available'])
+        self.assertEqual(result['clustered'], 0)
+
+    def test_summary_reads_stored_state_after_restart(self):
+        clustering.run_clustering(save=True)
+        summary = clustering.clustering_summary()
+        self.assertTrue(summary['available'])
+        self.assertEqual(len(summary['clusters']), 4)
+        self.assertEqual(
+            sum(c['customer_count'] for c in summary['clusters']),
+            CustomerSegment.objects.count())
+
+    def test_clusters_endpoint_is_admin_only_and_serves_summary(self):
+        clustering.run_clustering(save=True)
+
+        def _get(user):
+            request = APIRequestFactory().get('/api/analytics/rfm/clusters')
+            force_authenticate(request, user=user)
+            response = views.RfmClustersView.as_view()(request)
+            response.render()
+            return response
+
+        customer = mock.Mock()
+        customer.is_authenticated = True
+        customer.is_active = True
+        customer.role = Role.CUSTOMER
+        self.assertEqual(_get(customer).status_code, 403)
+
+        admin = mock.Mock()
+        admin.is_authenticated = True
+        admin.is_active = True
+        admin.role = Role.ADMIN
+        response = _get(admin)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['available'])
+        self.assertEqual(len(response.data['clusters']), 4)
+
+    # ---- run state, percentages and the cluster customer list ----
+
+    def _admin_get(self, view, params):
+        request = APIRequestFactory().get('/api/analytics/rfm/clusters/customers', params)
+        force_authenticate(request, user=self.admin)
+        response = view.as_view()(request)
+        response.render()
+        return response
+
+    def test_run_state_records_the_latest_clustering_run(self):
+        clustering.run_clustering(save=True)
+        state = KmeansRunState.objects.get(pk=KmeansRunState.SINGLETON_ID)
+        # Which RFM version was clustered, when, and how each cluster was mapped.
+        self.assertEqual(state.rfm_version, 1)
+        self.assertIsNotNone(state.completed_at)
+        self.assertEqual(state.n_clusters, 4)
+        self.assertEqual(state.clustered, CustomerSegment.objects.count())
+        self.assertEqual({row['category'] for row in state.mapping},
+                         set(utils.KMEANS_CATEGORIES))
+        # The standardized values are bookkeeping only - never written per buyer.
+        self.assertEqual(set(state.scaler), {'mean', 'scale'})
+        self.assertEqual(len(state.scaler['mean']), 3)
+
+    def test_dry_run_stores_no_run_state(self):
+        clustering.run_clustering(save=False)
+        self.assertFalse(KmeansRunState.objects.exists())
+
+    def test_percentages_are_of_the_clustered_population(self):
+        clustering.run_clustering(save=True)
+        summary = clustering.clustering_summary()
+        self.assertEqual(summary['total'], summary['clustered'])
+        self.assertEqual(summary['clustered'], CustomerSegment.objects.count())
+        # Four categories that add up to ~100% (rounding aside), because the
+        # denominator is exactly the population that was clustered.
+        self.assertAlmostEqual(sum(c['percent'] for c in summary['clusters']),
+                               100, delta=1)
+        self.assertEqual(summary['ambiguities'], [])
+        self.assertTrue(all(c['supported'] for c in summary['clusters']))
+
+    def test_unsupported_label_is_reported_instead_of_forced(self):
+        # A population of pure one-time buyers: no cluster has any repeat habit,
+        # so "Frequent Buyers" cannot be supported by any of them and must be
+        # reported with the contradicting numbers rather than silently applied.
+        # Clusters are separated by Recency and Monetary only (Frequency fixed).
+        CustomerSegment.objects.all().delete()
+        groups = {
+            'a': dict(recency=4, money=9000),
+            'b': dict(recency=15, money=4000),
+            'c': dict(recency=80, money=1800),
+            'd': dict(recency=300, money=500),
+        }
+        records = []
+        counter = 0
+        for _name, g in groups.items():
+            for i in range(60):
+                counter += 1
+                records.append({
+                    'customer_id': f'N{counter:04d}',
+                    'segment': utils.SEGMENT_AT_RISK,
+                    'tags': [],
+                    'monetary': g['money'] + (i % 7) * 10,
+                    'recency_days': g['recency'] + (i % 5),
+                    'frequency': 1,  # every buyer is a one-time purchaser
+                    'r_score': 2, 'f_score': 4, 'm_score': 4,
+                    'first_purchase_date': '2023-01-01',
+                    'last_purchase_date': '2024-06-01',
+                })
+        segment_store.store_records(records, version=2)
+
+        result = clustering.run_clustering(save=True)
+        by_cat = {c['category']: c for c in result['clusters']}
+        frequent = by_cat[utils.KMEANS_CATEGORY_FREQUENT_BUYERS]
+        self.assertFalse(frequent['supported'])
+        self.assertTrue(frequent['cautions'])
+        self.assertTrue(any(utils.KMEANS_CATEGORY_FREQUENT_BUYERS in text
+                            for text in result['ambiguities']))
+        # The label is still carried by a real cluster (the buyer is never
+        # uncounted); only its trustworthiness is reported.
+        self.assertEqual(sum(c['customer_count'] for c in result['clusters']),
+                         len(records))
+
+    def test_cluster_customers_endpoint_returns_that_cluster_members(self):
+        result = clustering.run_clustering(save=True)
+        for cluster in result['clusters']:
+            with self.subTest(category=cluster['category']):
+                response = self._admin_get(views.RfmClusterCustomersView, {
+                    'category': cluster['category'],
+                    'cluster_id': cluster['cluster_id'],
+                    'page_size': 5,
+                })
+                self.assertEqual(response.status_code, 200)
+                # The list agrees with the bar exactly: same category, same
+                # numeric cluster, same total.
+                self.assertEqual(response.data['count'], cluster['customer_count'])
+                self.assertEqual(response.data['cluster_id'], cluster['cluster_id'])
+                self.assertEqual(len(response.data['results']), 5)
+                for row in response.data['results']:
+                    self.assertEqual(row['category'], cluster['category'])
+                    self.assertEqual(row['cluster_id'], cluster['cluster_id'])
+                    self.assertTrue(row['customer_id'])
+                    # The displayed R/F/M are that exact buyer's ORIGINAL,
+                    # unscaled persisted values - never another cluster's.
+                    source = CustomerSegment.objects.get(
+                        customer_id=row['customer_id'])
+                    self.assertEqual(
+                        (source.kmeans_cluster_id, source.kmeans_category),
+                        (cluster['cluster_id'], cluster['category']))
+                    self.assertEqual(row['recency'], source.recency)
+                    self.assertEqual(row['frequency'], source.frequency)
+                    self.assertEqual(
+                        row['monetary'], float(source.monetary))
+
+    def test_cluster_pages_never_repeat_or_skip_a_customer(self):
+        result = clustering.run_clustering(save=True)
+        cluster = result['clusters'][0]
+        size = 7
+        seen = []
+        pages = (cluster['customer_count'] + size - 1) // size
+        for page in range(1, pages + 1):
+            response = self._admin_get(views.RfmClusterCustomersView, {
+                'category': cluster['category'],
+                'cluster_id': cluster['cluster_id'],
+                'page': page, 'page_size': size,
+            })
+            self.assertEqual(response.data['total_pages'], pages)
+            seen += [r['customer_id'] for r in response.data['results']]
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(
+            set(seen),
+            set(CustomerSegment.objects.filter(
+                kmeans_category=cluster['category'],
+                kmeans_cluster_id=cluster['cluster_id'],
+            ).values_list('customer_id', flat=True)))
+
+    def test_cluster_customer_search_and_unknown_category(self):
+        result = clustering.run_clustering(save=True)
+        cluster = result['clusters'][0]
+        first = self._admin_get(views.RfmClusterCustomersView, {
+            'category': cluster['category'], 'cluster_id': cluster['cluster_id'],
+        })
+        wanted = first.data['results'][0]['customer_id']
+        found = self._admin_get(views.RfmClusterCustomersView, {
+            'category': cluster['category'], 'search': wanted,
+        })
+        self.assertEqual(found.data['count'], 1)
+        self.assertEqual(found.data['results'][0]['customer_id'], wanted)
+
+        missing = self._admin_get(views.RfmClusterCustomersView, {'category': 'Champions'})
+        self.assertEqual(missing.status_code, 404)
+        bad = self._admin_get(views.RfmClusterCustomersView, {
+            'category': utils.KMEANS_CATEGORY_HIGH_SPENDING, 'cluster_id': 'not-an-int'})
+        self.assertEqual(bad.status_code, 404)
+
+    def test_cluster_customers_are_admin_only(self):
+        clustering.run_clustering(save=True)
+        request = APIRequestFactory().get('/api/analytics/rfm/clusters/customers',
+                                          {'category': utils.KMEANS_CATEGORY_HIGH_SPENDING})
+        force_authenticate(request, user=self.customer)
+        response = views.RfmClusterCustomersView.as_view()(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_rerun_relabels_in_place_and_the_list_follows(self):
+        clustering.run_clustering(save=True)
+        rows_before = CustomerSegment.objects.count()
+        result = clustering.run_clustering(save=True)
+        self.assertEqual(CustomerSegment.objects.count(), rows_before)
+        self.assertEqual(KmeansRunState.objects.count(), 1)
+
+        summary = clustering.clustering_summary()
+        by_cat = {c['category']: c for c in summary['clusters']}
+        for cluster in result['clusters']:
+            response = self._admin_get(views.RfmClusterCustomersView, {
+                'category': cluster['category'],
+                'cluster_id': cluster['cluster_id'],
+                'page_size': 1,
+            })
+            self.assertEqual(response.data['count'],
+                             by_cat[cluster['category']]['customer_count'])
+
+    def test_rerun_after_a_new_buyer_is_added_relabels_without_duplicates(self):
+        clustering.run_clustering(save=True)
+        # A later RFM run adds a buyer; re-clustering must cover them too and
+        # still hold exactly one row per customer.
+        segment_store.store_records([{
+            'customer_id': 'ZZ9999', 'segment': utils.SEGMENT_NEW, 'tags': [],
+            'monetary': 250, 'recency_days': 6, 'frequency': 1,
+            'r_score': 5, 'f_score': 1, 'm_score': 1,
+            'first_purchase_date': '2026-01-01', 'last_purchase_date': '2026-01-01',
+        }], version=2)
+        self.assertEqual(
+            CustomerSegment.objects.filter(kmeans_cluster_id__isnull=True).count(), 1)
+
+        result = clustering.run_clustering(save=True)
+        self.assertEqual(result['clustered'], CustomerSegment.objects.count())
+        self.assertEqual(
+            CustomerSegment.objects.filter(kmeans_cluster_id__isnull=True).count(), 0)
+        self.assertEqual(
+            sum(c['customer_count'] for c in clustering.clustering_summary()['clusters']),
+            CustomerSegment.objects.count())
+
+    def test_summary_payload_only_carries_the_kmeans_segmentation(self):
+        # The RFM page is segmented by K-Means only: the payload that feeds it
+        # reports the four clusters and no old six-category distribution.
+        clustering.run_clustering(save=True)
+        payload = clustering.clustering_summary()
+        self.assertEqual({c['category'] for c in payload['clusters']},
+                         set(utils.KMEANS_CATEGORIES))
+        self.assertNotIn('segments', payload)
+
+    def _corrupt_to_legacy_labels(self):
+        # Simulate a run persisted before the current four-category vocabulary:
+        # rewrite every stored label to a legacy name in BOTH the buyer rows and
+        # the run-state mapping, leaving the numeric cluster ids untouched.
+        CustomerSegment.objects.exclude(kmeans_cluster_id__isnull=True).update(
+            kmeans_category='Loyal Customer')
+        state = KmeansRunState.objects.get(pk=KmeansRunState.SINGLETON_ID)
+        state.mapping = [dict(row, category='Loyal Customer')
+                         for row in state.mapping]
+        state.unsupported_categories = []
+        state.save()
+        cache_manager.cache.clear()   # drop the memo so reads see the legacy run
+
+    def test_relabel_refreshes_legacy_labels_without_a_rerun(self):
+        clustering.run_clustering(save=True)
+        fresh = {r.customer_id: (r.kmeans_cluster_id, r.kmeans_category)
+                 for r in CustomerSegment.objects.all()}
+        self._corrupt_to_legacy_labels()
+        self.assertFalse(clustering.labels_are_current(clustering.get_run_state()))
+
+        result = clustering.relabel_stored_run()
+        self.assertIsNotNone(result)
+        self.assertTrue(clustering.labels_are_current(clustering.get_run_state()))
+
+        after = {r.customer_id: (r.kmeans_cluster_id, r.kmeans_category)
+                 for r in CustomerSegment.objects.all()}
+        # No buyer moved cluster (ids identical) and the refreshed labels equal
+        # what the fresh clustering run produced.
+        self.assertEqual({cid: v[0] for cid, v in after.items()},
+                         {cid: v[0] for cid, v in fresh.items()})
+        self.assertEqual({cid: v[1] for cid, v in after.items()},
+                         {cid: v[1] for cid, v in fresh.items()})
+        # Same population, same four categories, counts preserved.
+        summary = clustering.clustering_summary()
+        self.assertEqual(sum(c['customer_count'] for c in summary['clusters']),
+                         len(fresh))
+        self.assertEqual({c['category'] for c in summary['clusters']},
+                         set(utils.KMEANS_CATEGORIES))
+
+    def test_reconcile_heals_a_legacy_run_once_then_is_a_noop(self):
+        clustering.run_clustering(save=True)
+        self._corrupt_to_legacy_labels()
+        # The read-path guard heals the legacy persisted labels ...
+        self.assertTrue(clustering.reconcile_stored_labels())
+        # ... and a second call (already current) changes nothing.
+        self.assertFalse(clustering.reconcile_stored_labels())
+        self.assertTrue(clustering.labels_are_current(clustering.get_run_state()))
+
 

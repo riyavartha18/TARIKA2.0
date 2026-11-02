@@ -1,4 +1,14 @@
-"""Finalized rule-based customer segmentation (no K-Means, no ML clustering).
+"""Legacy percentile labels carried by each buyer's stored RFM result.
+
+These rules no longer segment the Customer RFM Analysis page: that page is
+segmented by K-Means++ over the standardized RFM values (see `clustering.py`).
+This module is kept running for exactly one reason - the resulting `segment`
+label is read per buyer by two features that must keep working, CLV (its At-Risk
+reporting and per-segment value analysis) and campaign targeting / personalized
+offers (`campaign_audience`, `personalization`). Those features consume the
+original unscaled metrics and this label; none of them reads the clusters, and
+clustering never reads or rewrites this label. Nothing on the RFM page presents
+these six names as current segmentation any more.
 
 Segments are assigned with the exact percentile conditions fixed by the
 business rules, evaluated in a strict priority order so the *first* matching

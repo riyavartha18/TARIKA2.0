@@ -348,21 +348,87 @@ def set_never_purchased(version, rows):
     cache.set(never_purchased_key(version), rows, utils.SNAPSHOT_TTL_SECONDS)
 
 
-# Dashboard KPIs + segment distribution derived by SQL aggregation over the
-# persisted result table. Keyed by the analysis version, so a completed refresh
-# (which bumps the version) makes the previous aggregate unreachable and the
-# next read recomputes from current stored results - never a stale segment mix.
-def dashboard_totals_key(version):
-    return f'rfm:dashboard_totals:{version}'
+# Dashboard KPIs + segment distribution + K-Means clusters, derived by one SQL
+# aggregation over the persisted result table (see `queries.fetch_dashboard_bundle`).
+# Keyed by the analysis version AND the clustering epoch: a completed RFM refresh
+# bumps the version, re-running clustering bumps the epoch, and either makes the
+# previous aggregate unreachable so the next read recomputes from current data -
+# never a stale segment mix or a stale clustering. A warm dashboard render is a
+# pure cache read (zero database round trips), which is what removes the ~250 ms
+# per-query remote-Neon latency from every page load once the bundle is cached.
+def dashboard_bundle_key(version, kmeans_epoch):
+    return f'rfm:dashboard_bundle:{version}:{kmeans_epoch}'
 
 
-def get_dashboard_totals(version):
+def get_dashboard_bundle(version, kmeans_epoch):
     if version is None:
         return None
-    return cache.get(dashboard_totals_key(version))
+    return cache.get(dashboard_bundle_key(version, kmeans_epoch))
 
 
-def set_dashboard_totals(version, payload):
+def set_dashboard_bundle(version, kmeans_epoch, payload):
     if version is None:
         return
-    cache.set(dashboard_totals_key(version), payload, utils.SNAPSHOT_TTL_SECONDS)
+    cache.set(dashboard_bundle_key(version, kmeans_epoch), payload,
+              utils.SNAPSHOT_TTL_SECONDS)
+
+
+# The single-row analysis state (version / dates / buyer_count) that every
+# summary read needs to know *which* cached bundle to load and how old the
+# analysis is. Reading it is normally one remote round trip; memoizing it turns
+# the steady-state summary into a pure cache path. It is written fresh by a
+# completed run and dropped whenever results are re-persisted, so it can never
+# point a reader at a superseded version.
+def get_state_memo():
+    return cache.get(utils.RFM_ANALYSIS_STATE_MEMO_KEY)
+
+
+def set_state_memo(payload):
+    cache.set(utils.RFM_ANALYSIS_STATE_MEMO_KEY, payload,
+              utils.SNAPSHOT_TTL_SECONDS)
+
+
+def clear_state_memo():
+    cache.delete(utils.RFM_ANALYSIS_STATE_MEMO_KEY)
+
+
+# Bumped whenever a K-Means clustering run persists new labels. Part of the
+# bundle cache key, so a rerun is visible on the next summary read without
+# waiting for (or forcing) a full RFM recompute.
+def get_kmeans_epoch():
+    epoch = cache.get(utils.RFM_KMEANS_EPOCH_KEY)
+    return epoch if isinstance(epoch, int) and epoch >= 0 else 0
+
+
+def bump_kmeans_epoch():
+    return _bump_epoch(utils.RFM_KMEANS_EPOCH_KEY)
+
+
+# The single-row K-Means run state (which RFM version was clustered, when, and
+# how each cluster was mapped) is memoized exactly like the analysis state memo:
+# the dashboard needs it on every render, and one cached read replaces a remote
+# round trip. Written fresh by a completed clustering run.
+def get_kmeans_state_memo():
+    return cache.get(utils.RFM_KMEANS_STATE_MEMO_KEY)
+
+
+def set_kmeans_state_memo(payload):
+    cache.set(utils.RFM_KMEANS_STATE_MEMO_KEY, payload, utils.SNAPSHOT_TTL_SECONDS)
+
+
+def clear_kmeans_state_memo():
+    cache.delete(utils.RFM_KMEANS_STATE_MEMO_KEY)
+
+
+def acquire_kmeans_run_lock():
+    """True when this caller may run clustering; False when one is in progress.
+
+    Same atomic test-and-set as the analysis lock, on its own key so a
+    clustering run and an analysis run never block each other.
+    """
+    return cache.add(utils.RFM_KMEANS_RUN_LOCK_KEY, 1,
+                     utils.KMEANS_RUN_LOCK_TTL_SECONDS)
+
+
+def release_kmeans_run_lock():
+    cache.delete(utils.RFM_KMEANS_RUN_LOCK_KEY)

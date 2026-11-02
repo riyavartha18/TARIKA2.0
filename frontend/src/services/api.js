@@ -1809,6 +1809,61 @@ export async function getRfmSegmentCustomers(token, segment, params = {}) {
   }
 }
 
+/** GET /api/analytics/rfm/clusters -> current K-Means++ (k=4) clustering. */
+export async function getRfmClusters(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/clusters`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch K-Means clusters.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching K-Means clusters.' };
+  }
+}
+
+/** POST /api/analytics/rfm/clusters -> run K-Means++ over the persisted RFM. */
+export async function runRfmClustering(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/clusters`, {
+      method: 'POST', headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to run K-Means clustering.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error running K-Means clustering.' };
+  }
+}
+
+/**
+ * GET /api/analytics/rfm/clusters/customers -> one page of a cluster's buyers.
+ * Always server-side paginated (page/page_size/search/sort/dir), so a cluster
+ * of ~100k customers never reaches the browser at once.
+ */
+export async function getRfmClusterCustomers(token, category, params = {}) {
+  try {
+    const query = new URLSearchParams();
+    query.append('category', category);
+    if (params.cluster_id !== undefined && params.cluster_id !== null) {
+      query.append('cluster_id', params.cluster_id);
+    }
+    if (params.page) query.append('page', params.page);
+    if (params.page_size) query.append('page_size', params.page_size);
+    if (params.search) query.append('search', params.search);
+    if (params.sort) query.append('sort', params.sort);
+    if (params.dir) query.append('dir', params.dir);
+    const url = `${API_BASE_URL}/api/analytics/rfm/clusters/customers?${query.toString()}`;
+    const response = await fetch(url, { headers: authHeaders(token) });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch cluster customers.' };
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching cluster customers.' };
+  }
+}
+
 /** GET /api/campaigns/ -> list campaigns with admin filters (admin). */
 export async function getCampaigns(token, params = {}) {
   try {

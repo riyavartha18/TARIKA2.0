@@ -46,3 +46,25 @@ export const BIG_SPENDER_META = {
   color: '#8E3642',
   soft: 'rgba(142, 54, 66, 0.10)',
 };
+
+// Display colors/blurbs for the four K-Means++ business categories. The
+// clustering itself runs on the backend; this is presentation only, kept in
+// one place so the category names match the backend `clustering` labels exactly.
+export const KMEANS_CATEGORY_META = {
+  'Moderate Spending': {
+    blurb: 'Middle-of-the-road spend, frequency and recency.',
+    color: '#B08A2E',
+  },
+  'High Spending': {
+    blurb: 'The highest-value buyers by Monetary.',
+    color: '#B8505E',
+  },
+  'At Risk': {
+    blurb: 'Long-dormant buyers at risk of churning.',
+    color: '#3E7CB1',
+  },
+  'Frequent Buyers': {
+    blurb: 'Repeat purchasers with the highest order frequency.',
+    color: '#3F8F6B',
+  },
+};

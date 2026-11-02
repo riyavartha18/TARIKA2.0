@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../auth/AuthContext';
-import { getRfmSummary, getRfmSegmentCustomers } from '../../services/api';
+import {
+  getRfmSummary, getRfmSegmentCustomers, getRfmClusterCustomers,
+} from '../../services/api';
+import { KMEANS_CATEGORY_META } from '../../data/rfmSegments';
 import { ArrowLeft, Search, Loader2, X } from 'lucide-react';
 
 // Light palette kept only for the unchanged "View Customers" detail screen.
@@ -27,6 +30,18 @@ const DARK = {
 
 const formatMoney = (value) =>
   `₹${Number(value || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+// "Last clustered 2 Nov 2026, 15:04" for the clustering run stamp, so the page
+// always says when the stored labels were actually computed.
+const formatStamp = (iso) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-IN', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+};
 
 // Indian compact notation (K / L / Cr) for the big monetary totals; the exact
 // rupee amount stays available on hover via the tooltip.
@@ -104,11 +119,11 @@ function DarkMetric({ label, value, format, title }) {
   );
 }
 
-// One horizontal progress-bar row: segment name left, "count (pct%)" right,
-// blue fill underneath that animates to the segment's percentage on load and
-// transitions smoothly when the data refreshes. Clicking opens that segment's
-// customer list (unchanged View Customers behaviour).
-function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0 }) {
+// One horizontal progress-bar row: category name left, "count (pct%)" right,
+// rose fill underneath that animates to the cluster's share of the clustered
+// buyers on load and transitions smoothly when the data refreshes. Clicking
+// opens that cluster's actual customers.
+function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0, caution = false }) {
   const reduced = usePrefersReducedMotion();
   const target = Math.min(100, Math.max(0, pct));
   const [width, setWidth] = useState(reduced ? target : 0);
@@ -130,7 +145,14 @@ function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0 })
       style={{ animationDelay: `${Math.min(index, 8) * 45}ms` }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-        <span style={{ fontSize: '0.95rem', color: DARK.text, fontWeight: 500 }}>{label}</span>
+        <span style={{ fontSize: '0.95rem', color: DARK.text, fontWeight: 500 }}>
+          {label}
+          {caution && (
+            <span style={{ marginLeft: 8, fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#8A5A00', backgroundColor: 'rgba(176,138,46,0.14)', borderRadius: 6, padding: '2px 6px', verticalAlign: 'middle' }}>
+              label not supported
+            </span>
+          )}
+        </span>
         <span style={{ fontSize: '0.88rem', color: DARK.label, fontVariantNumeric: 'tabular-nums' }}>
           {Math.round(countAnim).toLocaleString('en-IN')} <span style={{ color: '#9E8F94' }}>({pct}%)</span>
         </span>
@@ -152,7 +174,10 @@ export default function AdminRFMView({ onBack }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeSegment, setActiveSegment] = useState(null);
+  // The K-Means cluster whose actual customers are open, and (for the two
+  // independent secondary-insight rows) the legacy label being listed.
+  const [activeCluster, setActiveCluster] = useState(null);
+  const [activeInsight, setActiveInsight] = useState(null);
 
   const loadSummary = useCallback(async () => {
     const res = await getRfmSummary(token);
@@ -194,7 +219,6 @@ export default function AdminRFMView({ onBack }) {
   const avgFrequency = buyers ? (orders / buyers) : 0;
   const pctOfBuyers = (n) => Math.round((Number(n || 0) / buyers) * 100);
   const pctOfCustomers = (n) => Math.round((Number(n || 0) / customers) * 100);
-  const primarySegments = (summary?.segments || []).filter((s) => s.segment !== 'Never Purchased');
 
   return (
     <div style={{ backgroundColor: DARK.bg, borderRadius: 20, padding: '1.6rem 1.8rem', color: DARK.text, border: `1px solid ${PALETTE.border}`, boxShadow: '0 8px 30px rgba(31, 25, 27, 0.04)' }}>
@@ -250,57 +274,96 @@ export default function AdminRFMView({ onBack }) {
 
           <Divider />
 
-          {/* 2. Segment distribution: horizontal progress bars */}
-          <div style={{ fontSize: '0.82rem', fontWeight: 650, color: DARK.label, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.5rem' }}>
-            Segment distribution
+          {/* 2. K-Means++ customer segmentation: the page's only segmentation,
+              in the same horizontal progress-bar format the old rule-based
+              distribution used. Counts, shares and labels all come from the
+              stored K-Means++ assignment of the persisted RFM values. */}
+          <div style={{ fontSize: '0.95rem', fontWeight: 650, color: DARK.label, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: '0.7rem', marginBottom: '0.5rem' }}>
+            K-Means customer segmentation (4 clusters)
           </div>
-          {primarySegments.map((s, i) => (
-            <SegmentBar
-              key={s.segment}
-              index={i}
-              label={s.segment}
-              count={s.count}
-              pct={pctOfBuyers(s.count)}
-              onClick={() => setActiveSegment(s.segment)}
-            />
-          ))}
+          {(() => {
+            const kmeans = summary?.kmeans;
+            const clusters = kmeans?.clusters || [];
+            if (!kmeans?.available || clusters.length === 0) {
+              return (
+                <p style={{ margin: '0 0 0.35rem', fontSize: '0.78rem', color: '#9E8F94' }}>
+                  No clustering results yet.
+                </p>
+              );
+            }
+            const state = kmeans.state || {};
+            const stamp = formatStamp(state.completed_at);
+            const basis = Number(kmeans.total || buyers);
+            return (
+              <>
+                {clusters.map((c, i) => (
+                  <SegmentBar
+                    key={`${c.category}-${c.cluster_id}`}
+                    index={i}
+                    label={c.category}
+                    count={c.customer_count}
+                    pct={c.percent ?? pctOfBuyers(c.customer_count)}
+                    color={(KMEANS_CATEGORY_META[c.category] || {}).color || DARK.barSecondary}
+                    caution={c.supported === false}
+                    onClick={() => setActiveCluster(c)}
+                  />
+                ))}
+                
+                {kmeans.unsupported_categories?.length > 0 && (
+                  <p style={{ margin: '0.4rem 0 0', fontSize: '0.74rem', color: '#9E8F94' }}>
+                    No cluster maps onto: {kmeans.unsupported_categories.join(', ')}
+                  </p>
+                )}
+                {kmeans.ambiguities?.length > 0 && (
+                  <div style={{ marginTop: '0.6rem', fontSize: '0.76rem', color: '#6B5E63', backgroundColor: 'rgba(176,138,46,0.08)', border: '1px solid rgba(176,138,46,0.25)', borderRadius: 10, padding: '0.6rem 0.75rem' }}>
+                    <div style={{ fontWeight: 700, marginBottom: 3, color: '#8A5A00' }}>What the data does not support</div>
+                    <ul style={{ margin: 0, paddingLeft: '1rem', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {kmeans.ambiguities.map((text) => (<li key={text}>{text}</li>))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
-          {/* 3. Secondary insights: kept separate, not primary segments */}
-          <div style={{ height: 1, background: DARK.divider, margin: '1.1rem 0 0.85rem' }} />
-          <div style={{ fontSize: '0.78rem', fontWeight: 650, color: DARK.label, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.15rem' }}>
+          {/* 3. Secondary insights: independent measures, not clustering results.
+              Never Purchased is a population count, not one of the four clusters,
+              so it is listed separately with its own denominator. */}
+          <div style={{ height: 1, background: DARK.divider, margin: '2rem 0 0.85rem' }} />
+          <div style={{ fontSize: '0.95rem', fontWeight: 650, color: DARK.label, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.15rem' }}>
             Secondary insights
           </div>
-          <p style={{ margin: '0 0 0.5rem', fontSize: '0.78rem', color: '#9E8F94' }}>
-            These overlap with the segments above and are not counted in the totals.
-          </p>
           <SegmentBar
             index={0}
-            label="Big Spenders"
-            count={summary.big_spender_count}
-            pct={pctOfBuyers(summary.big_spender_count)}
-            color={DARK.barSecondary}
-            onClick={() => setActiveSegment('Big Spender')}
-          />
-          <SegmentBar
-            index={1}
             label="Never Purchased"
             count={totals.never_purchased_customers}
             pct={pctOfCustomers(totals.never_purchased_customers)}
             color={DARK.barSecondary}
-            onClick={() => setActiveSegment('Never Purchased')}
+            onClick={() => setActiveInsight('Never Purchased')}
           />
 
           {error && <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#B3261E' }}>{error}</div>}
         </>
       )}
 
-      {/* Clicking any segment bar opens that segment's actual customers in a
-          full-screen modal (durable persisted RFM classification). */}
-      {activeSegment && (
-        <SegmentCustomersModal
-          segment={activeSegment}
+      {/* Clicking a cluster bar opens that cluster's actual customers (the rows
+          carrying the latest K-Means assignment), server-side paginated. */}
+      {activeCluster && (
+        <ClusterCustomersModal
+          key={`${activeCluster.category}-${activeCluster.cluster_id}`}
+          cluster={activeCluster}
           token={token}
-          onClose={() => setActiveSegment(null)}
+          onClose={() => setActiveCluster(null)}
+        />
+      )}
+
+      {/* The two independent insight rows still list from the persisted rows. */}
+      {activeInsight && (
+        <SegmentCustomersModal
+          key={activeInsight}
+          segment={activeInsight}
+          token={token}
+          onClose={() => setActiveInsight(null)}
         />
       )}
     </div>
@@ -308,11 +371,23 @@ export default function AdminRFMView({ onBack }) {
 }
 
 // Only identity is shown: the individual Recency / Frequency / Value scores are
-// no longer displayed per customer. The RFM calculation and the segment it
-// produces still run unchanged on the server (Segment column, filtering).
+// no longer displayed per customer. The cluster membership itself is what the
+// list is about, so the row shows the K-Means cluster (id + business category).
 const DETAIL_COLUMNS = [
   { key: 'customer_name', label: 'Customer', sortable: false },
   { key: 'customer_id', label: 'Customer ID', sortable: true },
+];
+
+// The K-Means cluster drill-down additionally shows each buyer's ORIGINAL
+// (unscaled) Recency / Frequency / Monetary, straight from the persisted RFM row
+// (never the standardized clustering values). Sort keys match the backend
+// SEGMENT_SORT_FIELDS so server-side ordering stays an indexed scan.
+const CLUSTER_DETAIL_COLUMNS = [
+  { key: 'customer_name', label: 'Customer', sortable: false },
+  { key: 'customer_id', label: 'Customer ID', sortable: true },
+  { key: 'recency', label: 'Recency (days)', sortable: true },
+  { key: 'frequency', label: 'Frequency', sortable: true },
+  { key: 'monetary', label: 'Monetary', sortable: true, format: formatMoney },
 ];
 
 function SkeletonRows() {
@@ -325,11 +400,11 @@ function SkeletonRows() {
   );
 }
 
-// Full-screen modal listing the ACTUAL customers of one RFM segment. The list
-// comes from the persisted RFM classification (rfm_customer_segments), so the
-// members are exactly the customers the segment bar was computed from. Shows
-// customer name + ID for identification, the total count, search and
-// pagination. Portal + high z-index keep the dashboard fully hidden behind it.
+// Full-screen modal listing the actual customers behind the independent
+// secondary-insight row (Never Purchased). It is not a segmentation category but
+// a population count, so the list shows the clicked label only and never
+// presents an old segment name as a current clustering result. Portal + high
+// z-index keep the dashboard hidden.
 function SegmentCustomersModal({ segment, token, onClose }) {
   const [rows, setRows] = useState([]);
   const [meta, setMeta] = useState({ count: 0, page: 1, total_pages: 1 });
@@ -377,7 +452,7 @@ function SegmentCustomersModal({ segment, token, onClose }) {
         <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8rem', flexWrap: 'wrap', paddingRight: '2rem' }}>
           <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.2rem', color: PALETTE.ink, margin: 0 }}>{segment}</h3>
           <span style={{ color: PALETTE.faint, fontSize: '0.82rem' }}>
-            {Number(meta.count).toLocaleString('en-IN')} customers in this segment
+            {Number(meta.count).toLocaleString('en-IN')} customers with this label
           </span>
           <div style={{ marginLeft: 'auto', position: 'relative' }}>
             <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: PALETTE.faint }} />
@@ -401,7 +476,7 @@ function SegmentCustomersModal({ segment, token, onClose }) {
                     {col.label}{col.sortable && sort === col.key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}
                   </th>
                 ))}
-                <th style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700 }}>Segment</th>
+                <th style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700 }}>Label</th>
               </tr>
             </thead>
             <tbody>
@@ -413,10 +488,7 @@ function SegmentCustomersModal({ segment, token, onClose }) {
                     </td>
                   ))}
                   <td style={{ padding: '0.65rem 0.9rem' }}>
-                    <span style={{ backgroundColor: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>{r.segment}</span>
-                    {(r.tags || []).map((t) => (
-                      <span key={t} style={{ marginLeft: 4, backgroundColor: 'rgba(184,80,94,0.10)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.7rem' }}>{t}</span>
-                    ))}
+                    <span style={{ backgroundColor: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>{segment}</span>
                   </td>
                 </tr>
               ))}
@@ -425,6 +497,144 @@ function SegmentCustomersModal({ segment, token, onClose }) {
           {loading && rows.length === 0 && <SkeletonRows />}
           {!loading && rows.length === 0 && (
             <div style={{ padding: '2rem', textAlign: 'center', color: PALETTE.faint, fontSize: '0.85rem' }}>No customers found.</div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.6rem', marginTop: '0.8rem' }}>
+          <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={meta.page <= 1} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page <= 1 ? 'not-allowed' : 'pointer', opacity: meta.page <= 1 ? 0.4 : 1 }}>Previous</button>
+          <span style={{ color: PALETTE.muted, fontSize: '0.85rem' }}>Page {meta.page} of {meta.total_pages}</span>
+          <button type="button" onClick={() => setPage((p) => Math.min(meta.total_pages, p + 1))} disabled={meta.page >= meta.total_pages} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.4rem 0.8rem', cursor: meta.page >= meta.total_pages ? 'not-allowed' : 'pointer', opacity: meta.page >= meta.total_pages ? 0.4 : 1 }}>Next</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// Full-screen modal listing the ACTUAL customers of one K-Means cluster. The
+// members come from the persisted cluster labels (`/clusters/customers`), always
+// one server-side page at a time, so a cluster of ~100k buyers never loads into
+// the browser. The header names the cluster (business category + its numeric
+// K-Means id) and its total customer count; the rows show Customer name, ID and
+// the buyer's original (unscaled) Recency / Frequency / Monetary. Search,
+// pagination, a loading state and an explicit back-to-analysis action are
+// inside. Opening another bar remounts this component (keyed by category +
+// cluster id), so a previous cluster's list can never linger.
+function ClusterCustomersModal({ cluster, token, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [meta, setMeta] = useState({ count: cluster.customer_count || 0, page: 1, total_pages: 1 });
+  const [searchInput, setSearchInput] = useState('');
+  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState('customer_id');
+  const [dir, setDir] = useState('asc');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const search = useDebounced(searchInput.trim(), 350);
+  const requestSeq = useRef(0);
+
+  useEffect(() => { setPage(1); }, [search, sort, dir]);
+
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    setError(null);
+    const res = await getRfmClusterCustomers(token, cluster.category, {
+      cluster_id: cluster.cluster_id, page, search, sort, dir,
+    });
+    if (seq !== requestSeq.current) return; // a newer request already answered
+    if (res.success) {
+      setRows(res.results || []);
+      setMeta({ count: res.count || 0, page: res.page || 1, total_pages: res.total_pages || 1 });
+    } else {
+      setError(res.error);
+    }
+    setLoading(false);
+  }, [token, cluster.category, cluster.cluster_id, page, search, sort, dir]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggleSort = (field) => {
+    if (sort === field) setDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSort(field); setDir('asc'); }
+  };
+
+  const chip = (text) => (
+    <span style={{ backgroundColor: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 8, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>{text}</span>
+  );
+
+  return createPortal(
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(31,25,27,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3000, padding: '1rem' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: '#fff', borderRadius: 18, maxWidth: 860, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: '1.5rem 1.6rem', position: 'relative' }}>
+        <style>{`@keyframes rfm-shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} } .rfm-skeleton-row{ animation: rfm-shimmer 1.2s infinite; }`}</style>
+        <button type="button" onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: '1rem', right: '1rem', border: 'none', background: 'transparent', cursor: 'pointer', color: PALETTE.faint }}>
+          <X size={18} />
+        </button>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', paddingRight: '2rem' }}>
+          <button type="button" onClick={onClose} style={{ border: `1px solid ${PALETTE.border}`, background: '#fff', borderRadius: 8, padding: '0.35rem 0.6rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, color: PALETTE.muted, fontSize: '0.75rem' }}>
+            <ArrowLeft size={14} /> Back to RFM analysis
+          </button>
+          <div style={{ marginLeft: 'auto', position: 'relative' }}>
+            <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: PALETTE.faint }} />
+            <input
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search name or ID…"
+              aria-label="Search customers"
+              style={{ border: `1px solid ${PALETTE.border}`, borderRadius: 10, padding: '0.5rem 0.75rem 0.5rem 1.8rem', fontSize: '0.85rem', width: 200 }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8rem', flexWrap: 'wrap', marginTop: '0.9rem' }}>
+          <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.2rem', color: PALETTE.ink, margin: 0 }}>{cluster.category}</h3>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {chip(`${Number(meta.count).toLocaleString('en-IN')} customers`)}
+            {cluster.percent != null && chip(`${cluster.percent}% of eligible buyers`)}
+          </span>
+        </div>
+
+        {cluster.cautions?.length > 0 && (
+          <div style={{ marginTop: '0.7rem', fontSize: '0.76rem', color: '#6B5E63', backgroundColor: 'rgba(176,138,46,0.08)', border: '1px solid rgba(176,138,46,0.25)', borderRadius: 10, padding: '0.55rem 0.7rem' }}>
+            <div style={{ fontWeight: 700, marginBottom: 2, color: '#8A5A00' }}>The “{cluster.category}” label is not fully supported by this cluster</div>
+            {cluster.cautions.map((text) => (<div key={text}>{text}</div>))}
+          </div>
+        )}
+
+        {loading && rows.length === 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0.9rem 0 0', color: PALETTE.muted, fontSize: '0.8rem' }}>
+            <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} /> Loading customers in this cluster…
+          </div>
+        )}
+        {error && <div style={{ color: '#B3261E', fontSize: '0.85rem', margin: '0.8rem 0 0' }}>{error}</div>}
+
+        <div style={{ overflowX: 'auto', backgroundColor: '#fff', border: `1px solid ${PALETTE.border}`, borderRadius: 14, marginTop: '1rem' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#FBF5F4' }}>
+                {CLUSTER_DETAIL_COLUMNS.map((col) => (
+                  <th key={col.key} onClick={() => col.sortable && toggleSort(col.key)} style={{ padding: '0.7rem 0.9rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700, cursor: col.sortable ? 'pointer' : 'default', whiteSpace: 'nowrap' }}>
+                    {col.label}{col.sortable && sort === col.key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.customer_id} style={{ borderTop: `1px solid ${PALETTE.border}`, opacity: loading ? 0.55 : 1 }}>
+                  {CLUSTER_DETAIL_COLUMNS.map((col) => (
+                    <td key={col.key} style={{ padding: '0.65rem 0.9rem', color: PALETTE.ink, whiteSpace: 'nowrap' }}>
+                      {r[col.key] == null ? '—' : (col.format ? col.format(r[col.key]) : r[col.key])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {loading && rows.length === 0 && <SkeletonRows />}
+          {!loading && rows.length === 0 && (
+            <div style={{ padding: '2rem', textAlign: 'center', color: PALETTE.faint, fontSize: '0.85rem' }}>No customers found in this cluster.</div>
           )}
         </div>
 

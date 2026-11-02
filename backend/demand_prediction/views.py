@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.db import connection
+from django.core.cache import cache
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
 from catalog.normalize import normalize_category, sql_norm_expr
@@ -14,6 +15,27 @@ from demand_prediction.engine import DecisionTreeEngine
 
 # Valid time buckets for the sales-history graph (whitelisted, never raw input).
 _GRANULARITY = {'day': 'day', 'week': 'week', 'month': 'month'}
+
+# Selling price used by the demand-forecasting product fetch.
+#
+# The `products` table has NO `initial_price` column (that was the SQL error).
+# The base price lives in the TEXT `actual_price` column (e.g. '599' / '1,099')
+# and `discount_price` is the discount AMOUNT, so the discounted selling price
+# is parsed(actual_price) - discount_price. The regex parse mirrors the
+# customer-side `parse_product_price` helper, and GREATEST(..., 0) guarantees a
+# non-negative price when a discount meets a missing/smaller base. Reused here
+# so the customer-side pricing logic itself stays untouched.
+_SELLING_PRICE_SQL = (
+    "GREATEST(0,"
+    " COALESCE(NULLIF(regexp_replace(d.actual_price, '[^0-9.]', '', 'g'), '')::float8, 0)"
+    " - COALESCE(d.discount_price, 0))"
+)
+
+# Short TTL for the paged forecast response and the cached active-catalog
+# distribution. Both keys also carry the data fingerprint, so the cache is only
+# ever a latency optimisation over correct, real data: a source change moves the
+# fingerprint and misses cleanly.
+_CACHE_TTL = 120
 
 
 class ProductSalesHistoryView(APIView):
@@ -116,7 +138,7 @@ class DemandPredictionProductsView(APIView):
     """
     Server-side paged / filtered product demand predictions.
 
-    Only the requested page of products is fetched from Supabase (a few dozen
+    Only the requested page of products is fetched from the database (a few dozen
     rows), keeping the response well under a second even for the ~90k catalog.
     The trained ID3 tree is applied server-side (via a SQL CASE derived from the
     cached tree) so filtering and ordering by demand happen in the database, and
@@ -129,7 +151,7 @@ class DemandPredictionProductsView(APIView):
         try:
             t0 = time.perf_counter()
 
-            model, _fingerprint, _rebuilt = engine.get_trained_model()
+            model, fingerprint, _rebuilt = engine.get_trained_model()
             if not model.get('success'):
                 return Response(
                     {'error': model.get('error', 'Demand model unavailable.')},
@@ -177,6 +199,28 @@ class DemandPredictionProductsView(APIView):
 
             where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
 
+            # A search or a category filter narrows the set and so changes the
+            # class distribution; the demand_level selector does not (it only
+            # filters which rows page through that distribution).
+            user_filters = bool(search or (category and category.upper() != 'ALL'))
+
+            # Reusable cache of the fully-assembled page (real enriched rows,
+            # never placeholders), keyed by the data fingerprint + every query
+            # parameter. A repeated request is served straight from cache in ~1ms
+            # with no database round trip at all.
+            cache_key = (
+                'demand:products:'
+                f'{fingerprint}:{page}:{page_size}:{demand_level}:{sort_key}:{sort_dir}:'
+                f'{search.lower()}:{category.lower()}'
+            )
+            cached_page = cache.get(cache_key)
+            if cached_page is not None:
+                return Response({
+                    'items': cached_page['items'],
+                    'pagination': cached_page['pagination'],
+                    'timing': {'view_ms': 0, 'cache': 'hit'},
+                }, status=status.HTTP_200_OK)
+
             # One classified sub-select is reused for both the filtered class
             # distribution (aggregate) and the paged rows -- no duplicated
             # requests, no per-row Python work over the whole catalog.
@@ -192,8 +236,9 @@ class DemandPredictionProductsView(APIView):
                     COALESCE(d.sub_category, '') AS sub_category,
                     d.image AS image,
                     d.discount_price AS discount_price,
-                    COALESCE(NULLIF(regexp_replace(d.actual_price, '[^0-9.]', '', 'g'), '')::float8,
-                             d.initial_price) AS selling_price,
+                    -- Selling price: see _SELLING_PRICE_SQL (actual_price parsed
+                    -- minus discount_price, floored at 0; no initial_price column).
+                    {_SELLING_PRICE_SQL} AS selling_price,
                     d.available_quantity AS available_quantity,
                     {demand_case_sql} AS predicted_demand
                 FROM fact_product_analysis f
@@ -211,12 +256,24 @@ class DemandPredictionProductsView(APIView):
                 order_clause = f"{_SORTABLE[sort_key]} {sort_dir}"
 
             with connection.cursor() as cursor:
-                # Filtered class distribution. When there are no search/category
-                # filters we reuse the cached whole-catalog distribution instead
-                # of re-scanning all ~90k rows -- identical result, one less scan.
-                if not where_clauses:
-                    cached = model['predicted_distribution']
-                    filtered_counts = [(label, cached.get(label, 0)) for label in DecisionTreeEngine.CLASS_ORDER]
+                # Class distribution over the ACTIVE catalog. With no search/
+                # category filters the distribution is identical for every page,
+                # so it is cached by the data fingerprint and reused across pages
+                # -- one ~90k-row aggregate scan per data version instead of one
+                # per request. With user filters it is recomputed for the
+                # narrowed set. (The previous `not where_clauses` shortcut never
+                # fired because is_active is always present, so this aggregate
+                # ran on every single request.)
+                if not user_filters:
+                    dist_key = f'demand:base_dist:{fingerprint}'
+                    filtered_counts = cache.get(dist_key)
+                    if filtered_counts is None:
+                        cursor.execute(
+                            f"SELECT predicted_demand, COUNT(*)::int FROM ({inner}) c GROUP BY predicted_demand",
+                            inner_params,
+                        )
+                        filtered_counts = [tuple(row) for row in cursor.fetchall()]
+                        cache.set(dist_key, filtered_counts, _CACHE_TTL)
                 else:
                     cursor.execute(
                         f"SELECT predicted_demand, COUNT(*)::int FROM ({inner}) c GROUP BY predicted_demand",
@@ -261,7 +318,7 @@ class DemandPredictionProductsView(APIView):
                     'sub_category': r['sub_category'],
                     'image': r['image'],
                     'discount_price': r['discount_price'],
-                    # Final discounted selling price (actual_price TEXT, parsed).
+                    # Selling price = actual_price (parsed TEXT) - discount_price, floored at 0.
                     'selling_price': r['selling_price'],
                     'wishlist_count': int(r['wishlist_count'] or 0),
                     'cart_count': int(r['cart_count'] or 0),
@@ -279,7 +336,7 @@ class DemandPredictionProductsView(APIView):
             for cls, cnt in filtered_counts:
                 filtered_distribution[cls] = filtered_distribution.get(cls, 0) + int(cnt)
 
-            return Response({
+            payload = {
                 'items': items,
                 'pagination': {
                     'page': page,
@@ -288,7 +345,14 @@ class DemandPredictionProductsView(APIView):
                     'total_pages': (total_filtered + page_size - 1) // page_size,
                     'filtered_distribution': filtered_distribution,
                 },
-                'timing': {'view_ms': round((time.perf_counter() - t0) * 1000)},
+            }
+            # Persist the assembled page so identical requests never re-query the
+            # remote database (and never re-run the catalog aggregate).
+            cache.set(cache_key, payload, _CACHE_TTL)
+
+            return Response({
+                **payload,
+                'timing': {'view_ms': round((time.perf_counter() - t0) * 1000), 'cache': 'miss'},
             }, status=status.HTTP_200_OK)
 
         except Exception as exc:

@@ -9,7 +9,7 @@ search, sorting and pagination, so the browser never receives all ~100k rows.
 
 import logging
 
-from django.db import DatabaseError
+from django.db import DatabaseError, connection
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
@@ -23,8 +23,8 @@ from cart.models import CartItem
 from cart.services import CustomerResolver
 from catalog.pricing import get_product_selling_price_map
 
-from . import (cache_manager, campaign_audience, coupon_validation, engine,
-               personalization, queries, segment_store, utils)
+from . import (cache_manager, clustering, campaign_audience, coupon_validation,
+               engine, personalization, queries, segment_store, utils)
 from .models import Campaign, CampaignStatus, CustomerSegment
 from .serializers import CampaignSerializer
 
@@ -79,25 +79,54 @@ def _parse_pagination(request):
     return page, page_size
 
 
+# Cap on how many name matches a search may expand into. The id branch of the
+# same search is unbounded, so an unusual broad query can never turn into a
+# multi-thousand-value IN list.
+NAME_SEARCH_LIMIT = 2000
+
+# Whether the unmanaged `customers` table exists on the connected database,
+# remembered after the first check. Probing it by table listing (instead of
+# catching a failed query) matters: a raised database error inside a test's or
+# an ATOMIC_REQUESTS transaction would mark the transaction for rollback and
+# break every later query in it.
+_names_table_ok = None
+
+
+def _customer_names_available():
+    global _names_table_ok
+    if _names_table_ok is None:
+        try:
+            tables = connection.introspection.table_names()
+        except Exception:  # noqa: BLE001 - a probe failure is not remembered
+            return False
+        _names_table_ok = Customer._meta.db_table in tables
+    return _names_table_ok
+
+
 def _segment_search_q(search):
     """Q matching a customer id, and (best effort) a real name via the mapping.
 
-    `public.customers` is an unmanaged dataset table, so the name branch is
-    guarded: on a backend without it the search simply falls back to ids.
+    `public.customers` is an unmanaged dataset table with no counterpart on the
+    SQLite test database, so the name branch is only attempted when that table
+    exists, and its matches are resolved here rather than as a subquery so a
+    missing table can never surface later while the paged rows execute.
     """
-    from django.db.models import Q
     q = Q(customer_id__icontains=search)
+    if not _customer_names_available():
+        return q
     try:
-        q |= Q(customer_id__in=Customer.objects.filter(
-            customer_name__icontains=search).values('customer_id'))
-    except Exception:  # noqa: BLE001 - name search is a non-critical enhancement
-        pass
+        matched = list(Customer.objects.filter(
+            customer_name__icontains=search).values_list('customer_id', flat=True)[:NAME_SEARCH_LIMIT])
+    except Exception:  # noqa: BLE001 - names are a display enhancement only
+        matched = []
+    if matched:
+        q |= Q(customer_id__in=matched)
     return q
 
 
 def _names_for(customer_ids):
     """{customer_id: customer_name} for one page (single bulk query)."""
-    if not customer_ids:
+    if not customer_ids or not _customer_names_available():
         return {}
     try:
         return {c.customer_id: c.customer_name
@@ -164,53 +193,55 @@ class RfmSummaryView(AdminRFMView):
 
     def get(self, request):
         freshness = engine.ensure_latest()
-        state = segment_store.get_state()
+        # A clustering run persisted before the current four-category vocabulary
+        # would otherwise still show its old label strings (the chart aggregates
+        # the persisted `kmeans_category`). Re-derive them from the run's stored
+        # profiles - no K-Means rerun, no buyer reassignment - before the cached
+        # bundle is assembled, so the dashboard always renders current labels.
+        clustering.reconcile_stored_labels()
+        # The analysis version/dates come from a memoized lookup: warm it is a
+        # cache read with no database round trip, which is the point of the
+        # whole summary path against a remote database.
+        state = segment_store.get_cached_state()
         if state is None:
             return Response({
                 'available': False,
                 'refreshing': True,
                 'run_status': freshness['run_status'],
+                'kmeans': clustering.summarize_clusters([], state=None),
                 'message': 'Preparing the RFM analysis. This runs automatically in the background.',
             }, status=status.HTTP_200_OK)
 
-        version = state.version
-        payload = cache_manager.get_dashboard_totals(version)
-        if payload is None:
+        version = state['version']
+        kmeans_epoch = cache_manager.get_kmeans_epoch()
+        # One cached bundle carries totals + segment distribution + K-Means
+        # clusters (assembled from a single aggregate query) plus the customer
+        # count, keyed by (version, clustering epoch). Warm reads are pure
+        # cache; only a new run or a re-clustering recomputes it.
+        bundle = cache_manager.get_dashboard_bundle(version, kmeans_epoch)
+        if bundle is None:
             try:
-                totals, distribution = queries.fetch_dashboard_totals()
-                total_customers = queries.fetch_total_customers()
+                bundle = queries.fetch_dashboard_bundle()
+                bundle['total_customers'] = queries.fetch_total_customers()
             except DatabaseError as exc:
                 return _safe_db_error(request, exc)
-            payload = {
-                'totals': totals,
-                'distribution': distribution,
-                'total_customers': total_customers,
-            }
-            cache_manager.set_dashboard_totals(version, payload)
+            cache_manager.set_dashboard_bundle(version, kmeans_epoch, bundle)
 
-        totals = payload['totals']
+        totals = bundle['totals']
         buyer_count = totals['buyer_count'] or 0
-        never_purchased = max(payload['total_customers'] - buyer_count, 0)
-        counts = {row['segment']: row['count'] for row in payload['distribution']}
-
-        segment_cards = [
-            {'segment': label, 'count': counts.get(label, 0)}
-            for label in utils.PRIMARY_SEGMENTS
-        ]
-        segment_cards.append({'segment': utils.SEGMENT_NEVER_PURCHASED,
-                              'count': never_purchased})
+        total_customers = bundle['total_customers']
+        never_purchased = max(total_customers - buyer_count, 0)
 
         return Response({
             'available': True,
             'version': version,
-            'analysis_date': (state.analysis_date.isoformat()
-                              if state.analysis_date else None),
-            'computed_at': state.completed_at.isoformat(),
+            'analysis_date': state['analysis_date'],
+            'computed_at': state['completed_at'],
             'refreshing': freshness['refreshing'],
             'run_status': cache_manager.get_run_status(),
             'source': 'persisted_results',
             'totals': {
-                'total_customers': payload['total_customers'],
+                'total_customers': total_customers,
                 'total_eligible_buyers': buyer_count,
                 'never_purchased_customers': never_purchased,
                 'total_eligible_orders': totals['total_orders'],
@@ -218,8 +249,136 @@ class RfmSummaryView(AdminRFMView):
             },
             'buyer_count': buyer_count,
             'big_spender_count': totals['big_spender_count'] or 0,
-            'segments': segment_cards,
+            # K-Means++ (k=4) is the RFM page's segmentation: four business
+            # categories mapped from each cluster's unscaled RFM profile, with
+            # the counts, percentages, confidence and profile check merged from
+            # the stored clustering run. The old rule-based distribution is not
+            # served here any more - the persisted `segment` column survives only
+            # as the internal label CLV and campaign targeting read per buyer.
+            'kmeans': clustering.summarize_clusters(
+                bundle['kmeans_clusters'], total=buyer_count),
         }, status=status.HTTP_200_OK)
+
+
+class RfmClustersView(AdminRFMView):
+    """GET/POST /api/analytics/rfm/clusters -> K-Means++ segmentation.
+
+    GET reads the current stored clustering (four business categories with
+    counts, percentages and unscaled RFM profiles) straight from
+    `rfm_customer_segments` plus the single stored run-state row, so it is cheap,
+    never recomputes the model and survives a restart. POST runs the actual
+    K-Means++ pipeline over the RFM values already persisted - it never
+    recomputes RFM, never overwrites the original metrics or the rule-based
+    segment, and updates each buyer's existing row instead of inserting
+    duplicates. A second POST while a run is in flight is refused (409) so one
+    ~100k-row population is never clustered twice at the same time.
+    """
+
+    def get(self, request):
+        # Keep the standalone clusters read consistent with the dashboard: heal a
+        # legacy persisted run's labels from its stored profiles first (no rerun).
+        clustering.reconcile_stored_labels()
+        return Response(clustering.clustering_summary(),
+                        status=status.HTTP_200_OK)
+
+    def post(self, request):
+        if not cache_manager.acquire_kmeans_run_lock():
+            return Response(
+                {'detail': 'A clustering run is already in progress.'},
+                status=status.HTTP_409_CONFLICT)
+        try:
+            result = clustering.run_clustering(save=True)
+        finally:
+            cache_manager.release_kmeans_run_lock()
+        if not result.get('available'):
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class RfmClusterCustomersView(AdminRFMView):
+    """GET /api/analytics/rfm/clusters/customers -> one cluster's actual buyers.
+
+    Paging the cluster drill-down straight off the persisted labels
+    (`rfm_customer_segments.kmeans_cluster_id` / `kmeans_category`), which are
+    the latest completed K-Means assignment: the same rows the distribution
+    counts are aggregated from, so a bar's count and its list can never disagree.
+    Server-side search, sorting and pagination only - with ~100k buyers the
+    browser never receives more than one page, and no order-table scan happens.
+
+    `category` is required (the business label of the clicked bar) and
+    `cluster_id` is honored as well when supplied, so the list is always exactly
+    the members of that one numeric cluster.
+    """
+
+    def get(self, request):
+        category = (request.query_params.get('category') or '').strip()
+        if category not in utils.KMEANS_CATEGORIES:
+            return Response({'detail': 'Unknown cluster category.'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        cluster_id = (request.query_params.get('cluster_id') or '').strip()
+        if cluster_id:
+            try:
+                cluster_id = int(cluster_id)
+            except (TypeError, ValueError):
+                return Response({'detail': 'Unknown cluster id.'},
+                                status=status.HTTP_404_NOT_FOUND)
+        else:
+            cluster_id = None
+
+        page, page_size = _parse_pagination(request)
+        search = (request.query_params.get('search') or '').strip()
+        sort = (request.query_params.get('sort') or 'customer_id').lower()
+        direction = (request.query_params.get('dir') or 'asc').lower()
+        order_col = SEGMENT_SORT_FIELDS.get(sort, 'customer_id')
+
+        queryset = CustomerSegment.objects.exclude(
+            kmeans_cluster_id__isnull=True).filter(kmeans_category=category)
+        if cluster_id is not None:
+            queryset = queryset.filter(kmeans_cluster_id=cluster_id)
+        if search:
+            queryset = queryset.filter(_segment_search_q(search))
+        # Stable tie-break so paging never repeats or skips a row.
+        if order_col != 'customer_id':
+            queryset = queryset.order_by(order_col, 'customer_id') if direction != 'desc' \
+                else queryset.order_by(f'-{order_col}', 'customer_id')
+        else:
+            queryset = queryset.order_by(f'-{order_col}' if direction == 'desc' else order_col)
+
+        total = queryset.count()
+        start = (page - 1) * page_size
+        rows = list(queryset[start:start + page_size])
+        names = _names_for([r.customer_id for r in rows])
+        return Response({
+            'available': total > 0 or page == 1,
+            'category': category,
+            'cluster_id': cluster_id if cluster_id is not None
+            else (rows[0].kmeans_cluster_id if rows else None),
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if page_size else 1,
+            'results': [self._row(r, names) for r in rows],
+        }, status=status.HTTP_200_OK)
+
+    def _row(self, row, names):
+        """Cluster members show their identity, the cluster they belong to and
+        their ORIGINAL (unscaled) Recency / Frequency / Monetary.
+
+        The three metrics come straight from the persisted RFM row for this
+        exact customer and run, so the popup never fabricates or substitutes a
+        value; they are the same unscaled numbers the clustering was computed
+        from (the standardized values are never stored or shown).
+        """
+        return {
+            'customer_id': row.customer_id,
+            'customer_name': names.get(row.customer_id),
+            'cluster_id': row.kmeans_cluster_id,
+            'category': row.kmeans_category,
+            'recency': row.recency,
+            'frequency': row.frequency,
+            'monetary': float(row.monetary) if row.monetary is not None else None,
+        }
 
 
 class RfmSegmentsView(AdminRFMView):
@@ -230,31 +389,34 @@ class RfmSegmentsView(AdminRFMView):
     """
 
     def get(self, request):
-        state = segment_store.get_state()
+        state = segment_store.get_cached_state()
         if state is None:
             return Response({'available': False, 'segments': []},
                             status=status.HTTP_200_OK)
 
-        payload = cache_manager.get_dashboard_totals(state.version)
-        if payload is None:
+        # Shares the summary's cached bundle (same version + clustering epoch),
+        # so opening the segments endpoint after the dashboard is a pure cache
+        # read with no database round trip.
+        version = state['version']
+        kmeans_epoch = cache_manager.get_kmeans_epoch()
+        bundle = cache_manager.get_dashboard_bundle(version, kmeans_epoch)
+        if bundle is None:
             try:
-                totals, distribution = queries.fetch_dashboard_totals()
-                total_customers = queries.fetch_total_customers()
+                bundle = queries.fetch_dashboard_bundle()
+                bundle['total_customers'] = queries.fetch_total_customers()
             except DatabaseError as exc:
                 return _safe_db_error(request, exc)
-            payload = {'totals': totals, 'distribution': distribution,
-                       'total_customers': total_customers}
-            cache_manager.set_dashboard_totals(state.version, payload)
+            cache_manager.set_dashboard_bundle(version, kmeans_epoch, bundle)
 
-        counts = {row['segment']: row['count'] for row in payload['distribution']}
+        counts = {row['segment']: row['count'] for row in bundle['distribution']}
         return Response({
             'available': True,
-            'version': state.version,
+            'version': version,
             'segments': [{'segment': label, 'count': counts.get(label, 0)}
                          for label in utils.PRIMARY_SEGMENTS],
-            'never_purchased': max(payload['total_customers']
-                                   - (payload['totals']['buyer_count'] or 0), 0),
-            'big_spender_count': payload['totals']['big_spender_count'] or 0,
+            'never_purchased': max(bundle['total_customers']
+                                   - (bundle['totals']['buyer_count'] or 0), 0),
+            'big_spender_count': bundle['totals']['big_spender_count'] or 0,
         }, status=status.HTTP_200_OK)
 
 

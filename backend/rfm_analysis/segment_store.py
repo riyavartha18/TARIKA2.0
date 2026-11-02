@@ -261,6 +261,12 @@ def store_records(records, version, analysis_date=None, full=True,
                       'source_fingerprint': source_fingerprint},
         )
 
+    # The summary dashboard memoizes this single-row state so a warm read does
+    # not pay a remote round trip to fetch the version/dates. Rewrite the memo
+    # with the just-committed values (the version bump already makes the old
+    # cached bundle unreachable, so the next summary recomputes it).
+    _refresh_state_memo(version, len(buyer_ids), analysis_date, now)
+
     # The CLV module memoizes this version for cheap freshness checks; a new
     # completed run must drop the memo immediately so the next CLV read sees
     # the new version (and rebuilds its snapshot) instead of waiting on the
@@ -289,6 +295,47 @@ def get(customer_id):
 def get_state():
     """The current stored analysis, or None when no analysis has ever completed."""
     return RfmAnalysisState.objects.filter(pk=RfmAnalysisState.SINGLETON_ID).first()
+
+
+def _refresh_state_memo(version, buyer_count, analysis_date, completed_at):
+    """Publish the just-committed state to the short-lived summary memo."""
+    try:
+        from . import cache_manager
+        cache_manager.set_state_memo({
+            'version': version,
+            'buyer_count': buyer_count,
+            'analysis_date': (analysis_date.isoformat() if analysis_date else None),
+            'completed_at': (completed_at.isoformat() if completed_at else None),
+        })
+    except Exception:  # noqa: BLE001 - a missing memo simply falls back to the DB
+        pass
+
+
+def get_cached_state():
+    """Analysis state as a small dict, served from the memo when warm (no DB).
+
+    Falls back to one read of the singleton row and repopulates the memo on a
+    miss. Returns None when no analysis has ever completed. Values mirror
+    `RfmAnalysisState` but with dates/timestamps as ISO strings so the cached
+    payload is cache-backend agnostic.
+    """
+    from . import cache_manager
+    memo = cache_manager.get_state_memo()
+    if isinstance(memo, dict) and 'version' in memo:
+        return memo
+    state = get_state()
+    if state is None:
+        return None
+    payload = {
+        'version': state.version,
+        'buyer_count': state.buyer_count,
+        'analysis_date': (state.analysis_date.isoformat()
+                          if state.analysis_date else None),
+        'completed_at': (state.completed_at.isoformat()
+                         if state.completed_at else None),
+    }
+    cache_manager.set_state_memo(payload)
+    return payload
 
 
 def latest_version():
