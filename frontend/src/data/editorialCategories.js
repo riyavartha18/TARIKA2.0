@@ -195,12 +195,12 @@ export const EDITORIAL_CATEGORIES = [
     isArch: true,
     subcategories: [
       'All Women\'s Footwear',
-      'Fashion Sandals',
       'Heels',
+      'Sandals',
+      'Sneakers',
       'Flats',
-      'Wedges',
       'Boots',
-      'Casual Shoes',
+      'Juttis',
     ],
   },
 

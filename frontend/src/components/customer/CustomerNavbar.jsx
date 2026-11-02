@@ -13,6 +13,7 @@ import {
   Tag,
   Compass,
   Package,
+  Shirt,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
@@ -72,6 +73,8 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
   const navLinks = [
     { label: 'Customer Home', path: '/customer', icon: null },
     { label: 'Shop / Categories', path: '/customer/shop', icon: <Compass size={14} /> },
+    { label: 'Smart Budget Stylist', path: '/customer/stylist', isNew: true, icon: <Sparkles size={14} /> },
+    { label: 'My Wardrobe', path: '/customer/wardrobe', icon: <Shirt size={14} /> },
     { label: 'New In', path: '/customer/new-in', icon: <Sparkles size={14} /> },
     { label: 'Trending', path: '/customer/trending', icon: <Flame size={14} /> },
     { label: 'Sale', path: '/customer/sale', icon: <Tag size={14} /> },
@@ -205,6 +208,23 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                 >
                   {tab.icon}
                   <span>{tab.label}</span>
+                  {tab.isNew && (
+                    <span
+                      style={{
+                        fontSize: '0.62rem',
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        backgroundColor: '#FAF0F2',
+                        color: '#B8505E',
+                        border: '1px solid #F0D0D5',
+                        padding: '1px 5px',
+                        borderRadius: '4px',
+                        letterSpacing: '0.4px',
+                      }}
+                    >
+                      NEW
+                    </span>
+                  )}
                 </Link>
               );
             })}
@@ -443,6 +463,28 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                   >
                     <User size={15} color="#B8505E" />
                     <span>My Profile & Perks</span>
+                  </Link>
+
+                  <Link
+                    to="/customer/wardrobe"
+                    onClick={() => setProfileDropdownOpen(false)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      padding: '9px 12px',
+                      borderRadius: '10px',
+                      textDecoration: 'none',
+                      color: '#1F191B',
+                      fontSize: '0.84rem',
+                      fontWeight: 500,
+                      transition: 'background 0.2s ease',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#FBF1F0')}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                  >
+                    <Shirt size={15} color="#B8505E" />
+                    <span>My Wardrobe</span>
                   </Link>
 
                   <Link

@@ -1,5 +1,20 @@
+import re
 from rest_framework import serializers
 from .models import Category, Product, Inventory, Review, Manufacturer
+
+
+def sanitize_product_image_url(url):
+    """
+    Sanitizes product image URLs:
+      - Strips obsolete Amazon /images/W/IMAGERENDERING_.../ tokens down to clean /images/I/
+      - Returns None if empty or invalid string
+    """
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    return re.sub(r'/images/W/[^/]+/images/I/', '/images/I/', url)
 
 
 class ManufacturerSerializer(serializers.ModelSerializer):
@@ -188,8 +203,9 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     def get_image(self, obj):
         # Use the real `image` column; fall back to category artwork when empty.
-        if obj.image:
-            return obj.image
+        clean_url = sanitize_product_image_url(obj.image)
+        if clean_url:
+            return clean_url
         cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 
@@ -290,8 +306,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     def get_image(self, obj):
         # Use the real `image` column; fall back to category artwork when empty.
-        if obj.image:
-            return obj.image
+        clean_url = sanitize_product_image_url(obj.image)
+        if clean_url:
+            return clean_url
         cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
 

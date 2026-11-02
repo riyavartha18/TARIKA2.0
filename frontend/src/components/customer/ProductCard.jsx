@@ -3,6 +3,8 @@ import { Heart, ShoppingBag, Zap, Check, Eye } from 'lucide-react';
 import { useCustomer } from '../../context/CustomerContext';
 import { getProductPricing } from '../../utils/pricing';
 
+import { NEUTRAL_PLACEHOLDER_IMAGE, cleanProductImageUrl } from '../../pages/customer/SmartBudgetStylistPage';
+
 function ProductCard({ product, onCardClick }) {
   const { isWishlisted, toggleWishlist, addToBag, openProductDetail } = useCustomer();
   const [justAdded, setJustAdded] = useState(false);
@@ -19,11 +21,11 @@ function ProductCard({ product, onCardClick }) {
   const clubPrice = Math.round(currentPrice * 0.95);
 
   // Image source with fallback
-  const imageUrl =
+  const rawUrl =
     product.image ||
     product.primary_image ||
-    (product.images && product.images[0]?.image_url) ||
-    'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=700&q=80';
+    (product.images && product.images[0]?.image_url);
+  const imageUrl = cleanProductImageUrl(rawUrl) || NEUTRAL_PLACEHOLDER_IMAGE;
 
   const isOutOfStock = product.total_stock !== undefined && product.total_stock <= 0;
 
@@ -67,9 +69,11 @@ function ProductCard({ product, onCardClick }) {
           src={imageUrl}
           alt={productName}
           loading="lazy"
+          referrerPolicy="no-referrer"
           onError={(e) => {
-            e.target.src =
-              'https://images.unsplash.com/photo-1490481651871-ab68de25d43d?auto=format&fit=crop&w=700&q=80';
+            console.warn(`[ProductCard] Image failed to load for "${productName}": ${e.target.src}`);
+            e.target.onerror = null;
+            e.target.src = NEUTRAL_PLACEHOLDER_IMAGE;
           }}
         />
 

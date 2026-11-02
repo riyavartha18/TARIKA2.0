@@ -235,6 +235,40 @@ export async function getProducts(params = {}) {
   }
 }
 
+export async function getWarehouseProducts(params = {}, token = null) {
+  try {
+    const query = new URLSearchParams();
+    appendProductFilters(query, params);
+    const authToken = token || localStorage.getItem('iras_token');
+    const headers = {};
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    const qs = query.toString();
+    const response = await fetch(
+      `${API_BASE_URL}/api/warehouse/products/${qs ? '?' + qs : ''}`,
+      { headers }
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      return {
+        success: false,
+        error: data.detail || 'Failed to fetch warehouse products',
+        status: response.status,
+      };
+    }
+    return {
+      success: true,
+      products: data.results || [],
+      count: data.count || 0,
+      totalPages: data.total_pages || 1,
+      currentPage: data.current_page || 1,
+      hasNext: Boolean(data.next),
+      hasPrevious: Boolean(data.previous),
+    };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching warehouse products' };
+  }
+}
+
 async function getCuratedProducts(endpoint, limit, params) {
   const query = new URLSearchParams();
   if (params) appendProductFilters(query, params);
@@ -1471,3 +1505,423 @@ export async function getSlowMovingInventory(token, params = {}) {
     return { success: false, error: 'Network error fetching slow-moving inventory data.' };
   }
 }
+
+/**
+ * Fetch Personalized Recommendations based on past orders, interests and gender.
+ */
+export async function getPersonalizedRecommendations(token, gender = null) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const query = new URLSearchParams();
+    if (gender) query.append('gender', gender);
+
+    const qs = query.toString();
+    const url = `${API_BASE_URL}/api/recommendations/personalized/${qs ? '?' + qs : ''}`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to fetch personalized recommendations' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching personalized recommendations' };
+  }
+}
+
+/**
+ * Fetch Smart Budget Outfits based on color theory, occasion harmony, and knapsack price optimization.
+ */
+export async function getSmartBudgetOutfits({
+  budget = 2000,
+  gender = 'women',
+  occasion = 'casual',
+  style = 'chic',
+  color = null,
+  category_direction = 'all',
+  sort = 'best',
+  wardrobe_item_ids = [],
+  customer_id = null,
+  personalise = true,
+  token = null,
+} = {}) {
+  try {
+    const query = new URLSearchParams();
+    query.append('budget', budget);
+    query.append('gender', gender);
+    query.append('occasion', occasion);
+    if (style) query.append('style', style);
+    if (color) query.append('color', color);
+    if (category_direction) query.append('category_direction', category_direction);
+    if (sort) query.append('sort', sort);
+    if (customer_id) query.append('customer_id', customer_id);
+    query.append('personalise', String(Boolean(personalise)));
+    if (wardrobe_item_ids && (Array.isArray(wardrobe_item_ids) ? wardrobe_item_ids.length > 0 : Boolean(wardrobe_item_ids))) {
+      query.append('wardrobe_item_ids', Array.isArray(wardrobe_item_ids) ? wardrobe_item_ids.join(',') : wardrobe_item_ids);
+    }
+    query.append('_t', Date.now());
+
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const url = `${API_BASE_URL}/api/recommendations/smart-budget/?${query.toString()}`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.detail || data.message || 'Failed to generate budget outfits' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    console.error('[getSmartBudgetOutfits network error]:', err);
+    return { success: false, error: 'Network error generating budget outfits' };
+  }
+}
+
+/**
+ * Resolves a media URL (relative or absolute) to a full URL pointing to the active backend.
+ */
+export function resolveMediaUrl(url) {
+  if (!url) return '';
+  if (typeof url !== 'string') return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:') || url.startsWith('blob:')) {
+    return url;
+  }
+  const cleanBase = API_BASE_URL.replace(/\/+$/, '');
+  const cleanPath = url.startsWith('/') ? url : `/${url}`;
+  return `${cleanBase}${cleanPath}`;
+}
+
+/**
+ * Digital Wardrobe API: Fetch items in authenticated customer's wardrobe.
+ */
+export async function getWardrobeItems(token, filters = {}) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const query = new URLSearchParams();
+    if (filters.slot_type && filters.slot_type !== 'all') query.append('slot_type', filters.slot_type);
+    if (filters.category && filters.category !== 'all') query.append('category', filters.category);
+    if (filters.color && filters.color !== 'all') query.append('color', filters.color);
+    if (filters.search) query.append('search', filters.search);
+
+    const qs = query.toString();
+    const url = `${API_BASE_URL}/api/wardrobe/items/${qs ? '?' + qs : ''}`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.detail || 'Failed to fetch wardrobe items' };
+    }
+    return { success: true, results: data.results || data || [], count: data.count || (Array.isArray(data) ? data.length : 0) };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching wardrobe items' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Upload new garment photo with background removal & auto-tagging.
+ */
+export async function uploadWardrobeItem(token, payload) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    let body;
+    if (payload instanceof FormData) {
+      body = payload;
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify(payload);
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to process wardrobe upload' };
+    }
+    return { success: true, item: data, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error uploading wardrobe item' };
+  }
+}
+
+export const addWardrobeItem = uploadWardrobeItem;
+
+/**
+ * Digital Wardrobe API: Update tags on a wardrobe piece (marks user_verified = true).
+ */
+export async function updateWardrobeItem(token, itemId, patchData) {
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/${itemId}/`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify(patchData),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to update tags' };
+    }
+    return { success: true, item: data };
+  } catch (err) {
+    return { success: false, error: 'Network error updating wardrobe item' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Delete piece from wardrobe (removes DB row & stored files).
+ */
+export async function deleteWardrobeItem(token, itemId) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/${itemId}/`, {
+      method: 'DELETE',
+      headers,
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return { success: false, error: data.error || 'Failed to delete wardrobe item' };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: 'Network error deleting wardrobe item' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Toggle between 3D Studio Render and Original Photo.
+ */
+export async function toggleWardrobeDisplayMode(token, itemId, mode = null) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const body = mode ? JSON.stringify({ mode }) : JSON.stringify({});
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/${itemId}/toggle-display/`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to toggle display mode' };
+    }
+    return { success: true, item: data };
+  } catch (err) {
+    return { success: false, error: 'Network error toggling wardrobe display mode' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Re-run 3D Studio Rendering on original photo.
+ */
+export async function reprocessWardrobeItem(token, itemId) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/${itemId}/reprocess/`, {
+      method: 'POST',
+      headers,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to reprocess 3D render' };
+    }
+    return { success: true, item: data };
+  } catch (err) {
+    return { success: false, error: 'Network error reprocessing 3D render' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Idempotently import delivered, non-returned customer purchases.
+ */
+export async function importOrdersToWardrobe(token) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/import-orders/`, {
+      method: 'POST',
+      headers,
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to import orders' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error importing orders' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Complete this look with matching catalog products.
+ * Supports slot filtering, slot tabs, and pagination for 'Show more'.
+ */
+export async function getCompleteLook(token, itemId, budget = 10000, slot = null, offset = 0, limit = 6) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    let url = `${API_BASE_URL}/api/wardrobe/items/${itemId}/complete-look/?budget=${budget}&offset=${offset}&limit=${limit}`;
+    if (slot && slot !== 'all') {
+      url += `&slot=${encodeURIComponent(slot)}`;
+    }
+
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || 'Failed to generate complete look pairings' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error retrieving complete look pairings' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Get wardrobe matches for a store product with 'Show more' pagination.
+ */
+export async function getProductWardrobeMatches(token, productKey, offset = 0, limit = 6) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/products/${productKey}/wardrobe-matches/?offset=${offset}&limit=${limit}`, {
+      headers,
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || 'Failed to fetch matches' };
+    }
+    return {
+      success: true,
+      matches: data.matches || [],
+      total_count: data.total_count || (data.matches || []).length,
+      has_more: Boolean(data.has_more)
+    };
+  } catch (err) {
+    return { success: false, error: 'Network error checking product wardrobe matches' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Confirm and save selected parsed items from multi-garment photo.
+ */
+export async function confirmParsedItems(token, pieces) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/items/confirm-parsed-items/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pieces }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || 'Failed to confirm pieces' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    return { success: false, error: 'Network error confirming wardrobe pieces' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Fetch saved wardrobe outfits.
+ */
+export async function getWardrobeOutfits(token) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/outfits/`, { headers });
+    const data = await response.json();
+    return { success: response.ok, outfits: data.results || data || [] };
+  } catch (err) {
+    return { success: false, outfits: [] };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Save outfit crafted from wardrobe items.
+ */
+export async function saveWardrobeOutfit(token, outfitPayload) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/outfits/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(outfitPayload),
+    });
+    const data = await response.json();
+    return { success: response.ok, outfit: data };
+  } catch (err) {
+    return { success: false, error: 'Network error saving outfit' };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Fetch customer collections.
+ */
+export async function getWardrobeCollections(token) {
+  try {
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/collections/`, { headers });
+    const data = await response.json();
+    return { success: response.ok, collections: data.results || data || [] };
+  } catch (err) {
+    return { success: false, collections: [] };
+  }
+}
+
+/**
+ * Digital Wardrobe API: Create customer collection.
+ */
+export async function createWardrobeCollection(token, collectionPayload) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/wardrobe/collections/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(collectionPayload),
+    });
+    const data = await response.json();
+    return { success: response.ok, collection: data };
+  } catch (err) {
+    return { success: false, error: 'Network error creating collection' };
+  }
+}
+
+
+

@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    WarehouseProductListView,
     WarehouseGroupedProductsView,
     WarehouseProductDetailView,
     WarehouseOrdersView,
@@ -19,6 +20,7 @@ from .views import (
 app_name = 'warehouse'
 
 urlpatterns = [
+    path('products/', WarehouseProductListView.as_view(), name='products'),
     path('products/grouped/', WarehouseGroupedProductsView.as_view(), name='grouped-products'),
     # Product detail + edit: GET /api/warehouse/products/<id>/ and PUT /api/warehouse/products/<id>/
     path('products/<str:product_id>/', WarehouseProductDetailView.as_view(), name='product-detail'),

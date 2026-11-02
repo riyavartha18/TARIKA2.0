@@ -79,6 +79,9 @@ class WarehouseService:
         'discount_price': 'discount_price',        # double precision
         'actual_price': 'actual_price_text',       # TEXT column, kept as text
         'available_quantity': 'available_quantity',  # double precision
+        'is_active': 'is_active',
+        'hidden': 'hidden',
+        'confidence': 'confidence',
     }
 
     @staticmethod
@@ -572,4 +575,3 @@ class WarehouseService:
         order.save()
 
         return order, delivery
-

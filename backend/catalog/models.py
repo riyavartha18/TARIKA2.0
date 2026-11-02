@@ -80,6 +80,24 @@ class Product(models.Model):
     # There is no separate inventory table in this database; availability is
     # carried directly on the product row as a numeric quantity.
     available_quantity = models.FloatField(blank=True, null=True, db_column='available_quantity')
+    is_active = models.BooleanField(default=True, db_column='is_active')
+    is_image_valid = models.BooleanField(default=True, db_column='is_image_valid')
+
+    # Stylist classification attributes
+    slot_type = models.CharField(max_length=50, blank=True, null=True, db_column='slot_type')
+    formality = models.IntegerField(default=3, db_column='formality')
+    pattern = models.CharField(max_length=50, default='solid', db_column='pattern')
+    dominant_colours = models.TextField(default='[]', db_column='dominant_colours')
+    style_family = models.CharField(max_length=50, default='western', db_column='style_family')
+    season = models.CharField(max_length=50, default='all', db_column='season')
+    footwear_type = models.CharField(max_length=50, blank=True, null=True, db_column='footwear_type')
+    accessory_type = models.CharField(max_length=50, blank=True, null=True, db_column='accessory_type')
+    subtype = models.CharField(max_length=50, default='other', db_column='subtype')
+    includes_blouse = models.BooleanField(default=False, db_column='includes_blouse')
+    includes_dupatta = models.BooleanField(default=False, db_column='includes_dupatta')
+    metal_tone = models.CharField(max_length=50, default='unknown', db_column='metal_tone')
+    confidence = models.FloatField(default=0.0, db_column='confidence')
+    hidden = models.BooleanField(default=False, db_column='hidden')
 
     class Meta:
         db_table = 'products'

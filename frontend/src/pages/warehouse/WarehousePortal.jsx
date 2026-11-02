@@ -4,7 +4,7 @@ import StockToBeOrdered from '../../features/stockToBeOrdered/StockToBeOrdered';
 import { getProductPricing } from '../../utils/pricing';
 import {
   getCategories,
-  getProducts,
+  getWarehouseProducts,
   invalidateCategoriesCache,
   getWarehouseOrders,
   getWarehouseOrderDetail,
@@ -75,7 +75,7 @@ const CATEGORY_SUBCATEGORIES = {
   'Sarees': ['All Sarees', 'Silk Sarees', 'Chiffon Sarees', 'Georgette Sarees', 'Organza Sarees'],
   'Ethnic Wear': ['All Ethnic Wear', 'Lehenga Sets', 'Ethnic Suits', 'Dupattas', 'Sharara Sets'],
   'Handbags': ['All Handbags', 'Tote Bags', 'Crossbody Bags', 'Clutches', 'Shoulder Bags'],
-  'Footwear': ['All Footwear', 'Heels', 'Flats', 'Sneakers', 'Sandals', 'Boots'],
+  'Footwear': ['All Footwear', 'Heels', 'Sandals', 'Sneakers', 'Flats', 'Boots', 'Juttis'],
   'Accessories': ['All Accessories', 'Jewelry', 'Belts', 'Scarves', 'Sunglasses']
 };
 
@@ -95,7 +95,7 @@ const CATEGORY_HERO_META = {
 };
 
 // Reusable Warehouse Product Card matching Customer ProductCard presentation
-function WarehouseProductCard({ product, onCardClick }) {
+function WarehouseProductCard({ product, onCardClick, onToggleFlag, pending }) {
   const [hovered, setHovered] = React.useState(false);
   if (!product) return null;
 
@@ -112,7 +112,6 @@ function WarehouseProductCard({ product, onCardClick }) {
   const totalStock = isStockUnknown ? null : Number(rawStock);
   const isOutOfStock = !isStockUnknown && totalStock <= 0;
   const isLowStock = !isStockUnknown && totalStock > 0 && totalStock <= 5;
-
   const imageUrl =
     product.image ||
     product.primary_image ||
@@ -281,6 +280,52 @@ function WarehouseProductCard({ product, onCardClick }) {
             <span>Stock: <strong style={{ color: isOutOfStock ? '#DC2626' : '#1F191B' }}>{isStockUnknown ? 'Data unavailable' : `${totalStock} units`}</strong></span>
           </div>
 
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleFlag(product, 'is_active');
+              }}
+              disabled={pending}
+              aria-label={`Set is_active to ${!product.is_active}`}
+              style={{
+                flex: 1,
+                padding: '0.45rem 0.35rem',
+                borderRadius: '8px',
+                border: `1px solid ${product.is_active ? '#A7F3D0' : '#FECACA'}`,
+                background: product.is_active ? '#ECFDF5' : '#FEF2F2',
+                color: product.is_active ? '#047857' : '#B91C1C',
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                cursor: pending ? 'wait' : 'pointer',
+              }}
+            >
+              {pending ? 'Saving…' : `Active: ${Boolean(product.is_active)}`}
+            </button>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleFlag(product, 'hidden');
+              }}
+              disabled={pending}
+              aria-label={`Set hidden to ${!product.hidden}`}
+              style={{
+                flex: 1,
+                padding: '0.45rem 0.35rem',
+                borderRadius: '8px',
+                border: `1px solid ${product.hidden ? '#FDE68A' : '#E4E4E7'}`,
+                background: product.hidden ? '#FFFBEB' : '#FAFAFA',
+                color: product.hidden ? '#A16207' : '#52525B',
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                cursor: pending ? 'wait' : 'pointer',
+              }}
+            >
+              {pending ? 'Saving…' : `Hidden: ${Boolean(product.hidden)}`}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -835,6 +880,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
     discount_price: p.discount_price ?? p.selling_price ?? '',
     actual_price: p.actual_price ?? p.base_price ?? '',
     available_quantity: p.available_quantity ?? p.total_stock ?? '',
+    confidence: p.confidence ?? '',
   });
 
   // Fetch full product detail from Django on mount
@@ -902,6 +948,12 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
     if (!discount.ok) { setSaveError(discount.error); return; }
     const stock = parseNumericField(form.available_quantity, 'Available stock');
     if (!stock.ok) { setSaveError(stock.error); return; }
+    const confidence = parseNumericField(form.confidence, 'Classification confidence', false);
+    if (!confidence.ok) { setSaveError(confidence.error); return; }
+    if (confidence.value < 0 || confidence.value > 1) {
+      setSaveError('Classification confidence must be between 0 and 1.');
+      return;
+    }
 
     setSaving(true);
     setSaveError(null);
@@ -918,6 +970,7 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
       discount_price: discount.value,
       actual_price: String(form.actual_price ?? ''),
       available_quantity: stock.value,
+      confidence: confidence.value,
     };
 
     const res = await updateWarehouseProduct(product.product_id, payload, token);
@@ -1229,6 +1282,24 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, token 
                     />
                   </div>
                 </div>
+
+                <div>
+                  <label style={labelStyle}>Classification Confidence (0–1)</label>
+                  <input
+                    id="edit-product-confidence"
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={form.confidence}
+                    onChange={(e) => handleChange('confidence', e.target.value)}
+                    placeholder="e.g. 0.85"
+                    style={inputStyle}
+                  />
+                  <small style={{ display: 'block', marginTop: '0.35rem', color: '#6B5E63', fontSize: '0.75rem' }}>
+                    Smart Budget Stylist requires at least 0.60.
+                  </small>
+                </div>
               </div>
             </div>
 
@@ -1363,6 +1434,7 @@ export default function WarehousePortal() {
   const [productsLoading, setProductsLoading] = useState(true);
   const [productsError, setProductsError] = useState(null);
   const [selectedProductForEdit, setSelectedProductForEdit] = useState(null);
+  const [productFlagsPending, setProductFlagsPending] = useState({});
 
   // Filters & Selection matching Customer Shop/Categories
   const [selectedCategory, setSelectedCategory] = useState('ALL');
@@ -1522,7 +1594,7 @@ export default function WarehousePortal() {
     if (pageNum === 1) setProductsLoading(true);
     setProductsError(null);
     try {
-      const res = await getProducts(buildWarehouseProductParams(pageNum));
+      const res = await getWarehouseProducts(buildWarehouseProductParams(pageNum), token);
       if (seq !== productsReqSeq.current) return; // a newer request already started
       if (res.success) {
         setRawProducts((prev) => {
@@ -1557,7 +1629,7 @@ export default function WarehousePortal() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort,
-    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor]);
+    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor, token]);
 
   // Re-fetch page one whenever the active server-side filters change.
   useEffect(() => {
@@ -1572,7 +1644,7 @@ export default function WarehousePortal() {
     setLoadingMoreProducts(true);
     setProductsError(null);
     try {
-      const res = await getProducts(buildWarehouseProductParams(nextPage));
+      const res = await getWarehouseProducts(buildWarehouseProductParams(nextPage), token);
       if (seq !== productsReqSeq.current) return; // filters changed mid-flight
       if (res.success) {
         setRawProducts((prev) => {
@@ -1607,6 +1679,36 @@ export default function WarehousePortal() {
   const fetchCatalog = async () => {
     await loadCategories(true);
     fetchProducts(1);
+  };
+
+  const handleToggleProductFlag = async (product, field) => {
+    const productId = product.product_id || product.id;
+    if (!productId || productFlagsPending[productId]) return;
+
+    setProductFlagsPending((prev) => ({ ...prev, [productId]: true }));
+    const res = await updateWarehouseProduct(
+      productId,
+      { [field]: !Boolean(product[field]) },
+      token
+    );
+    setProductFlagsPending((prev) => {
+      const next = { ...prev };
+      delete next[productId];
+      return next;
+    });
+
+    if (!res.success) {
+      window.alert(res.error || 'Failed to update product status.');
+      return;
+    }
+
+    setRawProducts((prev) => prev.map((item) => (
+      (item.product_id || item.id) === productId
+        ? { ...item, [field]: res.product[field] }
+        : item
+    )));
+    invalidateCategoriesCache();
+    loadCategories();
   };
 
   // Keep the category-section presentation while grouping only the current
@@ -2712,6 +2814,8 @@ export default function WarehousePortal() {
                                 key={prod.product_id || prod.id}
                                 product={prod}
                                 onCardClick={(productToEdit) => setSelectedProductForEdit(productToEdit)}
+                                onToggleFlag={handleToggleProductFlag}
+                                pending={Boolean(productFlagsPending[prod.product_id || prod.id])}
                               />
                             ))}
                           </div>
@@ -2763,8 +2867,7 @@ export default function WarehousePortal() {
                         No Database Products Found In This Selection
                       </h3>
                       <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: '0 0 1.5rem 0' }}>
-                        Try resetting your price, size, search query, or stock filters to view available items in{' '}
-                        {selectedCategory === 'ALL' ? 'the catalog' : selectedCategory}.
+                        {`Try resetting your price, size, search query, or stock filters to view available items in ${selectedCategory === 'ALL' ? 'the catalog' : selectedCategory}.`}
                       </p>
                       <button
                         type="button"
@@ -3593,13 +3696,18 @@ export default function WarehousePortal() {
           product={selectedProductForEdit}
           token={token}
           onClose={() => setSelectedProductForEdit(null)}
-          onSaveSuccess={() => {
-            // The edit can change filter membership, category grouping, sort
-            // position, and page counts, so refresh the current query from page 1.
-            // Category names/counts may have changed — invalidate the cache.
+          onSaveSuccess={(savedProduct) => {
             invalidateCategoriesCache();
             loadCategories();
-            fetchProducts(1);
+            setRawProducts((prev) => prev.map((product) => (
+              (product.product_id || product.id) === savedProduct.product_id
+                ? {
+                    ...product,
+                    ...savedProduct,
+                    image: savedProduct.image || product.image,
+                  }
+                : product
+            )));
           }}
         />
       )}

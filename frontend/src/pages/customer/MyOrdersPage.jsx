@@ -23,10 +23,12 @@ import {
   ArrowRight,
   X,
   Star,
+  Shirt,
+  BookmarkPlus,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useCustomer } from '../../context/CustomerContext';
-import { getCustomerOrders, submitProductReview, requestCustomerReturn } from '../../services/api';
+import { getCustomerOrders, submitProductReview, requestCustomerReturn, addWardrobeItem } from '../../services/api';
 
 export default function MyOrdersPage() {
   const { token, user } = useAuth();
@@ -60,6 +62,28 @@ export default function MyOrdersPage() {
 
   // Return Tracking Modal state
   const [returnTrackingItem, setReturnTrackingItem] = useState(null);
+
+  // Wardrobe Saving state
+  const [savedWardrobeIds, setSavedWardrobeIds] = useState(new Set());
+  const [savingWardrobeId, setSavingWardrobeId] = useState(null);
+
+  const handleAddToWardrobe = async (item) => {
+    if (!token) return;
+    const itemId = item.order_id || item.product_id;
+    setSavingWardrobeId(itemId);
+    const res = await addWardrobeItem(token, {
+      item_name: item.product_name || item.name || 'Garment Piece',
+      category: item.category_name || 'Tops',
+      primary_color: 'Neutral',
+      occasion: 'Casual',
+      image_url: item.image || item.primary_image,
+    });
+    setSavingWardrobeId(null);
+    if (res.success) {
+      setSavedWardrobeIds((prev) => new Set([...prev, itemId]));
+      if (addToast) addToast('Garment saved to your private wardrobe!', 'success');
+    }
+  };
 
   const handleOpenReturnModal = (item) => {
     setReturnModalItem(item);
@@ -1061,6 +1085,40 @@ export default function MyOrdersPage() {
                       }
 
                       return null;
+                    })()}
+
+                    {/* Add to Wardrobe Button for delivered items */}
+                    {(() => {
+                      const isDelivered = (item.status || '').toLowerCase() === 'delivered' || (item.delivery?.delivery_status || '').toLowerCase() === 'delivered';
+                      if (!isDelivered) return null;
+                      const itemId = item.order_id || item.product_id;
+                      const isSaved = savedWardrobeIds.has(itemId);
+                      const isSaving = savingWardrobeId === itemId;
+
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => handleAddToWardrobe(item)}
+                          disabled={isSaved || isSaving}
+                          style={{
+                            padding: '0.55rem 1rem',
+                            borderRadius: '9999px',
+                            backgroundColor: isSaved ? '#E6FCF5' : '#FAF5F4',
+                            border: isSaved ? '1px solid #63E6BE' : '1px solid #EADBDA',
+                            color: isSaved ? '#0CA678' : '#9C4146',
+                            fontSize: '0.82rem',
+                            fontWeight: 600,
+                            cursor: isSaved ? 'default' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            transition: 'all 0.2s ease',
+                          }}
+                        >
+                          {isSaved ? <Check size={13} /> : <BookmarkPlus size={13} />}
+                          <span>{isSaved ? 'In Wardrobe' : isSaving ? 'Saving...' : 'Add to Wardrobe'}</span>
+                        </button>
+                      );
                     })()}
 
                     <button

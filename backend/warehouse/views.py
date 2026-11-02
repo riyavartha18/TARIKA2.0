@@ -8,9 +8,11 @@ from rest_framework.pagination import PageNumberPagination
 
 from accounts.permissions import IsAuthenticatedUser, IsWarehouseManager
 from accounts.authentication import SupabaseAuthentication
+from catalog.services import CatalogService
 from .services import WarehouseService
 from .serializers import (
     WarehouseCategoryGroupedSerializer,
+    WarehouseProductListSerializer,
     WarehouseOrderSerializer,
     WarehouseOrderDetailSerializer,
     WarehouseDeliverySerializer,
@@ -43,10 +45,54 @@ class StandardWarehousePagination(PageNumberPagination):
         })
 
 
+class WarehouseProductPagination(StandardWarehousePagination):
+    page_size = 20
+
+
+class WarehouseProductListView(APIView):
+    """Paginated warehouse catalog including inactive and hidden products."""
+    authentication_classes = [SupabaseAuthentication]
+    permission_classes = [IsAuthenticatedUser, IsWarehouseManager]
+
+    def get(self, request):
+        queryset = CatalogService.filter_and_sort_products(
+            queryset=Product.objects.all(),
+            category=request.query_params.get('category'),
+            sub_category=request.query_params.get('sub_category'),
+            search=request.query_params.get('search'),
+            min_price=request.query_params.get('min_price'),
+            max_price=request.query_params.get('max_price'),
+            in_stock=request.query_params.get('in_stock'),
+            sort=request.query_params.get('sort') or 'newest',
+            on_sale=request.query_params.get('on_sale'),
+            size=request.query_params.get('size'),
+            color=request.query_params.get('color'),
+            subcategory_search=request.query_params.get('subcategory_search'),
+            starts_with=request.query_params.get('starts_with'),
+        ).only(
+            'product_id',
+            'product_name',
+            'main_category',
+            'sub_category',
+            'link',
+            'discount_price',
+            'actual_price_text',
+            'available_quantity',
+            'image',
+            'is_active',
+            'hidden',
+            'confidence',
+        )
+        paginator = WarehouseProductPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = WarehouseProductListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
 class WarehouseGroupedProductsView(APIView):
     """
     GET /api/warehouse/products/grouped/
-    Returns active products grouped according to database categories.
+    Returns products grouped according to database categories.
     Single DB query + Python grouping = fast response.
     """
     permission_classes = [AllowAny]
@@ -137,10 +183,14 @@ class WarehouseProductDetailView(APIView):
         # cached /api/catalog/categories/ aggregate on the next request.
         cache.delete('catalog:categories:v1')
         read_serializer = WarehouseProductDetailSerializer(updated_product)
+        product_data = read_serializer.data
+        product_data['is_active'] = updated_product.is_active
+        product_data['hidden'] = updated_product.hidden
+        product_data['confidence'] = updated_product.confidence
         return Response(
             {
                 'message': 'Product updated successfully.',
-                'product': read_serializer.data,
+                'product': product_data,
             },
             status=status.HTTP_200_OK
         )
@@ -508,5 +558,3 @@ class WarehouseOrderDispatchView(APIView):
                 'expected_delivery_date': delivery.expected_delivery_date,
             }
         }, status=status.HTTP_200_OK)
-
-

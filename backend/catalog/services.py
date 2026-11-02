@@ -18,6 +18,7 @@ class CatalogService:
         'actual_price_text',
         'available_quantity',
         'image',
+        'is_image_valid',
     )
 
     @staticmethod
@@ -26,7 +27,13 @@ class CatalogService:
         Returns a base queryset over the real public.products table.
         (Legacy stock annotation removed: the new schema has no inventory data.)
         """
-        return Product.objects.all()
+        return Product.objects.filter(
+            is_image_valid=True,
+            is_active=True,
+            hidden=False,
+        ).exclude(
+            Q(image__isnull=True) | Q(image='')
+        )
 
     @staticmethod
     def _parse_price_filter(value):
@@ -57,6 +64,7 @@ class CatalogService:
         size=None,
         color=None,
         subcategory_search=None,
+        starts_with=None,
     ):
         if queryset is None:
             queryset = cls.get_annotated_products_queryset()
@@ -108,6 +116,12 @@ class CatalogService:
                     Q(product_name__icontains=keyword) |
                     Q(sub_category__icontains=keyword)
                 )
+
+        # 3b. Alphabetical starts_with filter on actual product_name (case-insensitive)
+        if starts_with:
+            letter = str(starts_with).strip()
+            if letter and letter.lower() != 'all' and len(letter) == 1 and letter.isalpha():
+                queryset = queryset.filter(product_name__istartswith=letter)
 
         if size:
             # Size is not a column in the current Supabase products schema.
@@ -191,13 +205,17 @@ class CatalogService:
 
         return queryset
 
+    NEW_ARRIVALS_KEYS = [f"P1000{i:02d}" for i in range(1, 41)]
+
     @classmethod
     def get_new_arrivals(cls, limit=None):
         """
-        Returns latest products. The new schema has no launch/created date
-        column, so ordering is by product_key (stable catalogue order).
+        Returns exclusively the 40 newly added curated products (P100001 - P100040),
+        removing all legacy catalog items from the New In section.
         """
-        qs = cls.get_annotated_products_queryset().order_by('product_id')
+        qs = cls.get_annotated_products_queryset().filter(
+            product_id__in=cls.NEW_ARRIVALS_KEYS
+        ).order_by('product_id')
         return qs[:limit] if limit else qs
 
     @classmethod

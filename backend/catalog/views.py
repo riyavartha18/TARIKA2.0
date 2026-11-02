@@ -154,6 +154,7 @@ class ProductListView(APIView):
         size = request.query_params.get('size')
         color = request.query_params.get('color')
         subcategory_search = request.query_params.get('subcategory_search')
+        starts_with = request.query_params.get('starts_with')
         sort = request.query_params.get('sort')
 
         queryset = CatalogService.filter_and_sort_products(
@@ -168,6 +169,7 @@ class ProductListView(APIView):
             size=size,
             color=color,
             subcategory_search=subcategory_search,
+            starts_with=starts_with,
         )
 
         queryset = queryset.only(*CatalogService.PRODUCT_LIST_FIELDS)
@@ -274,7 +276,7 @@ def _paginated_curated_products(request, queryset, endpoint):
         key: request.query_params.get(key)
         for key in (
             'category', 'sub_category', 'search', 'min_price', 'max_price',
-            'in_stock', 'on_sale', 'size', 'color', 'subcategory_search'
+            'in_stock', 'on_sale', 'size', 'color', 'subcategory_search', 'starts_with'
         )
     }
     sort = request.query_params.get('sort')
@@ -287,9 +289,9 @@ def _paginated_curated_products(request, queryset, endpoint):
     legacy_limit = request.query_params.get('limit')
     if legacy_limit is not None and 'page' not in request.query_params and 'page_size' not in request.query_params:
         try:
-            limit = min(max(int(legacy_limit), 0), 20)
+            limit = min(max(int(legacy_limit), 0), 40)
         except (TypeError, ValueError):
-            limit = 20
+            limit = 40
         products = list(queryset[:limit])
         serializer = ProductListSerializer(products, many=True)
         payload = {
