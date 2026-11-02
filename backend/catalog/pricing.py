@@ -6,13 +6,16 @@ from .models import parse_product_price
 def get_product_selling_price_map(product_ids):
     """Return the effective selling price for products, keyed by product id.
 
-    The real `public.products` table stores the FINAL discounted selling
-    price in the TEXT `actual_price` column (`initial_price - discount_price`),
-    so that is what the map returns — NOT `discount_price`, which is the
-    discount AMOUNT in currency. Values are floats and missing products are
-    simply absent from the map, letting callers decide how to treat an
-    unknown price. Parsing happens in Python (via the shared helper) so the
-    query stays vendor-neutral.
+    The real `public.products` table keeps the ORIGINAL price in the TEXT
+    `actual_price` column and the FINAL price the customer pays in the numeric
+    `discounted_price` column (verified: `discounted_price` equals
+    `actual_price - discount_price` on every row). So the selling price is
+    `discounted_price`, falling back to the parsed TEXT price for a row that has
+    no discounted value — never `discount_price`, which is the discount AMOUNT
+    in currency. Values are floats and missing products are simply absent from
+    the map, letting callers decide how to treat an unknown price. Parsing
+    happens in Python (via the shared helper) so the query stays
+    vendor-neutral.
     """
     normalized_ids = list(dict.fromkeys(
         str(product_id) for product_id in product_ids if product_id is not None
@@ -24,15 +27,19 @@ def get_product_selling_price_map(product_ids):
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
-                SELECT product_key, actual_price
+                SELECT product_key, discounted_price, actual_price
                 FROM public.products
                 WHERE product_key IN ({placeholders})
             """,
             normalized_ids,
         )
         selling_map = {}
-        for product_key, actual_price_raw in cursor.fetchall():
-            final_price = parse_product_price(actual_price_raw)
+        for product_key, discounted_price, actual_price_raw in cursor.fetchall():
+            final_price = (
+                float(discounted_price)
+                if discounted_price is not None
+                else parse_product_price(actual_price_raw)
+            )
             if final_price is not None:
                 selling_map[str(product_key)] = final_price
         return selling_map
@@ -41,10 +48,11 @@ def get_product_selling_price_map(product_ids):
 def resolve_product_prices(initial_price, discount_price=None, final_price=None):
     """Authoritatively resolve the three product price fields.
 
-    Exactly the stored layout documented on the Product model:
-    `actual_price = initial_price - discount_price`, where `discount_price`
-    is a currency AMOUNT (never a percentage) and the percentage is only
-    ever derived.
+    Stored layout of `public.products`, documented on the Product model:
+    the TEXT `actual_price` column is the ORIGINAL price, `discount_price` is a
+    currency AMOUNT (never a percentage) and `discounted_price` is the FINAL
+    selling price, i.e. ``discounted_price = actual_price - discount_price``.
+    The percentage is always derived from the two prices, never stored.
 
     Accepts either input method used by the warehouse UI:
       * discount amount given, final missing -> final = initial - amount
@@ -113,8 +121,13 @@ def resolve_product_prices(initial_price, discount_price=None, final_price=None)
         resolved_final = round(initial, 2)
 
     resolved_initial = round(initial, 2) if initial is not None else None
+    # Percentage from the two prices rather than from the amount column, so the
+    # badge can never disagree with the prices it sits beside. Never negative.
+    discount_value = 0.0
+    if resolved_initial is not None:
+        discount_value = max(0.0, round(resolved_initial - resolved_final, 2))
     percentage = (
-        round(resolved_amount / resolved_initial * 100, 2)
+        round(min(discount_value / resolved_initial * 100, 100.0), 2)
         if resolved_initial and resolved_initial > 0 else 0.0
     )
     return {

@@ -1,9 +1,8 @@
 import re
 
-from django.db import DatabaseError
-from django.db.models import Q, Sum, F, OuterRef, Subquery, IntegerField, FloatField
-from django.db.models.functions import Coalesce
-from .models import Product, OrderItem
+from django.db import connection
+from django.db.models import Q, F, FloatField
+from .models import Product
 from .category_mapping import get_editorial_filter
 
 
@@ -16,21 +15,38 @@ class CatalogService:
         'link',
         'discount_price',
         'actual_price_text',
-        'initial_price',
         'discounted_price',
         'available_quantity',
         'image',
+    )
+
+    # The selling price the customer actually pays: the real `discounted_price`
+    # column, falling back to the parsed TEXT `actual_price` (the ORIGINAL price)
+    # for a row that carries no discounted value. Both columns exist in this
+    # schema; `initial_price` does not, so nothing here may reference it.
+    SELLING_PRICE_SQL = (
+        "COALESCE(products.discounted_price, "
+        "NULLIF(regexp_replace(products.actual_price, '[^0-9.]', '', 'g'), '')::float8)"
+    )
+    # The original (strikethrough) price = parsed TEXT `actual_price`.
+    ORIGINAL_PRICE_SQL = (
+        "NULLIF(regexp_replace(products.actual_price, '[^0-9.]', '', 'g'), '')::float8"
     )
 
     @staticmethod
     def get_annotated_products_queryset():
         """
         Returns a base queryset over the real public.products table.
-        Archived (soft-deleted) products are excluded so a warehouse delete
-        removes them from every customer listing, search and curated rail.
-        (Legacy stock annotation removed: the new schema has no inventory data.)
+
+        Customer-facing visibility rules, both read from the product row:
+          * ``is_active`` - an archived (soft-deleted) product is gone from every
+            storefront, search and curated rail;
+          * ``hidden`` - a hidden product stays in the catalog for the warehouse
+            and admin views but is never offered to a shopper.
+        Stock is carried on the row itself (`available_quantity`); this schema has
+        no inventory table.
         """
-        return Product.objects.filter(is_active=True)
+        return Product.objects.filter(is_active=True).exclude(hidden=True)
 
     @staticmethod
     def _parse_price_filter(value):
@@ -149,18 +165,19 @@ class CatalogService:
             (on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes')) or
             sort_option in ('price_low_high', 'price_high_low')
         )
-        # `actual_price` (TEXT) now holds the FINAL discounted selling price
-        # (initial_price - discount_price), so the effective displayed price
-        # is the parsed TEXT column with the original price as fallback.
+        # Price filtering, "on sale" and price sorting all work on the FINAL
+        # selling price (`discounted_price`), with the original price annotated
+        # alongside so a real discount can be recognised as
+        # selling < original rather than as a non-zero discount amount column.
         if needs_price_annotation:
             from django.db.models.expressions import RawSQL
             queryset = queryset.annotate(
                 parsed_selling_price=RawSQL(
-                    "COALESCE(NULLIF(regexp_replace(products.actual_price, "
-                    "'[^0-9.]', '', 'g'), '')::float8, products.initial_price)",
-                    [],
-                    output_field=FloatField(),
-                )
+                    cls.SELLING_PRICE_SQL, [], output_field=FloatField(),
+                ),
+                parsed_original_price=RawSQL(
+                    cls.ORIGINAL_PRICE_SQL, [], output_field=FloatField(),
+                ),
             )
 
         # 4. Min price filter uses the effective displayed (final) price.
@@ -176,10 +193,11 @@ class CatalogService:
         if in_stock is not None and str(in_stock).strip().lower() in ('true', '1', 'yes'):
             queryset = queryset.filter(available_quantity__gt=0)
 
-        # "On sale" now means a real discount amount: discount_price is the
-        # discount in currency, so on sale <=> discount_price > 0.
+        # "On sale" means the selling price really is below the original price.
+        # `discount_price` holds a currency AMOUNT, so a positive amount alone is
+        # not evidence of a discount (and can never be read as a percentage).
         if on_sale is not None and str(on_sale).strip().lower() in ('true', '1', 'yes'):
-            queryset = queryset.filter(discount_price__gt=0)
+            queryset = queryset.filter(parsed_selling_price__lt=F('parsed_original_price'))
 
         # 7. Sorting (real schema has no launch_date / created_at columns,
         #    so 'newest' falls back to a stable product_key order)
@@ -218,62 +236,92 @@ class CatalogService:
     @classmethod
     def get_trending(cls, limit=None):
         """
-        Returns trending products based on aggregated order sales volume,
-        preserving the original sales-volume logic using the real orders
-        table: SUM(orders."Quantity") per product_id.
+        Returns trending products ranked by real sales volume.
+
+        Volume is the quantity sold from DELIVERED orders only (a returned or
+        in-transit order is not a completed sale), aggregated from the real
+        `public.orders` table that this schema actually has. The legacy
+        `order_items` table this method used to read does not exist here, so the
+        aggregation is done in one grouped query and the products are then
+        fetched in that rank order. If the aggregation is unavailable for any
+        reason the stable catalogue order is used instead of failing.
         """
-        sales_subquery = (
-            OrderItem.objects.filter(product=OuterRef('pk'))
-            .values('product')
-            .annotate(total_sold=Sum('quantity'))
-            .values('total_sold')
-        )
-
         try:
-            qs = cls.get_annotated_products_queryset().annotate(
-                sales_volume=Coalesce(
-                    Subquery(sales_subquery, output_field=IntegerField()),
-                    0
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT o.product_id
+                      FROM public.orders o
+                     WHERE LOWER(TRIM(COALESCE(o.delivery_status, ''))) = 'delivered'
+                       AND o.product_id IS NOT NULL
+                     GROUP BY o.product_id
+                     ORDER BY SUM(COALESCE(o.quantity, 0)) DESC, o.product_id
+                     LIMIT %s
+                    """,
+                    [limit or 12],
                 )
-            ).order_by('-sales_volume', 'product_id')
+                ranked_ids = [row[0] for row in cursor.fetchall()]
+        except Exception:
+            ranked_ids = []
 
-            # When a limited list is requested, evaluate here so a missing
-            # source table can fall back immediately. Paginated callers catch
-            # database errors while evaluating the queryset.
-            return list(qs[:limit]) if limit else qs
-        except DatabaseError:
-            # The legacy order_items source table may not exist in the new
-            # database. Fall back to the stable catalogue order so the
-            # trending endpoint keeps working with the same response shape.
+        if not ranked_ids:
             return cls.get_new_arrivals(limit=limit)
+
+        by_id = {
+            p.product_id: p
+            for p in cls.get_annotated_products_queryset().filter(product_id__in=ranked_ids)
+        }
+        ordered = [by_id[pid] for pid in ranked_ids if pid in by_id]
+        if not ordered:
+            return cls.get_new_arrivals(limit=limit)
+
+        # Fewer eligible products than the rail asked for: top up with the
+        # stable catalogue order so the rail still fills.
+        if limit and len(ordered) < limit:
+            existing = {p.product_id for p in ordered}
+            filler = [p for p in cls.get_new_arrivals(limit=limit * 2) if p.product_id not in existing]
+            ordered.extend(filler[:limit - len(ordered)])
+        return ordered[:limit] if limit else ordered
 
     @classmethod
     def get_sale_products(cls, limit=None):
         """
-        Returns products currently on sale.
-        Criterion: a positive discount AMOUNT (`discount_price` stores the
-        discount in currency, so on sale <=> discount_price > 0), deepest
-        discount first.
+        Returns products that are genuinely on sale: the FINAL selling price
+        (`discounted_price`) below the original price held in the TEXT
+        `actual_price` column, biggest currency saving first.
+
+        `discount_price` is an AMOUNT, so a positive amount alone is not proof of
+        a discount; the two prices decide.
         Fallback criterion: lowest final selling price (mirrors the original
         fallback when no discounted products exist).
         """
+        from django.db.models.expressions import RawSQL
+
         base_qs = cls.get_annotated_products_queryset()
 
-        sale_qs = base_qs.filter(
-            discount_price__gt=0
-        ).order_by('-discount_price', 'product_id')
+        sale_qs = base_qs.annotate(
+            parsed_selling_price=RawSQL(
+                cls.SELLING_PRICE_SQL, [], output_field=FloatField(),
+            ),
+            parsed_original_price=RawSQL(
+                cls.ORIGINAL_PRICE_SQL, [], output_field=FloatField(),
+            ),
+            parsed_discount_value=RawSQL(
+                f"COALESCE({cls.ORIGINAL_PRICE_SQL}, 0)"
+                f" - COALESCE({cls.SELLING_PRICE_SQL}, 0)",
+                [], output_field=FloatField(),
+            ),
+        ).filter(
+            parsed_discount_value__gt=0
+        ).order_by('-parsed_discount_value', 'product_id')
         if sale_qs.exists():
             return sale_qs[:limit] if limit else sale_qs
 
         # Fallback: lowest price clearance — cheapest final selling price
         # first (parsed actual_price TEXT column).
-        from django.db.models.expressions import RawSQL
-
         clearance_qs = base_qs.annotate(
             parsed_selling_price=RawSQL(
-                "COALESCE(NULLIF(regexp_replace(products.actual_price, "
-                "'[^0-9.]', '', 'g'), '')::float8, products.initial_price)",
-                []
+                cls.SELLING_PRICE_SQL, [], output_field=FloatField(),
             )
         ).order_by('parsed_selling_price', 'product_id')
         return clearance_qs[:limit] if limit else clearance_qs

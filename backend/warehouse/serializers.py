@@ -348,13 +348,60 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
         return attrs
 
 
+def build_order_lines(orders):
+    """Derive the single product line of each order from real columns.
+
+    `public.orders` stores one product per row and there is no order-items table.
+    `initial_price` is the line gross written at checkout (unit price x
+    quantity), so the unit price is that gross divided back by the quantity; a
+    missing or zero quantity falls back to the gross instead of dividing by zero.
+    """
+    lines = []
+    for order in orders:
+        product = order.product
+        quantity = int(order.quantity or 0)
+        gross = float(order.initial_price or 0.0)
+        unit_price = round(gross / quantity, 2) if quantity > 0 else gross
+        lines.append({
+            'order_item_id': order.order_id,
+            'order_id': order.order_id,
+            'product_id': product.product_id if product else (order.product_id or ''),
+            'product_name': (product.product_name if product else None) or 'Catalog product',
+            'category_name': (product.main_category if product else None) or '',
+            'sub_category': (product.sub_category if product else None) or '',
+            'quantity': quantity,
+            'unit_price': unit_price,
+            'discount': float(order.additional_discount or 0.0),
+            'subtotal': float(order.final_price if order.final_price is not None else gross),
+            'image': (product.image if product else None) or '',
+            'product_url': (product.link if product else None) or '',
+        })
+    return lines
+
+
 class WarehouseOrderSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source='customer.full_name', read_only=True, default='Guest / Online Customer')
-    customer_email = serializers.CharField(source='customer.email', read_only=True, default='')
-    customer_phone = serializers.CharField(source='customer.phone', read_only=True, default='')
-    warehouse_name = serializers.CharField(source='warehouse.warehouse_name', read_only=True, default='Fulfillment Center')
-    warehouse_city = serializers.CharField(source='warehouse.city', read_only=True, default='')
+    """Read-only order row for the warehouse Orders tab.
+
+    Every value comes from the real `public.orders` row plus its joined customer
+    and product. Keys this schema has no column for (fulfilment warehouse,
+    payment status, shipping address, phone) are returned as None, so the
+    dashboard can label them "not recorded" instead of inventing a value.
+    """
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+    warehouse_id = serializers.SerializerMethodField()
+    warehouse_name = serializers.SerializerMethodField()
+    warehouse_city = serializers.SerializerMethodField()
+    order_date = serializers.SerializerMethodField()
+    order_status = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    payment_method = serializers.SerializerMethodField()
+    total_amount = serializers.SerializerMethodField()
+    discount_amount = serializers.SerializerMethodField()
+    shipping_address = serializers.SerializerMethodField()
     item_count = serializers.SerializerMethodField()
+    product_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -369,69 +416,105 @@ class WarehouseOrderSerializer(serializers.ModelSerializer):
             'warehouse_city',
             'order_date',
             'order_status',
+            'delivery_status',
             'payment_status',
+            'payment_method',
             'total_amount',
             'discount_amount',
             'shipping_address',
+            'product_name',
+            'quantity',
             'item_count',
-            'created_at',
-            'updated_at'
         ]
+
+    def get_customer_name(self, obj):
+        return obj.customer.customer_name if obj.customer else None
+
+    def get_customer_email(self, obj):
+        return obj.customer.email if obj.customer else None
+
+    def get_customer_phone(self, obj):
+        # public.customers has no phone column.
+        return None
+
+    def get_warehouse_id(self, obj):
+        # No warehouses table and no warehouse column on orders.
+        return None
+
+    def get_warehouse_name(self, obj):
+        return None
+
+    def get_warehouse_city(self, obj):
+        return None
+
+    def get_order_date(self, obj):
+        return obj.purchase_date
+
+    def get_order_status(self, obj):
+        return obj.order_status
+
+    def get_payment_status(self, obj):
+        # The schema records a payment METHOD but no payment status column.
+        return None
+
+    def get_payment_method(self, obj):
+        return obj.payment_method
+
+    def get_total_amount(self, obj):
+        return obj.final_price
+
+    def get_discount_amount(self, obj):
+        return obj.additional_discount
+
+    def get_shipping_address(self, obj):
+        return None
 
     def get_item_count(self, obj):
-        try:
-            return OrderItem.objects.filter(order_id=obj.order_id).count()
-        except Exception:
-            return 0
+        # One product per row, so the line quantity IS the item count.
+        return int(obj.quantity or 0)
+
+    def get_product_name(self, obj):
+        return obj.product.product_name if obj.product else None
 
 
-class WarehouseOrderItemSerializer(serializers.ModelSerializer):
-    product_id = serializers.CharField(source='product.product_id', read_only=True, default='')
-    product_name = serializers.CharField(source='product.product_name', read_only=True, default='Apparel Product')
-    sku = serializers.CharField(source='product.sku', read_only=True, default='')
-    category_name = serializers.CharField(source='product.category.category_name', read_only=True, default=None)
-    manufacturer_name = serializers.CharField(source='product.manufacturer.manufacturer_name', read_only=True, default=None)
-    color = serializers.CharField(source='product.color', read_only=True, default='')
-    size = serializers.CharField(source='product.size', read_only=True, default='')
-    material = serializers.CharField(source='product.material', read_only=True, default='')
-    image = serializers.SerializerMethodField()
+class WarehouseOrderItemSerializer(serializers.Serializer):
+    """The single product line of an order, derived from the order row.
 
-    class Meta:
-        model = OrderItem
-        fields = [
-            'order_item_id',
-            'order_id',
-            'product_id',
-            'product_name',
-            'sku',
-            'category_name',
-            'manufacturer_name',
-            'color',
-            'size',
-            'material',
-            'quantity',
-            'unit_price',
-            'discount',
-            'subtotal',
-            'image',
-        ]
-
-    def get_image(self, obj):
-        if obj.product and obj.product.category:
-            cat_name = (obj.product.category.category_name or '').strip().lower()
-            return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
-        return None
+    Kept as a declared serializer so the shape of an order line stays part of the
+    API contract even though `public.order_items` does not exist.
+    """
+    order_item_id = serializers.CharField(read_only=True)
+    order_id = serializers.CharField(read_only=True)
+    product_id = serializers.CharField(read_only=True)
+    product_name = serializers.CharField(read_only=True)
+    category_name = serializers.CharField(read_only=True)
+    sub_category = serializers.CharField(read_only=True)
+    quantity = serializers.IntegerField(read_only=True)
+    unit_price = serializers.FloatField(read_only=True)
+    discount = serializers.FloatField(read_only=True)
+    subtotal = serializers.FloatField(read_only=True)
+    image = serializers.CharField(read_only=True)
+    product_url = serializers.CharField(read_only=True)
 
 
 class WarehouseOrderDetailSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source='customer.full_name', read_only=True, default='Guest / Online Customer')
-    customer_email = serializers.CharField(source='customer.email', read_only=True, default='')
-    customer_phone = serializers.CharField(source='customer.phone', read_only=True, default='')
-    customer_city = serializers.CharField(source='customer.city', read_only=True, default='')
-    customer_state = serializers.CharField(source='customer.state', read_only=True, default='')
-    customer_country = serializers.CharField(source='customer.country', read_only=True, default='')
-    warehouse_name = serializers.CharField(source='warehouse.warehouse_name', read_only=True, default='Fulfillment Center')
-    warehouse_city = serializers.CharField(source='warehouse.city', read_only=True, default='')
+    """Full order detail for the warehouse modal, from the real order row."""
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+    customer_city = serializers.SerializerMethodField()
+    customer_state = serializers.SerializerMethodField()
+    customer_country = serializers.SerializerMethodField()
+    warehouse_id = serializers.SerializerMethodField()
+    warehouse_name = serializers.SerializerMethodField()
+    warehouse_city = serializers.SerializerMethodField()
+    order_date = serializers.SerializerMethodField()
+    order_status = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    payment_method = serializers.SerializerMethodField()
+    total_amount = serializers.SerializerMethodField()
+    discount_amount = serializers.SerializerMethodField()
+    shipping_address = serializers.SerializerMethodField()
     items = serializers.SerializerMethodField()
     delivery = serializers.SerializerMethodField()
 
@@ -451,99 +534,137 @@ class WarehouseOrderDetailSerializer(serializers.ModelSerializer):
             'warehouse_city',
             'order_date',
             'order_status',
+            'delivery_status',
             'payment_status',
+            'payment_method',
             'total_amount',
             'discount_amount',
             'shipping_address',
-            'created_at',
-            'updated_at',
+            'quantity',
+            'shipping_time_days',
+            'rating',
             'items',
             'delivery',
         ]
 
-    def get_items(self, obj):
-        items = OrderItem.objects.filter(order_id=obj.order_id).select_related('product__category', 'product__manufacturer')
-        return WarehouseOrderItemSerializer(items, many=True).data
-
-    def get_delivery(self, obj):
-        deliv = Delivery.objects.filter(order_id=obj.order_id).select_related('assigned_employee').first()
-        if not deliv:
-            return None
-        return {
-            'delivery_id': deliv.delivery_id,
-            'delivery_status': deliv.delivery_status,
-            'delivery_partner': deliv.delivery_partner,
-            'assigned_employee_id': deliv.assigned_employee_id,
-            'assigned_employee_name': deliv.assigned_employee.full_name if deliv.assigned_employee else None,
-            'assigned_employee_phone': deliv.assigned_employee.phone if deliv.assigned_employee else None,
-            'dispatch_date': deliv.dispatch_date,
-            'expected_delivery_date': deliv.expected_delivery_date,
-            'actual_delivery_date': deliv.actual_delivery_date,
-            'failure_reason': deliv.failure_reason,
-        }
-
-
-
-class WarehouseDeliverySerializer(serializers.ModelSerializer):
-    warehouse_name = serializers.CharField(source='warehouse.warehouse_name', read_only=True, default='Fulfillment Hub')
-    warehouse_city = serializers.CharField(source='warehouse.city', read_only=True, default='')
-    customer_name = serializers.SerializerMethodField()
-    customer_city = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Delivery
-        fields = [
-            'delivery_id',
-            'order_id',
-            'warehouse_id',
-            'warehouse_name',
-            'warehouse_city',
-            'customer_name',
-            'customer_city',
-            'delivery_partner',
-            'dispatch_date',
-            'expected_delivery_date',
-            'actual_delivery_date',
-            'delivery_status',
-            'failure_reason'
-        ]
-
     def get_customer_name(self, obj):
-        if obj.order and obj.order.customer:
-            return obj.order.customer.full_name or 'Valued Customer'
-        return 'Valued Customer'
+        return obj.customer.customer_name if obj.customer else None
+
+    def get_customer_email(self, obj):
+        return obj.customer.email if obj.customer else None
+
+    def get_customer_phone(self, obj):
+        return None
 
     def get_customer_city(self, obj):
-        if obj.order and obj.order.customer:
-            return obj.order.customer.city or ''
-        return ''
+        return None
+
+    def get_customer_state(self, obj):
+        return None
+
+    def get_customer_country(self, obj):
+        return None
+
+    def get_warehouse_id(self, obj):
+        return None
+
+    def get_warehouse_name(self, obj):
+        return None
+
+    def get_warehouse_city(self, obj):
+        return None
+
+    def get_order_date(self, obj):
+        return obj.purchase_date
+
+    def get_order_status(self, obj):
+        return obj.order_status
+
+    def get_payment_status(self, obj):
+        return None
+
+    def get_payment_method(self, obj):
+        return obj.payment_method
+
+    def get_total_amount(self, obj):
+        return obj.final_price
+
+    def get_discount_amount(self, obj):
+        return obj.additional_discount
+
+    def get_shipping_address(self, obj):
+        return None
+
+    def get_items(self, obj):
+        return list(build_order_lines([obj]))
+
+    def get_delivery(self, obj):
+        # public.deliveries does not exist; the delivery state lives on the
+        # order row itself and is returned as its own delivery_status key.
+        return None
+
+
+
+
+class WarehouseDeliverySerializer(serializers.Serializer):
+    """A delivery row derived from the real `public.orders` table.
+
+    There is no `deliveries` table in this schema, so a delivery IS the order's
+    own `delivery_status` (Delivered / In Transit / Returned). Courier partner,
+    dispatch date, expected date, assigned employee and failure reason have no
+    columns to read from and come back as None rather than being invented.
+    `shipping_time_days` is the one real transit figure the dataset carries.
+    """
+    delivery_id = serializers.CharField(read_only=True)
+    order_id = serializers.CharField(read_only=True, default=None, allow_null=True)
+    warehouse_id = serializers.CharField(read_only=True, default=None, allow_null=True)
+    warehouse_name = serializers.CharField(read_only=True, default=None, allow_null=True)
+    warehouse_city = serializers.CharField(read_only=True, default=None, allow_null=True)
+    customer_name = serializers.CharField(read_only=True, default=None, allow_null=True)
+    customer_city = serializers.CharField(read_only=True, default=None, allow_null=True)
+    delivery_partner = serializers.CharField(read_only=True, default=None, allow_null=True)
+    dispatch_date = serializers.CharField(read_only=True, default=None, allow_null=True)
+    expected_delivery_date = serializers.CharField(read_only=True, default=None, allow_null=True)
+    actual_delivery_date = serializers.CharField(read_only=True, default=None, allow_null=True)
+    delivery_status = serializers.CharField(read_only=True, default=None, allow_null=True)
+    failure_reason = serializers.CharField(read_only=True, default=None, allow_null=True)
+    shipping_time_days = serializers.IntegerField(read_only=True, default=None, allow_null=True)
+    purchase_date = serializers.CharField(read_only=True, default=None, allow_null=True)
 
 
 class WarehouseReturnSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source='customer.full_name', read_only=True, default='Valued Customer')
-    customer_email = serializers.CharField(source='customer.email', read_only=True, default='')
+    """A row of the real `public.returns` table, joined to customer and product.
+
+    The table stores return_id / customer / product / return_reason / abuse_type
+    and nothing else: no status, date, refund amount, condition or courier
+    column, and no link to an order row (the (customer, product) pair is not
+    unique in orders, so naming "the" order would be a guess). Those keys are
+    returned as None and `workflow_tracked` is False. `abuse_type` is an
+    internal fraud classification exposed on this staff endpoint only.
+    """
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.SerializerMethodField()
     order_id = serializers.SerializerMethodField()
     product_id = serializers.SerializerMethodField()
     product_name = serializers.SerializerMethodField()
     product_sku = serializers.SerializerMethodField()
+    category_name = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
     quantity = serializers.SerializerMethodField()
+    return_date = serializers.SerializerMethodField()
+    return_status = serializers.SerializerMethodField()
+    refund_amount = serializers.SerializerMethodField()
+    condition_on_return = serializers.SerializerMethodField()
     assigned_employee_id = serializers.SerializerMethodField()
-    assigned_employee_name = serializers.CharField(source='assigned_employee.full_name', read_only=True, default='')
-
-    def get_assigned_employee_id(self, obj):
-        if obj.assigned_employee_id:
-            try:
-                return int(obj.assigned_employee_id)
-            except (ValueError, TypeError):
-                return obj.assigned_employee_id
-        return None
-
+    assigned_employee_name = serializers.SerializerMethodField()
+    delivery_partner = serializers.SerializerMethodField()
+    pickup_date = serializers.SerializerMethodField()
+    workflow_tracked = serializers.SerializerMethodField()
 
     class Meta:
         model = Return
         fields = [
             'return_id',
-            'order_item_id',
             'order_id',
             'customer_id',
             'customer_name',
@@ -551,8 +672,11 @@ class WarehouseReturnSerializer(serializers.ModelSerializer):
             'product_id',
             'product_name',
             'product_sku',
+            'category_name',
+            'image',
             'quantity',
             'return_reason',
+            'abuse_type',
             'return_date',
             'return_status',
             'refund_amount',
@@ -561,26 +685,64 @@ class WarehouseReturnSerializer(serializers.ModelSerializer):
             'assigned_employee_name',
             'delivery_partner',
             'pickup_date',
+            'workflow_tracked',
         ]
 
+    def get_customer_name(self, obj):
+        return obj.customer.customer_name if obj.customer else None
+
+    def get_customer_email(self, obj):
+        return obj.customer.email if obj.customer else None
+
     def get_order_id(self, obj):
-        return obj.order_item.order_id if obj.order_item else None
+        return None
 
     def get_product_id(self, obj):
-        return obj.order_item.product_id if obj.order_item else None
+        return obj.product_id
 
     def get_product_name(self, obj):
-        if obj.order_item and obj.order_item.product:
-            return obj.order_item.product.product_name or 'Boutique Apparel'
-        return 'Boutique Apparel'
+        return obj.product.product_name if obj.product else None
 
     def get_product_sku(self, obj):
-        if obj.order_item and obj.order_item.product:
-            return obj.order_item.product.sku or ''
-        return ''
+        # products has no sku column; the product_key IS the identifier.
+        return obj.product_id
+
+    def get_category_name(self, obj):
+        return obj.product.main_category if obj.product else None
+
+    def get_image(self, obj):
+        return obj.product.image if obj.product else None
 
     def get_quantity(self, obj):
-        return getattr(obj.order_item, 'quantity', 1) if obj.order_item else 1
+        return None
+
+    def get_return_date(self, obj):
+        return None
+
+    def get_return_status(self, obj):
+        return None
+
+    def get_refund_amount(self, obj):
+        return None
+
+    def get_condition_on_return(self, obj):
+        return None
+
+    def get_assigned_employee_id(self, obj):
+        return None
+
+    def get_assigned_employee_name(self, obj):
+        return None
+
+    def get_delivery_partner(self, obj):
+        return None
+
+    def get_pickup_date(self, obj):
+        return None
+
+    def get_workflow_tracked(self, obj):
+        """False: the schema has no return-status column to drive a workflow."""
+        return False
 
 
 class WarehouseReturnAssignSerializer(serializers.Serializer):

@@ -9,7 +9,7 @@ from rest_framework.pagination import PageNumberPagination
 from accounts.permissions import IsAuthenticatedUser, IsWarehouseManager
 from accounts.authentication import SupabaseAuthentication
 from catalog.cache import bump_catalog_version
-from .services import WarehouseService
+from .services import WarehouseService, WarehouseFeatureUnavailable
 from .serializers import (
     WarehouseCategoryGroupedSerializer,
     WarehouseOrderSerializer,
@@ -196,6 +196,9 @@ class WarehouseOrdersView(APIView):
     """
     GET /api/warehouse/orders/
     Returns paginated database orders with support for search, status, and page.
+
+    Orders are read from the real public.orders rows; `status` maps onto the
+    `delivery_status` column, so 'delivered' means delivery_status = 'Delivered'.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -206,11 +209,14 @@ class WarehouseOrdersView(APIView):
         order_status = request.query_params.get('status')
         warehouse_id = request.query_params.get('warehouse')
 
-        queryset = WarehouseService.get_orders(
-            search=search,
-            status=order_status,
-            warehouse_id=warehouse_id
-        )
+        try:
+            queryset = WarehouseService.get_orders(
+                search=search,
+                status=order_status,
+                warehouse_id=warehouse_id
+            )
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
 
         paginator = StandardWarehousePagination()
         page = paginator.paginate_queryset(queryset, request)
@@ -246,7 +252,11 @@ class WarehouseOrderDetailView(APIView):
 class WarehouseDeliveriesView(APIView):
     """
     GET /api/warehouse/deliveries/
-    Returns paginated database deliveries with support for search, status, partner.
+    Delivery rows derived from the real orders `delivery_status` column.
+
+    This schema has no deliveries table, so each row is the order's own delivery
+    state and the courier / dispatch / expected-date columns are reported as
+    null rather than invented (see WarehouseService.delivery_row).
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -257,27 +267,37 @@ class WarehouseDeliveriesView(APIView):
         partner = request.query_params.get('partner')
         warehouse_id = request.query_params.get('warehouse')
 
-        queryset = WarehouseService.get_deliveries(
-            search=search,
-            status=delivery_status,
-            partner=partner,
-            warehouse_id=warehouse_id
-        )
+        try:
+            queryset = WarehouseService.get_deliveries(
+                search=search,
+                status=delivery_status,
+                partner=partner,
+                warehouse_id=warehouse_id
+            )
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
 
         paginator = StandardWarehousePagination()
         page = paginator.paginate_queryset(queryset, request)
         if page is not None:
-            serializer = WarehouseDeliverySerializer(page, many=True)
+            rows = [WarehouseService.delivery_row(order) for order in page]
+            serializer = WarehouseDeliverySerializer(rows, many=True)
             return paginator.get_paginated_response(serializer.data)
 
-        serializer = WarehouseDeliverySerializer(queryset, many=True)
+        rows = [WarehouseService.delivery_row(order) for order in queryset]
+        serializer = WarehouseDeliverySerializer(rows, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class WarehouseReturnsView(APIView):
     """
     GET /api/warehouse/returns/
-    Returns paginated database returns with support for search, status, reason.
+    Returns paginated database returns with support for search and reason.
+
+    Every row comes from the real public.returns table (customer, product and
+    reason). A status filter is refused with 409 because the table has no status
+    column, so the dashboard can say so instead of showing a filtered list that
+    silently ignored the choice.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -287,17 +307,21 @@ class WarehouseReturnsView(APIView):
         return_status = request.query_params.get('status')
         reason = request.query_params.get('reason')
 
-        queryset = WarehouseService.get_returns(
-            search=search,
-            status=return_status,
-            reason=reason
-        )
+        try:
+            queryset = WarehouseService.get_returns(
+                search=search,
+                status=return_status,
+                reason=reason
+            )
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
 
         paginator = StandardWarehousePagination()
         page = paginator.paginate_queryset(queryset, request)
         if page is not None:
             serializer = WarehouseReturnSerializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
+            response_data = paginator.get_paginated_response(serializer.data)
+            return response_data
 
         serializer = WarehouseReturnSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -335,6 +359,8 @@ class WarehouseReturnAcceptView(APIView):
     def patch(self, request, return_id):
         try:
             updated_return = WarehouseService.accept_return(return_id, manager_user=request.user)
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except PermissionError as p_err:
             return Response({'detail': str(p_err)}, status=status.HTTP_403_FORBIDDEN)
         except Exception as exc:
@@ -366,6 +392,8 @@ class WarehouseReturnRejectView(APIView):
     def patch(self, request, return_id):
         try:
             updated_return = WarehouseService.reject_return(return_id, manager_user=request.user)
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except PermissionError as p_err:
             return Response({'detail': str(p_err)}, status=status.HTTP_403_FORBIDDEN)
         except Exception as exc:
@@ -407,6 +435,8 @@ class WarehouseReturnAssignView(APIView):
                 assigned_employee_id=data['assigned_employee_id'],
                 manager_user=request.user
             )
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except PermissionError as p_err:
             return Response({'detail': str(p_err)}, status=status.HTTP_403_FORBIDDEN)
         except Exception as exc:
@@ -437,6 +467,8 @@ class WarehouseReturnReceiveView(APIView):
                 return_id=return_id,
                 manager_user=request.user
             )
+        except WarehouseFeatureUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
         except PermissionError as p_err:
             return Response({'detail': str(p_err)}, status=status.HTTP_403_FORBIDDEN)
         except Exception as exc:
@@ -459,8 +491,12 @@ class WarehouseReturnReceiveView(APIView):
 class WarehouseCourierPartnersView(APIView):
     """
     GET /api/warehouse/courier-partners/
-    Returns list of distinct courier companies from existing delivery records.
-    Used by Warehouse Manager dispatch UI to dynamically populate the courier dropdown.
+    Courier companies recorded in the database.
+
+    This schema has no deliveries table and no employees table, so there is no
+    courier data to list: the response is an empty list plus an explicit
+    `available: false` and the reason, which lets the dispatch UI say "not
+    tracked by this database" instead of showing a fabricated dropdown.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -470,13 +506,18 @@ class WarehouseCourierPartnersView(APIView):
         return Response({
             'count': len(partners),
             'partners': partners,
+            'available': False,
+            'detail': WarehouseService.DISPATCH_UNAVAILABLE,
         }, status=status.HTTP_200_OK)
 
 
 class WarehouseDeliveryEmployeesView(APIView):
     """
     GET /api/warehouse/delivery-employees/?company=<company_name>
-    Returns active employees with role 'DELIVERY_PARTNER' belonging to the selected courier company.
+    Active delivery-partner employees, from the employees table.
+
+    No employees table exists in this schema, so the list is empty and the
+    response states that plainly (see WarehouseCourierPartnersView).
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -487,6 +528,8 @@ class WarehouseDeliveryEmployeesView(APIView):
         return Response({
             'count': len(employees),
             'employees': employees,
+            'available': False,
+            'detail': WarehouseService.DISPATCH_UNAVAILABLE,
         }, status=status.HTTP_200_OK)
 
 
@@ -517,6 +560,11 @@ class WarehouseOrderDispatchView(APIView):
                 assigned_employee_id=data['assigned_employee_id'],
                 expected_delivery_date=data['expected_delivery_date'],
                 manager_user=request.user
+            )
+        except WarehouseFeatureUnavailable as exc:
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_409_CONFLICT
             )
         except Order.DoesNotExist:
             return Response(

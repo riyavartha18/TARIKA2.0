@@ -1,4 +1,5 @@
-from django.db.models import Count, Q, Sum, Case, When, Value, IntegerField
+from django.db.models import Count, Q, Sum, CharField
+from django.db.models.functions import Concat, Substr
 from django.db import connection, transaction
 from catalog.models import Category, Product
 from .models import Order, Delivery, Return, Payment
@@ -6,13 +7,42 @@ import datetime
 
 
 
+class WarehouseFeatureUnavailable(Exception):
+    """Raised when a workflow cannot be persisted against this database schema.
+
+    The connected database has no return-status, courier, dispatch or fulfilment
+    warehouse columns/tables, so approving, rejecting, assigning a pickup or
+    dispatching an order has nowhere to be written. Rather than silently
+    pretending (or fabricating a row), the service refuses and the API answers
+    409 with the reason.
+    """
+
+
 class WarehouseService:
+    # The real delivery_status values on public.orders. 'Delivered' is the only
+    # state that counts as a completed delivery; 'Returned' and 'In Transit' are
+    # separate real states and are never lumped in with it.
+    DELIVERED = 'Delivered'
+    IN_TRANSIT = 'In Transit'
+    RETURNED = 'Returned'
+
+    # UI status word -> the real delivery_status it means.
+    STATUS_ALIASES = {
+        'delivered': DELIVERED,
+        'shipped': IN_TRANSIT,
+        'in transit': IN_TRANSIT,
+        'in_transit': IN_TRANSIT,
+        'returned': RETURNED,
+    }
+    # Words the dashboard offers that this schema simply does not record. They
+    # match only rows with no delivery status at all, never a wrong subset.
+    UNSET_STATUSES = {'pending', 'confirmed', 'processing', 'cancelled'}
     # Columns the warehouse product views actually render — selecting just these
     # keeps the grouped-endpoint rows narrow (image/link/text columns are large).
     GROUPED_PRODUCT_FIELDS = [
         'product_id', 'product_name', 'main_category', 'sub_category',
-        'link', 'discount_price', 'actual_price_text', 'initial_price',
-        'discounted_price', 'available_quantity', 'image',
+        'link', 'discount_price', 'actual_price_text', 'discounted_price',
+        'available_quantity', 'image',
     ]
 
     @staticmethod
@@ -73,6 +103,7 @@ class WarehouseService:
                 'in_stock': (total_stock_val or 0) > 0,
                 'total_stock': total_stock_val,
                 'available_quantity': total_stock_val,
+                'hidden': bool(p.hidden),
                 'image': image_url,
             })
             entry['product_count'] += 1
@@ -81,17 +112,24 @@ class WarehouseService:
 
     # Serializer key -> real Product model field name, for the PUT endpoint.
     # (update_fields must receive these FIELD names, not db_column names.)
+    #
+    # The wire keys keep the meaning the warehouse editor already speaks, while
+    # the columns they land in are the ones this schema really has:
+    #   initial_price (ORIGINAL)  -> products.actual_price     (TEXT)
+    #   discount_price (AMOUNT)   -> products.discount_price
+    #   actual_price / discounted_price (FINAL) -> products.discounted_price
+    # `hidden` is deliberately not editable here: it is the storefront
+    # visibility flag carried by the dataset, not a warehouse field.
     UPDATE_FIELD_MAP = {
         'product_name': 'product_name',            # -> products.name
         'main_category': 'main_category',          # -> products.main_category
         'sub_category': 'sub_category',            # -> products.sub_category
         'image': 'image',                          # -> products.image
         'link': 'link',                            # -> products.link
-        'initial_price': 'initial_price',          # original price, double precision
-        'discount_price': 'discount_price',        # discount AMOUNT, double precision
-        'actual_price': 'actual_price_text',       # TEXT column, final selling price
-        # Mirror of the final price, kept in sync on every price write.
-        'discounted_price': 'discounted_price',
+        'initial_price': 'actual_price_text',      # ORIGINAL price (TEXT column)
+        'discount_price': 'discount_price',        # discount AMOUNT in currency
+        'actual_price': 'discounted_price',        # FINAL selling price column
+        'discounted_price': 'discounted_price',    # FINAL selling price column
         'available_quantity': 'available_quantity',  # double precision
         'is_active': 'is_active',                  # soft-delete / archive flag
     }
@@ -126,7 +164,12 @@ class WarehouseService:
         for data_key, model_attr in WarehouseService.UPDATE_FIELD_MAP.items():
             if data_key in validated_data:
                 setattr(product, model_attr, validated_data[data_key])
-                updated_fields.append(model_attr)
+                # Two wire keys can write one column (`actual_price` and
+                # `discounted_price` both mean the final price here, and the
+                # later map entry wins), but listing a column twice in
+                # update_fields is not valid SQL — so record each column once.
+                if model_attr not in updated_fields:
+                    updated_fields.append(model_attr)
 
         if updated_fields:
             # update_fields takes model FIELD names (Django maps them to the
@@ -221,453 +264,242 @@ class WarehouseService:
 
     @staticmethod
     def get_orders(search=None, status=None, warehouse_id=None):
+        """Real rows of `public.orders`, filtered and searchable.
+
+        `status` is the dashboard's order-status word. The table has no
+        order_status column: `delivery_status` is the only progression signal, so
+        'delivered' filters `delivery_status = 'Delivered'` exactly, and the
+        statuses this schema does not track are matched only against rows that
+        genuinely carry no delivery status. `warehouse_id` is accepted for API
+        compatibility but ignored, because orders carry no warehouse column.
         """
-        Queries database orders with pre-fetched customer and warehouse relations.
-        Supports search across order_id, customer full_name, email, shipping_address.
-        """
-        qs = Order.objects.select_related('customer', 'warehouse').all()
+        qs = Order.objects.select_related('customer', 'product').all()
 
-
-        if warehouse_id:
-            qs = qs.filter(warehouse_id=warehouse_id)
-
-        if status and status.lower() != 'all':
-            qs = qs.filter(order_status__iexact=status)
+        cleaned = (status or '').strip()
+        if cleaned and cleaned.lower() != 'all':
+            key = cleaned.lower()
+            if key in WarehouseService.STATUS_ALIASES:
+                qs = qs.filter(delivery_status=WarehouseService.STATUS_ALIASES[key])
+            elif key in WarehouseService.UNSET_STATUSES:
+                qs = qs.filter(Q(delivery_status__isnull=True) | Q(delivery_status=''))
+            else:
+                # Any other word is compared to the real column verbatim, so an
+                # unknown filter returns nothing rather than the wrong rows.
+                qs = qs.filter(delivery_status__iexact=cleaned)
 
         if search:
             q = search.strip()
             qs = qs.filter(
                 Q(order_id__icontains=q) |
-                Q(customer__full_name__icontains=q) |
+                Q(customer__customer_name__icontains=q) |
                 Q(customer__email__icontains=q) |
-                Q(shipping_address__icontains=q)
+                Q(product__product_name__icontains=q) |
+                Q(product_id__icontains=q)
             )
 
-        return qs.order_by('-order_date', '-created_at')
+        # purchase_date is TEXT 'DD-MM-YYYY', which does not sort as a date, so
+        # the newest-first ordering is built from the real day/month/year parts.
+        return qs.annotate(
+            order_date_key=Concat(
+                Substr('purchase_date', 7, 4),
+                Substr('purchase_date', 4, 2),
+                Substr('purchase_date', 1, 2),
+                output_field=CharField(),
+            )
+        ).order_by('-order_date_key', 'order_id')
 
     @staticmethod
     def get_order_detail(order_id):
-        """
-        Fetch a single order by order_id with pre-fetched customer and warehouse relations.
-        Raises Order.DoesNotExist if not found.
-        """
-        return Order.objects.select_related('customer', 'warehouse').get(order_id=order_id)
-
+        """Fetch one order by its real `orderid`. Raises Order.DoesNotExist."""
+        return Order.objects.select_related('customer', 'product').get(order_id=order_id)
 
     @staticmethod
     def get_deliveries(search=None, status=None, partner=None, warehouse_id=None):
+        """Delivery rows, derived from `public.orders` delivery_status.
+
+        This schema has no `deliveries` table, so a delivery IS the order's own
+        delivery state. The queryset is restricted to rows that actually carry
+        one of the three recorded statuses, and defaults to DELIVERED work (the
+        dashboard's Delivered view); a courier/partner or warehouse filter can
+        never be honoured because no such column exists, so those requests are
+        refused with an explicit error instead of quietly ignoring the filter.
         """
-        Queries database deliveries with pre-fetched order, customer, and warehouse.
-        """
-        qs = Delivery.objects.select_related('order__customer', 'warehouse').all()
+        if (partner and partner.strip().upper() != 'ALL') or warehouse_id:
+            raise WarehouseFeatureUnavailable(
+                'Courier partner and warehouse filters are not available: the '
+                'connected database has no deliveries table and no warehouse '
+                'column on orders.'
+            )
 
-        if warehouse_id:
-            qs = qs.filter(warehouse_id=warehouse_id)
+        cleaned = (status or '').strip()
+        if not cleaned or cleaned.upper() == 'ALL':
+            qs = Order.objects.filter(
+                delivery_status__in=[
+                    WarehouseService.DELIVERED,
+                    WarehouseService.IN_TRANSIT,
+                    WarehouseService.RETURNED,
+                ]
+            )
+        else:
+            key = cleaned.lower()
+            if key in WarehouseService.STATUS_ALIASES:
+                qs = Order.objects.filter(
+                    delivery_status=WarehouseService.STATUS_ALIASES[key]
+                )
+            else:
+                qs = Order.objects.filter(delivery_status__iexact=cleaned)
 
-        if status and status.lower() != 'all':
-            qs = qs.filter(delivery_status__iexact=status)
-
-        if partner and partner.lower() != 'all':
-            qs = qs.filter(delivery_partner__icontains=partner)
-
+        qs = qs.select_related('customer', 'product')
         if search:
             q = search.strip()
             qs = qs.filter(
-                Q(delivery_id__icontains=q) |
                 Q(order_id__icontains=q) |
-                Q(delivery_partner__icontains=q) |
-                Q(order__customer__full_name__icontains=q)
+                Q(customer__customer_name__icontains=q) |
+                Q(customer__email__icontains=q)
             )
+        return qs.order_by('order_id')
 
-        return qs.order_by('-dispatch_date')
+    @staticmethod
+    def delivery_row(order):
+        """Shape one real order row into the deliveries payload.
+
+        Only the columns the database actually has are filled; the courier,
+        dispatch/expected/actual dates, failure reason and warehouse stay None so
+        the dashboard can say the workflow is not tracked rather than invent
+        'Standard Express' or a dispatch date.
+        """
+        return {
+            'delivery_id': order.order_id,
+            'order_id': order.order_id,
+            'warehouse_id': None,
+            'warehouse_name': None,
+            'warehouse_city': None,
+            'customer_name': order.customer.customer_name if order.customer else None,
+            'customer_city': None,
+            'delivery_partner': None,
+            'dispatch_date': None,
+            'expected_delivery_date': None,
+            'actual_delivery_date': None,
+            'delivery_status': order.delivery_status,
+            'failure_reason': None,
+            'shipping_time_days': int(order.shipping_time_days) if order.shipping_time_days is not None else None,
+            'purchase_date': order.purchase_date,
+        }
 
     @staticmethod
     def get_returns(search=None, status=None, reason=None):
-        """
-        Queries database returns with pre-fetched order_item, product, and customer.
-        When no status filter is applied, returns with status 'requested' appear FIRST.
-        """
-        qs = Return.objects.select_related('order_item__product', 'customer').all()
+        """Real rows of `public.returns`, joined to customer and product.
 
-        if status and status.lower() != 'all':
-            qs = qs.filter(return_status__iexact=status)
+        `status` cannot be honoured: the table has no return_status column, so a
+        status filter is refused rather than silently returning everything. The
+        `reason` filter and the free-text search run on real values.
+        """
+        cleaned_status = (status or '').strip()
+        if cleaned_status and cleaned_status.upper() != 'ALL':
+            raise WarehouseFeatureUnavailable(
+                'Return status filtering is not available: public.returns has no '
+                'status column, so returns cannot be split by workflow state.'
+            )
 
-        if reason and reason.lower() != 'all':
-            qs = qs.filter(return_reason__icontains=reason)
+        qs = Return.objects.select_related('customer', 'product').all()
+
+        cleaned_reason = (reason or '').strip()
+        if cleaned_reason and cleaned_reason.upper() != 'ALL':
+            qs = qs.filter(return_reason__iexact=cleaned_reason)
 
         if search:
             q = search.strip()
             qs = qs.filter(
                 Q(return_id__icontains=q) |
-                Q(order_item__order_id__icontains=q) |
-                Q(customer__full_name__icontains=q) |
-                Q(order_item__product__product_name__icontains=q) |
-                Q(return_reason__icontains=q)
+                Q(customer__customer_name__icontains=q) |
+                Q(customer__email__icontains=q) |
+                Q(product__product_name__icontains=q) |
+                Q(product_id__icontains=q) |
+                Q(return_reason__icontains=q) |
+                Q(abuse_type__icontains=q)
             )
 
-        # Annotate: 'requested' returns get priority 0, all others get 1
-        qs = qs.annotate(
-            is_requested=Case(
-                When(return_status__iexact='requested', then=Value(0)),
-                default=Value(1),
-                output_field=IntegerField()
-            )
-        )
+        return qs.order_by('return_id')
 
-        return qs.order_by('is_requested', '-return_date')
-
-    @staticmethod
-    def _check_return_warehouse_auth(ret, manager_user):
-        """
-        Validates that the authenticated Warehouse Manager is authorized to manage this return.
-        Admins have global access.
-        """
-        if manager_user and getattr(manager_user, 'is_authenticated', False):
-            user_role = getattr(manager_user, 'role', None)
-            user_wh = getattr(manager_user, 'warehouse_id', None)
-            if user_role == 'WAREHOUSE_MANAGER' and user_wh:
-                order = None
-                if ret.order_item and ret.order_item.order_id:
-                    order = Order.objects.filter(order_id=ret.order_item.order_id).first()
-                if order and order.warehouse_id:
-                    if str(order.warehouse_id).strip() != str(user_wh).strip():
-                        raise PermissionError(
-                            f"Permission denied: You are assigned to warehouse '{user_wh}', "
-                            f"but return '{ret.return_id}' belongs to warehouse '{order.warehouse_id}'."
-                        )
+    # Why the return / dispatch workflow cannot run against this database.
+    RETURN_WORKFLOW_UNAVAILABLE = (
+        'Return workflow actions are not available in this database: '
+        'public.returns has no status, refund, condition or pickup column, so an '
+        'approval cannot be persisted. The recorded returns themselves are '
+        'listed in full.'
+    )
+    DISPATCH_UNAVAILABLE = (
+        'Order dispatch is not available in this database: there is no '
+        'deliveries table, no order status column and no employees table, so a '
+        'courier assignment has nowhere to be recorded. Orders are read-only here.'
+    )
 
     @staticmethod
     def accept_return(return_id, manager_user=None):
+        """Refused: no return_status column exists to approve into.
+
+        The row is still looked up first, so an unknown reference keeps failing
+        as "not found" instead of masking a bad id behind the 409.
         """
-        Approve/Accept a return request. Only allowed when return_status is 'requested'.
-        Updates return_status to 'Approved'. Computes refund_amount from order_item
-        if not already set. Persists changes to the database.
-        """
-        try:
-            ret = Return.objects.select_related(
-                'order_item__product', 'customer'
-            ).get(return_id=return_id)
-        except Return.DoesNotExist:
-            raise Return.DoesNotExist(f"Return '{return_id}' not found.")
-
-        WarehouseService._check_return_warehouse_auth(ret, manager_user)
-
-        if (ret.return_status or '').strip().lower() not in ['requested']:
-            raise ValueError(
-                f"Cannot approve return '{return_id}': current status is '{ret.return_status}'. "
-                "Only 'Requested' returns can be approved."
-            )
-
-        ret.return_status = 'Approved'
-
-        # Compute refund_amount from order_item if not already set
-        if ret.refund_amount is None or ret.refund_amount == 0:
-            if ret.order_item:
-                subtotal = getattr(ret.order_item, 'subtotal', None)
-                if not subtotal:
-                    unit_price = getattr(ret.order_item, 'unit_price', None)
-                    qty = getattr(ret.order_item, 'quantity', 1) or 1
-                    if unit_price:
-                        subtotal = float(unit_price) * int(qty)
-                if subtotal:
-                    ret.refund_amount = float(subtotal)
-
-        ret.save()
-
-        return Return.objects.select_related(
-            'order_item__product', 'customer', 'assigned_employee'
-        ).get(return_id=return_id)
+        WarehouseService._get_return_or_raise(return_id)
+        raise WarehouseFeatureUnavailable(WarehouseService.RETURN_WORKFLOW_UNAVAILABLE)
 
     @staticmethod
     def reject_return(return_id, manager_user=None):
-        """
-        Reject a return request. Only allowed when return_status is 'requested'.
-        Updates return_status to 'Rejected' and persists to the database.
-        """
-        try:
-            ret = Return.objects.select_related(
-                'order_item__product', 'customer'
-            ).get(return_id=return_id)
-        except Return.DoesNotExist:
-            raise Return.DoesNotExist(f"Return '{return_id}' not found.")
-
-        WarehouseService._check_return_warehouse_auth(ret, manager_user)
-
-        if (ret.return_status or '').strip().lower() not in ['requested']:
-            raise ValueError(
-                f"Cannot reject return '{return_id}': current status is '{ret.return_status}'. "
-                "Only 'Requested' returns can be rejected."
-            )
-
-        ret.return_status = 'Rejected'
-        ret.save()
-
-        return Return.objects.select_related(
-            'order_item__product', 'customer', 'assigned_employee'
-        ).get(return_id=return_id)
+        """Refused for the same schema reason as accept_return."""
+        WarehouseService._get_return_or_raise(return_id)
+        raise WarehouseFeatureUnavailable(WarehouseService.RETURN_WORKFLOW_UNAVAILABLE)
 
     @staticmethod
-    def assign_return_pickup(return_id, delivery_partner, assigned_employee_id, manager_user=None):
-        """
-        Assigns an approved return to a real active delivery partner employee.
-        - Validates return exists and belongs to manager's warehouse.
-        - Validates return status is 'Approved' (or 'Accepted').
-        - Validates courier company and employee match.
-        - Sets return status to 'Pickup Assigned'.
-        - Creates/updates Delivery record with delivery_type='RETURN' and status='Assigned'.
-        """
-        import uuid
-        from accounts.models import Employee
-
-        try:
-            ret = Return.objects.select_related('order_item__product', 'customer').get(return_id=return_id)
-        except Return.DoesNotExist:
-            raise Return.DoesNotExist(f"Return '{return_id}' not found.")
-
-        WarehouseService._check_return_warehouse_auth(ret, manager_user)
-
-        cur_status = (ret.return_status or '').strip().lower()
-        if cur_status not in ['approved', 'accepted']:
-            raise ValueError(
-                f"Cannot assign pickup for return '{return_id}'. Current status is '{ret.return_status}'. "
-                "Only approved returns can be assigned for pickup."
-            )
-
-        partner_clean = (delivery_partner or '').strip()
-        if not partner_clean:
-            raise ValueError("Courier company name is required.")
-
-        try:
-            emp = Employee.objects.get(
-                employee_id=assigned_employee_id,
-                role='DELIVERY_PARTNER',
-                is_active=True
-            )
-        except Employee.DoesNotExist:
-            raise ValueError(
-                f"Employee ID {assigned_employee_id} does not exist, is inactive, "
-                "or does not possess the 'DELIVERY_PARTNER' role."
-            )
-
-        if (emp.courier_company or '').strip().lower() != partner_clean.lower():
-            raise ValueError(
-                f"Employee '{emp.full_name}' belongs to courier company '{emp.courier_company}', "
-                f"which does not match the selected company '{delivery_partner}'."
-            )
-
-        today_str = datetime.date.today().isoformat()
-        ret.return_status = 'Pickup Assigned'
-        ret.delivery_partner = partner_clean
-        ret.assigned_employee = emp
-        ret.pickup_date = today_str
-        ret.save()
-
-        # Create or update corresponding Delivery record for pickup
-        order = None
-        if ret.order_item and ret.order_item.order_id:
-            order = Order.objects.filter(order_id=ret.order_item.order_id).first()
-
-        del_rec = Delivery.objects.filter(return_record=ret).first()
-        if not del_rec:
-            del_rec = Delivery(
-                delivery_id=f"DEL-RET-{uuid.uuid4().hex[:8].upper()}",
-                order=order,
-                warehouse_id=order.warehouse_id if order else getattr(manager_user, 'warehouse_id', None),
-                delivery_type='RETURN',
-                return_record=ret,
-            )
-        del_rec.delivery_partner = partner_clean
-        del_rec.assigned_employee = emp
-        del_rec.delivery_status = 'Assigned'
-        del_rec.dispatch_date = today_str
-        del_rec.save()
-
-        return Return.objects.select_related(
-            'order_item__product', 'customer', 'assigned_employee'
-        ).get(return_id=return_id)
+    def assign_return_pickup(return_id, delivery_partner=None, assigned_employee_id=None,
+                             manager_user=None):
+        """Refused: no pickup / courier / employee columns or table exist."""
+        WarehouseService._get_return_or_raise(return_id)
+        raise WarehouseFeatureUnavailable(WarehouseService.RETURN_WORKFLOW_UNAVAILABLE)
 
     @staticmethod
     def receive_return(return_id, manager_user=None):
-        """
-        Confirms receipt of returned merchandise at the warehouse.
-        Only allowed when return has been picked up by the delivery partner.
-        Sets return_status to 'Completed' and marks delivery record as 'Delivered'.
-        """
+        """Refused: warehouse receipt has no status column to record."""
+        WarehouseService._get_return_or_raise(return_id)
+        raise WarehouseFeatureUnavailable(WarehouseService.RETURN_WORKFLOW_UNAVAILABLE)
+
+    @staticmethod
+    def _get_return_or_raise(return_id):
         try:
-            ret = Return.objects.select_related('order_item__product', 'customer').get(return_id=return_id)
+            return Return.objects.select_related('customer', 'product').get(return_id=return_id)
         except Return.DoesNotExist:
             raise Return.DoesNotExist(f"Return '{return_id}' not found.")
 
-        WarehouseService._check_return_warehouse_auth(ret, manager_user)
-
-        cur_status = (ret.return_status or '').strip().lower()
-        if cur_status not in ['picked up', 'received at warehouse']:
-            raise ValueError(
-                f"Cannot confirm receipt for return '{return_id}'. Current status is '{ret.return_status}'. "
-                "Merchandise must be picked up before confirming warehouse receipt."
-            )
-
-        today_str = datetime.date.today().isoformat()
-        ret.return_status = 'Completed'
-        ret.save()
-
-        del_rec = Delivery.objects.filter(return_record=ret).first()
-        if del_rec:
-            del_rec.delivery_status = 'Delivered'
-            del_rec.actual_delivery_date = today_str
-            del_rec.save()
-
-        return Return.objects.select_related(
-            'order_item__product', 'customer', 'assigned_employee'
-        ).get(return_id=return_id)
-
     @staticmethod
     def get_courier_partners():
-        """
-        Returns a sorted list of unique courier company names from existing delivery records
-        and registered active delivery partner employees.
-        """
-        from accounts.models import Employee, EmployeeRole
+        """Courier companies recorded in this database: none exist.
 
-        delivery_partners = set(
-            Delivery.objects
-            .exclude(delivery_partner__isnull=True)
-            .exclude(delivery_partner__exact='')
-            .values_list('delivery_partner', flat=True)
-            .distinct()
-        )
-        employee_partners = set(
-            Employee.objects
-            .filter(role=EmployeeRole.DELIVERY_PARTNER, is_active=True)
-            .exclude(courier_company__isnull=True)
-            .exclude(courier_company__exact='')
-            .values_list('courier_company', flat=True)
-            .distinct()
-        )
-        all_partners = {p.strip() for p in (delivery_partners | employee_partners) if p and p.strip()}
-        return sorted(list(all_partners))
+        `public.deliveries` and `public.employees` are absent, so there is no
+        real courier list to return. An empty list is reported (with the reason
+        added by the view) instead of a fabricated dropdown.
+        """
+        return []
 
     @staticmethod
     def get_delivery_employees(company=None):
-        """
-        Returns active employees with role 'DELIVERY_PARTNER'.
-        If company is provided, filters by courier_company.
-        """
-        from accounts.models import Employee, EmployeeRole
-        qs = Employee.objects.filter(role=EmployeeRole.DELIVERY_PARTNER, is_active=True)
-        if company and company.strip().lower() != 'all':
-            qs = qs.filter(courier_company__iexact=company.strip())
-        return [
-            {
-                'employee_id': emp.employee_id,
-                'full_name': emp.full_name,
-                'email': emp.email,
-                'phone': emp.phone,
-                'courier_company': emp.courier_company,
-                'warehouse': emp.warehouse_id,
-                'is_active': emp.is_active,
-            }
-            for emp in qs.order_by('full_name')
-        ]
+        """Delivery-partner employees: no employees table in this schema."""
+        return []
 
     @staticmethod
-    def dispatch_order(order_id, delivery_partner, assigned_employee_id, expected_delivery_date, manager_user=None):
-        """
-        Dispatches an order:
-        - Validates order existence
-        - Validates warehouse manager's assigned warehouse if manager_user is provided
-        - Validates order is confirmed and ready for shipment
-        - Validates courier company and assigned employee
-        - Validates expected_delivery_date
-        - Creates or updates Delivery row with status 'Assigned' (prevents duplicates)
-        - Updates Order status to 'shipped'
-        """
-        import uuid
-        from accounts.models import Employee, EmployeeRole
+    def dispatch_order(order_id, delivery_partner=None, assigned_employee_id=None,
+                       expected_delivery_date=None, manager_user=None):
+        """Refused: dispatch has nowhere to be recorded in this schema.
 
+        The order is looked up first so an unknown reference still reports "not
+        found". `public.deliveries` does not exist, `public.orders` has no
+        status column to move to 'shipped' and there is no employees table to
+        assign a courier to, so writing a dispatch would mean inventing either a
+        table or a value. Orders are therefore read-only for the warehouse.
+        """
         try:
-            order = Order.objects.select_related('customer', 'warehouse').get(order_id=order_id)
+            Order.objects.select_related('customer', 'product').get(order_id=order_id)
         except Order.DoesNotExist:
             raise Order.DoesNotExist(f"Order '{order_id}' not found.")
 
-        # Enforce warehouse assignment check:
-        # Warehouse Manager must only be able to dispatch orders belonging to their assigned warehouse.
-        if manager_user and getattr(manager_user, 'is_authenticated', False):
-            user_role = getattr(manager_user, 'role', None)
-            user_wh = getattr(manager_user, 'warehouse_id', None)
-            if user_role == 'WAREHOUSE_MANAGER' and user_wh and order.warehouse_id:
-                if str(order.warehouse_id).strip() != str(user_wh).strip():
-                    raise PermissionError(
-                        f"Permission denied: You are assigned to warehouse '{user_wh}', "
-                        f"but order '{order_id}' belongs to warehouse '{order.warehouse_id}'."
-                    )
-
-        # Validate order readiness for shipment
-        current_status = (order.order_status or '').strip().lower()
-        if current_status not in ['confirmed', 'pending', 'ready']:
-            raise ValueError(
-                f"Order '{order_id}' cannot be dispatched. Current status is '{order.order_status}'. "
-                "Only confirmed orders can be dispatched."
-            )
-
-        # Validate courier company
-        partner_clean = (delivery_partner or '').strip()
-        if not partner_clean:
-            raise ValueError("Courier company name is required.")
-
-        # Validate employee
-        try:
-            employee = Employee.objects.get(
-                employee_id=assigned_employee_id,
-                role=EmployeeRole.DELIVERY_PARTNER,
-                is_active=True
-            )
-        except Employee.DoesNotExist:
-            raise ValueError(f"Delivery employee #{assigned_employee_id} not found or is inactive.")
-
-        if employee.courier_company and employee.courier_company.strip().lower() != partner_clean.lower():
-            raise ValueError(
-                f"Employee '{employee.full_name}' belongs to '{employee.courier_company}', "
-                f"not '{partner_clean}'."
-            )
-
-        # Validate expected_delivery_date
-        expected_str = str(expected_delivery_date or '').strip()
-        if not expected_str:
-            raise ValueError("Expected delivery date must be explicitly provided.")
-
-        today_str = datetime.date.today().strftime('%Y-%m-%d')
-
-        # Update or create Delivery row (prevent duplicates)
-        delivery = Delivery.objects.filter(order_id=order.order_id).first()
-        if delivery:
-            delivery.delivery_partner = partner_clean
-            delivery.assigned_employee = employee
-            delivery.dispatch_date = today_str
-            delivery.expected_delivery_date = expected_str
-            delivery.delivery_status = 'Assigned'
-            delivery.failure_reason = None
-            if not delivery.warehouse and order.warehouse:
-                delivery.warehouse = order.warehouse
-            delivery.save()
-        else:
-            deliv_id = f"DEL-{uuid.uuid4().hex[:10].upper()}"
-            delivery = Delivery.objects.create(
-                delivery_id=deliv_id,
-                order=order,
-                warehouse=order.warehouse,
-                delivery_partner=partner_clean,
-                assigned_employee=employee,
-                dispatch_date=today_str,
-                expected_delivery_date=expected_str,
-                delivery_status='Assigned',
-                failure_reason=None
-            )
-
-        # Update Order status
-        order.order_status = 'shipped'
-        order.updated_at = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
-        order.save()
-
-        return order, delivery
+        raise WarehouseFeatureUnavailable(WarehouseService.DISPATCH_UNAVAILABLE)
 

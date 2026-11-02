@@ -5,11 +5,12 @@ from django.db import models
 
 def parse_product_price(raw_value):
     """
-    Parse the real products.actual_price TEXT column into a float.
+    Parse a TEXT price column into a float.
 
-    The Supabase column is TEXT (e.g. '599' or '1,099'), so strip any
-    currency symbols / thousands separators defensively. Returns None
-    when no numeric value can be extracted.
+    ``products.actual_price`` is TEXT and may carry thousands separators or a
+    currency symbol (e.g. '599', '1,099', '₹1,233.00'), so strip everything but
+    digits and the decimal point first. Returns None when no numeric value can
+    be extracted, which lets callers fall back instead of inventing a price.
     """
     if raw_value is None:
         return None
@@ -61,11 +62,30 @@ class Manufacturer(models.Model):
 
 class Product(models.Model):
     """
-    Maps the real Supabase `public.products` table.
+    Maps the real `public.products` table.
 
     Legacy Python attribute names (product_id, product_name, selling_price,
     base_price) are preserved via db_column / properties so existing
     serializers, services and frontend contracts keep working unchanged.
+
+    Price columns, verified against the connected Neon database (every one of
+    the 90,041 product rows agrees with this layout):
+
+      * ``actual_price``      TEXT    -> the ORIGINAL product price
+      * ``discount_price``    float   -> the discount AMOUNT in currency
+      * ``discounted_price``  numeric -> the FINAL selling price, and it equals
+        ``parsed(actual_price) - discount_price`` on every row.
+
+    There is no ``initial_price`` column in this schema: the original price
+    already lives in ``actual_price``. (A former ``initial_price`` field here
+    mapped to that non-existent column, which made *every* product SELECT fail
+    with ``column products.initial_price does not exist``. It is now a read and
+    write alias of the original price, so legacy callers keep working without
+    ever reaching for a missing column.)
+
+    The percentage is never stored and never taken from ``discount_price``
+    blindly: it is always derived from the two prices that are displayed,
+    ``((actual_price - discounted_price) / actual_price) * 100``.
     """
     product_id = models.CharField(max_length=255, primary_key=True, db_column='product_key')
     product_name = models.CharField(max_length=1000, blank=True, null=True, db_column='name')
@@ -73,17 +93,11 @@ class Product(models.Model):
     sub_category = models.CharField(max_length=255, blank=True, null=True, db_column='sub_category')
     image = models.CharField(max_length=2000, blank=True, null=True, db_column='image')
     link = models.CharField(max_length=2000, blank=True, null=True, db_column='link')
+    # Discount AMOUNT in currency (never a percentage).
     discount_price = models.FloatField(blank=True, null=True, db_column='discount_price')
-    # Discount AMOUNT in currency (never a percentage); the percentage is
-    # always derived: discount_price / initial_price * 100.
-    # NOTE: the real `actual_price` column is TEXT, not numeric. After
-    # `ensure_product_price_schema` it holds the FINAL discounted selling
-    # price: actual_price = initial_price - discount_price.
+    # The ORIGINAL price. The column is TEXT, so it is parsed before any maths.
     actual_price_text = models.TextField(blank=True, null=True, db_column='actual_price')
-    # Original product price, added by `ensure_product_price_schema`.
-    initial_price = models.FloatField(blank=True, null=True, db_column='initial_price')
-    # Mirror of the final selling price kept in sync on every write so the
-    # legacy `discounted_price` column never drifts from `actual_price`.
+    # The FINAL selling price the customer pays.
     discounted_price = models.FloatField(blank=True, null=True, db_column='discounted_price')
     # Real stock/availability source for the new `public.products` schema.
     # There is no separate inventory table in this database; availability is
@@ -95,6 +109,10 @@ class Product(models.Model):
     # historical rows keep their foreign key. Default TRUE keeps existing rows
     # active.
     is_active = models.BooleanField(default=True, db_column='is_active')
+    # Storefront visibility flag carried by the dataset. A hidden product stays
+    # in the catalog (and in the warehouse / admin views) but must never be
+    # offered to a customer, so customer-facing listings exclude it.
+    hidden = models.BooleanField(default=False, blank=True, null=True, db_column='hidden')
 
     class Meta:
         db_table = 'products'
@@ -108,38 +126,79 @@ class Product(models.Model):
     # Legacy field-name compatibility (mapping layer for the new schema)
     # ------------------------------------------------------------------
     @property
-    def selling_price(self):
-        """Final discounted selling price -> real `actual_price` TEXT column."""
-        final = parse_product_price(self.actual_price_text)
-        if final is None:
-            # Un-migrated / missing text price: fall back to the mirror column.
-            return self.discounted_price
-        return final
+    def original_price(self):
+        """The ORIGINAL price -> parsed `actual_price` TEXT column.
+
+        When that text is unparsable the original is rebuilt from the final
+        price plus the discount amount, so one damaged cell cannot silently
+        remove the strikethrough price from a listing.
+        """
+        parsed = parse_product_price(self.actual_price_text)
+        if parsed is not None:
+            return parsed
+        if self.discounted_price is not None:
+            return float(self.discounted_price) + float(self.discount_price or 0.0)
+        return None
 
     @property
     def base_price(self):
-        """Original price -> real `initial_price` column (TEXT actual_price
-        held the original before the price-schema migration, so fall back to
-        it for rows that were never migrated)."""
-        if self.initial_price is not None:
-            return self.initial_price
-        return parse_product_price(self.actual_price_text)
+        """Legacy API key for the original (strikethrough) price."""
+        return self.original_price
+
+    @property
+    def selling_price(self):
+        """FINAL selling price -> real `discounted_price` column.
+
+        Falls back to the original price when no discounted value is stored (no
+        discount means it sells at its original price), never to an invented one.
+        """
+        if self.discounted_price is not None:
+            return float(self.discounted_price)
+        return self.original_price
+
+    @property
+    def initial_price(self):
+        """Backward-compatible alias for the original price."""
+        return self.original_price
+
+    @initial_price.setter
+    def initial_price(self, value):
+        # In this schema the original price IS the TEXT `actual_price` column,
+        # so a writer that still speaks `initial_price` lands in the right place.
+        self.actual_price_text = value
 
     @property
     def discount_amount(self):
-        """Discount AMOUNT in currency stored in `discount_price` (never %)."""
-        return self.discount_price if self.discount_price is not None else 0.0
+        """Discount AMOUNT in currency, implied by the two stored prices.
+
+        Derived from the prices rather than read straight from `discount_price`
+        so the amount can never contradict what the shopper sees; the column is
+        used only when a price is missing.
+        """
+        original = self.original_price
+        final = self.selling_price
+        if original is not None and final is not None:
+            return max(0.0, round(float(original) - float(final), 2))
+        if self.discount_price is not None:
+            return max(0.0, float(self.discount_price))
+        return 0.0
 
     @property
     def discount_percentage(self):
-        """Derived percentage: discount_price / initial_price * 100, max 2 dp.
+        """((actual_price - discounted_price) / actual_price) * 100, max 2 dp.
 
-        Zero / missing original price returns 0.0 instead of dividing by zero.
+        Never negative (a final price at or above the original is "no discount",
+        not a negative badge), capped at 100, and a zero / missing original price
+        returns 0.0 instead of dividing by zero.
         """
-        initial = self.base_price
-        if not initial or initial <= 0:
+        original = self.original_price
+        final = self.selling_price
+        if not original or original <= 0 or final is None:
             return 0.0
-        return round(float(self.discount_amount) / float(initial) * 100, 2)
+        percentage = (float(original) - float(final)) / float(original) * 100
+        if percentage <= 0:
+            return 0.0
+        return round(min(percentage, 100.0), 2)
 
 
 class Inventory(models.Model):
