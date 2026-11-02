@@ -11,4 +11,18 @@ __pycache__/
 node_modules/
 dist/
 
-password.txt
+password.txt 
+
+# Uploaded media
+backend/media/
+
+# Temporary debugging and scratch files
+backend/scratch_*
+backend/128))
+backend/200
+scratch_test_val.py
+test_rembg.py
+check_table_schema.py
+
+# Python virtual environment
+.venv/

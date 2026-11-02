@@ -9,6 +9,7 @@ import {
 import CategoryEditorialSection from '../../components/customer/CategoryEditorialSection';
 import CustomerOffers from '../../components/customer/CustomerOffers';
 import ProductCard from '../../components/customer/ProductCard';
+import PersonalizedSection from '../../components/customer/PersonalizedSection';
 import {
   SkeletonProductRow,
   SkeletonProductGrid,
@@ -44,9 +45,8 @@ export default function CustomerHome() {
       .catch(() => {})
       .finally(() => { if (alive) setCategoriesLoading(false); });
 
-    getNewArrivals(10)
+    getNewArrivals(40)
       .then((res) => { if (alive && res.success) setNewArrivals(res.products || []); })
-      .catch(() => {})
       .finally(() => { if (alive) setNewArrivalsLoading(false); });
 
     getSale(8)
@@ -95,7 +95,10 @@ export default function CustomerHome() {
       {/* 3. EXPLORE BY CATEGORY — editorial cards */}
       <CategoryEditorialSection />
 
-      {/* 3. NEW ARRIVALS — single horizontal product rail */}
+      {/* 3. PERSONALIZED RECOMMENDATIONS — Men/Women + Past Orders */}
+      <PersonalizedSection />
+
+      {/* 4. NEW ARRIVALS — single horizontal product rail */}
       <section aria-label="New arrivals">
         <div className="section-head">
           <div>
@@ -126,7 +129,7 @@ export default function CustomerHome() {
         )}
       </section>
 
-      {/* 4. ON SALE — responsive product grid (distinct from New In) */}
+      {/* 5. ON SALE — responsive product grid (distinct from New In) */}
       <section aria-label="Sale products">
         <div className="section-head">
           <div>

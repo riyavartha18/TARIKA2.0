@@ -1,6 +1,6 @@
 import re
 
-from django.db import models
+from django.db import models  # type: ignore[reportMissingModuleSource]
 
 
 def parse_product_price(raw_value):
@@ -103,16 +103,24 @@ class Product(models.Model):
     # There is no separate inventory table in this database; availability is
     # carried directly on the product row as a numeric quantity.
     available_quantity = models.FloatField(blank=True, null=True, db_column='available_quantity')
-    # Soft-delete / archive flag added by `ensure_inventory_schema`. A product
-    # that still has order/cart/wishlist history is archived (is_active=False)
-    # instead of hard-deleted, so it disappears from every storefront while the
-    # historical rows keep their foreign key. Default TRUE keeps existing rows
-    # active.
     is_active = models.BooleanField(default=True, db_column='is_active')
-    # Storefront visibility flag carried by the dataset. A hidden product stays
-    # in the catalog (and in the warehouse / admin views) but must never be
-    # offered to a customer, so customer-facing listings exclude it.
-    hidden = models.BooleanField(default=False, blank=True, null=True, db_column='hidden')
+    is_image_valid = models.BooleanField(default=True, db_column='is_image_valid')
+
+    # Stylist classification attributes
+    slot_type = models.CharField(max_length=50, blank=True, null=True, db_column='slot_type')
+    formality = models.IntegerField(default=3, db_column='formality')
+    pattern = models.CharField(max_length=50, default='solid', db_column='pattern')
+    dominant_colours = models.TextField(default='[]', db_column='dominant_colours')
+    style_family = models.CharField(max_length=50, default='western', db_column='style_family')
+    season = models.CharField(max_length=50, default='all', db_column='season')
+    footwear_type = models.CharField(max_length=50, blank=True, null=True, db_column='footwear_type')
+    accessory_type = models.CharField(max_length=50, blank=True, null=True, db_column='accessory_type')
+    subtype = models.CharField(max_length=50, default='other', db_column='subtype')
+    includes_blouse = models.BooleanField(default=False, db_column='includes_blouse')
+    includes_dupatta = models.BooleanField(default=False, db_column='includes_dupatta')
+    metal_tone = models.CharField(max_length=50, default='unknown', db_column='metal_tone')
+    confidence = models.FloatField(default=0.0, db_column='confidence')
+    hidden = models.BooleanField(default=False, db_column='hidden',blank=True, null=True)
 
     class Meta:
         db_table = 'products'

@@ -131,7 +131,9 @@ class WarehouseService:
         'actual_price': 'discounted_price',        # FINAL selling price column
         'discounted_price': 'discounted_price',    # FINAL selling price column
         'available_quantity': 'available_quantity',  # double precision
-        'is_active': 'is_active',                  # soft-delete / archive flag
+        'is_active': 'is_active',
+        'hidden': 'hidden',
+        'confidence': 'confidence',
     }
 
     @staticmethod
@@ -503,3 +505,83 @@ class WarehouseService:
 
         raise WarehouseFeatureUnavailable(WarehouseService.DISPATCH_UNAVAILABLE)
 
+        # Enforce warehouse assignment check:
+        # Warehouse Manager must only be able to dispatch orders belonging to their assigned warehouse.
+        if manager_user and getattr(manager_user, 'is_authenticated', False):
+            user_role = getattr(manager_user, 'role', None)
+            user_wh = getattr(manager_user, 'warehouse_id', None)
+            if user_role == 'WAREHOUSE_MANAGER' and user_wh and order.warehouse_id:
+                if str(order.warehouse_id).strip() != str(user_wh).strip():
+                    raise PermissionError(
+                        f"Permission denied: You are assigned to warehouse '{user_wh}', "
+                        f"but order '{order_id}' belongs to warehouse '{order.warehouse_id}'."
+                    )
+
+        # Validate order readiness for shipment
+        current_status = (order.order_status or '').strip().lower()
+        if current_status not in ['confirmed', 'pending', 'ready']:
+            raise ValueError(
+                f"Order '{order_id}' cannot be dispatched. Current status is '{order.order_status}'. "
+                "Only confirmed orders can be dispatched."
+            )
+
+        # Validate courier company
+        partner_clean = (delivery_partner or '').strip()
+        if not partner_clean:
+            raise ValueError("Courier company name is required.")
+
+        # Validate employee
+        try:
+            employee = Employee.objects.get(
+                employee_id=assigned_employee_id,
+                role=EmployeeRole.DELIVERY_PARTNER,
+                is_active=True
+            )
+        except Employee.DoesNotExist:
+            raise ValueError(f"Delivery employee #{assigned_employee_id} not found or is inactive.")
+
+        if employee.courier_company and employee.courier_company.strip().lower() != partner_clean.lower():
+            raise ValueError(
+                f"Employee '{employee.full_name}' belongs to '{employee.courier_company}', "
+                f"not '{partner_clean}'."
+            )
+
+        # Validate expected_delivery_date
+        expected_str = str(expected_delivery_date or '').strip()
+        if not expected_str:
+            raise ValueError("Expected delivery date must be explicitly provided.")
+
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+
+        # Update or create Delivery row (prevent duplicates)
+        delivery = Delivery.objects.filter(order_id=order.order_id).first()
+        if delivery:
+            delivery.delivery_partner = partner_clean
+            delivery.assigned_employee = employee
+            delivery.dispatch_date = today_str
+            delivery.expected_delivery_date = expected_str
+            delivery.delivery_status = 'Assigned'
+            delivery.failure_reason = None
+            if not delivery.warehouse and order.warehouse:
+                delivery.warehouse = order.warehouse
+            delivery.save()
+        else:
+            deliv_id = f"DEL-{uuid.uuid4().hex[:10].upper()}"
+            delivery = Delivery.objects.create(
+                delivery_id=deliv_id,
+                order=order,
+                warehouse=order.warehouse,
+                delivery_partner=partner_clean,
+                assigned_employee=employee,
+                dispatch_date=today_str,
+                expected_delivery_date=expected_str,
+                delivery_status='Assigned',
+                failure_reason=None
+            )
+
+        # Update Order status
+        order.order_status = 'shipped'
+        order.updated_at = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+        order.save()
+
+        return order, delivery

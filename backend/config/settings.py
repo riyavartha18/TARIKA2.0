@@ -17,8 +17,12 @@ from urllib.parse import unquote, urlsplit
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
+import sys
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = BASE_DIR.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 load_dotenv(BASE_DIR / '.env')
 
@@ -61,7 +65,12 @@ INSTALLED_APPS = [
     'recommendations.apps.RecommendationsConfig',
     'rfm_analysis.apps.RfmAnalysisConfig',
     'clv.apps.ClvConfig',
+    'wardrobe.apps.WardrobeConfig',
+    'digital_wardrobe.apps.DigitalWardrobeConfig',
 ]
+
+MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -238,5 +247,17 @@ SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 # CORS Configuration for Frontend Integration
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'authorization',
+    'cache-control',
+    'content-type',
+    'pragma',
+    'user-agent',
+    'x-csrftoken',
+    'x-customer-id',
+    'x-requested-with',
+]
 
 # Force server reload: warehouse routes enabled

@@ -34,7 +34,7 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
             'in_stock',
             'total_stock',
             'available_quantity',
-            'image'
+            'image',
         ]
 
     def get_category_id(self, obj):
@@ -61,6 +61,19 @@ class WarehouseProductSerializer(serializers.ModelSerializer):
             return obj.image
         cat_name = (obj.main_category or '').strip().lower()
         return CATEGORY_IMAGE_MAPPING.get(cat_name, None)
+
+
+class WarehouseProductListSerializer(WarehouseProductSerializer):
+    is_active = serializers.BooleanField(read_only=True)
+    hidden = serializers.BooleanField(read_only=True)
+    confidence = serializers.FloatField(read_only=True)
+
+    class Meta(WarehouseProductSerializer.Meta):
+        fields = WarehouseProductSerializer.Meta.fields + [
+            'is_active',
+            'hidden',
+            'confidence',
+        ]
 
 
 class WarehouseCategoryGroupedSerializer(serializers.ModelSerializer):
@@ -121,6 +134,7 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
     availability_label = serializers.SerializerMethodField()
     is_active = serializers.BooleanField(read_only=True)
     image = serializers.SerializerMethodField()
+    confidence = serializers.FloatField(read_only=True)
 
     class Meta:
         model = Product
@@ -147,6 +161,7 @@ class WarehouseProductDetailSerializer(serializers.ModelSerializer):
             'availability_label',
             'is_active',
             'image',
+            'confidence',
         ]
 
     def get_category_id(self, obj):
@@ -210,7 +225,7 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     rejected outright (never silently ignored), so a stale legacy payload from
     the admin editor fails loudly instead of quietly persisting nothing.
     """
-    product_name = serializers.CharField(max_length=1000)
+    product_name = serializers.CharField(max_length=1000, required=False)
     main_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
     sub_category = serializers.CharField(max_length=255, allow_blank=True, required=False)
     image = serializers.CharField(max_length=2000, allow_blank=True, required=False, allow_null=True)
@@ -220,6 +235,8 @@ class WarehouseProductUpdateSerializer(serializers.Serializer):
     actual_price = serializers.CharField(max_length=255, allow_blank=True, required=False, allow_null=True)
     available_quantity = serializers.FloatField(required=False, allow_null=True)
     is_active = serializers.BooleanField(required=False)
+    hidden = serializers.BooleanField(required=False)
+    confidence = serializers.FloatField(required=False)
 
     @staticmethod
     def _clean_number(value, field_label):
@@ -377,6 +394,12 @@ def build_order_lines(orders):
             'product_url': (product.link if product else None) or '',
         })
     return lines
+    def validate_confidence(self, value):
+        """Classification confidence is a finite score between 0 and 1."""
+        value = self._clean_number(value, 'Confidence')
+        if value < 0 or value > 1:
+            raise serializers.ValidationError('Confidence must be between 0 and 1.')
+        return value
 
 
 class WarehouseOrderSerializer(serializers.ModelSerializer):
@@ -817,4 +840,3 @@ class WarehouseOrderDispatchSerializer(serializers.Serializer):
         if parsed < today:
             raise serializers.ValidationError("Expected delivery date cannot be in the past.")
         return val
-

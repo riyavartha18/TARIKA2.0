@@ -14,12 +14,67 @@ import {
   MessageSquare,
   AlertCircle,
   Edit3,
+  ExternalLink,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useCustomer } from '../../context/CustomerContext';
 import { getProductPricing, formatDiscountPercentage } from '../../utils/pricing';
 import { useAuth } from '../../auth/AuthContext';
 import ProductCard from './ProductCard';
-import { submitProductReview, getProductRecommendations, getProductDetail } from '../../services/api';
+import { submitProductReview, getProductRecommendations, getProductDetail, getProductWardrobeMatches, resolveMediaUrl } from '../../services/api';
+import { NEUTRAL_PLACEHOLDER_IMAGE, cleanProductImageUrl } from '../../pages/customer/SmartBudgetStylistPage';
+
+export function getDisplayCategory(product) {
+  if (!product) return 'Catalog Product';
+  const slot = product.slot_type;
+  const sub = product.subtype;
+  const fwType = product.footwear_type;
+  const accType = product.accessory_type;
+  const name = (product.name || product.product_name || '').toLowerCase();
+
+  if (slot === 'footwear') {
+    if (fwType && fwType !== 'other') {
+      return `${fwType.charAt(0).toUpperCase() + fwType.slice(1)} Footwear`;
+    }
+    if (name.includes('sandal')) return 'Sandals';
+    if (name.includes('sneaker')) return 'Sneakers';
+    if (name.includes('heel')) return 'Heeled Footwear';
+    if (name.includes('flat')) return 'Flats & Loafers';
+    return 'Footwear';
+  }
+  if (slot === 'bag') {
+    if (sub === 'pouch' || name.includes('pouch') || name.includes('cosmetic') || name.includes('makeup')) return 'Pouch & Travel Organizer';
+    if (sub && sub !== 'other') return `${sub.charAt(0).toUpperCase() + sub.slice(1)} Bag`;
+    return 'Bags & Handbags';
+  }
+  if (slot === 'accessory') {
+    if (accType && accType !== 'other' && accType !== 'unknown') {
+      return `${accType.charAt(0).toUpperCase() + accType.slice(1)} Accessory`;
+    }
+    return 'Fashion Accessories';
+  }
+  if (slot === 'one_piece') {
+    if (sub === 'saree') return 'Ethnic Saree';
+    if (sub === 'lehenga_set') return 'Lehenga Choli Set';
+    if (name.includes('jumpsuit') || name.includes('romper')) return 'Jumpsuits & Rompers';
+    return 'Dresses & One-Piece';
+  }
+  if (slot === 'top') {
+    if (sub === 'kurta' || name.includes('kurti') || name.includes('kurta')) return 'Ethnic Kurti & Kurta';
+    if (sub === 'choli' || name.includes('blouse') || name.includes('choli')) return 'Saree Blouse & Choli';
+    return 'Tops & Shirts';
+  }
+  if (slot === 'bottom') {
+    if (sub && sub !== 'other') return `${sub.charAt(0).toUpperCase() + sub.slice(1)} Bottoms`;
+    return 'Trousers & Bottoms';
+  }
+
+  if (product.sub_category && product.sub_category !== 'default') return product.sub_category;
+  if (product.category?.name) return product.category.name;
+  if (product.category_name) return product.category_name;
+  if (product.main_category) return product.main_category;
+  return 'Fashion Item';
+}
 
 export default function ProductDetailModal() {
   const { token, user, isAuthenticated } = useAuth();
@@ -87,6 +142,51 @@ export default function ProductDetailModal() {
   const currentProductId = activeModalProduct
     ? String(activeModalProduct.product_id || activeModalProduct.id || '').trim()
     : '';
+
+  // Digital Wardrobe Matches State: "Matches with your wardrobe" (Part 2B)
+  const [wardrobeMatches, setWardrobeMatches] = useState([]);
+  const [selectedWardrobePiece, setSelectedWardrobePiece] = useState(null);
+  const [hasMoreWardrobeMatches, setHasMoreWardrobeMatches] = useState(false);
+  const [loadingMoreMatches, setLoadingMoreMatches] = useState(false);
+
+  useEffect(() => {
+    if (!currentProductId || !isAuthenticated) {
+      setWardrobeMatches([]);
+      setSelectedWardrobePiece(null);
+      setHasMoreWardrobeMatches(false);
+      return;
+    }
+    getProductWardrobeMatches(token, currentProductId, 0, 6).then((res) => {
+      if (res && res.success && Array.isArray(res.matches)) {
+        // Only active items, valid images, and not needs_review
+        const eligible = res.matches.filter(
+          (m) => m && (m.thumb_url || m.image_url) && !m.needs_review
+        );
+        setWardrobeMatches(eligible);
+        setHasMoreWardrobeMatches(Boolean(res.has_more));
+      } else {
+        setWardrobeMatches([]);
+        setHasMoreWardrobeMatches(false);
+      }
+    });
+  }, [currentProductId, token, isAuthenticated]);
+
+  const handleLoadMoreWardrobeMatches = async () => {
+    if (loadingMoreMatches || !hasMoreWardrobeMatches) return;
+    setLoadingMoreMatches(true);
+    try {
+      const res = await getProductWardrobeMatches(token, currentProductId, wardrobeMatches.length, 6);
+      if (res && res.success && Array.isArray(res.matches)) {
+        const eligible = res.matches.filter(
+          (m) => m && (m.thumb_url || m.image_url) && !m.needs_review
+        );
+        setWardrobeMatches((prev) => [...prev, ...eligible]);
+        setHasMoreWardrobeMatches(Boolean(res.has_more));
+      }
+    } finally {
+      setLoadingMoreMatches(false);
+    }
+  };
 
   useEffect(() => {
     if (!currentProductId) {
@@ -328,9 +428,15 @@ export default function ProductDetailModal() {
   if (product.primary_image && !images.includes(product.primary_image)) {
     images.push(product.primary_image);
   }
+  const primaryImg = cleanProductImageUrl(product.image || product.primary_image);
+  if (primaryImg && !images.includes(primaryImg)) images.push(primaryImg);
+  if (product.primary_image) {
+    const pImg = cleanProductImageUrl(product.primary_image);
+    if (pImg && !images.includes(pImg)) images.push(pImg);
+  }
   if (Array.isArray(product.images) && product.images.length > 0) {
     product.images.forEach((img) => {
-      const url = typeof img === 'string' ? img : img.image_url;
+      const url = cleanProductImageUrl(typeof img === 'string' ? img : img?.image_url);
       if (url && !images.includes(url)) images.push(url);
     });
   }
@@ -356,6 +462,7 @@ export default function ProductDetailModal() {
       categoryImages[catName] ||
       'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=800&q=80'
     );
+    images.push(NEUTRAL_PLACEHOLDER_IMAGE);
   }
 
   const activeImage = images[selectedImageIndex] || images[0];
@@ -436,17 +543,17 @@ export default function ProductDetailModal() {
               <img
                 src={activeImage}
                 alt={product.name || product.product_name || 'Product image'}
+                referrerPolicy="no-referrer"
                 onError={(e) => {
-                  // Same broken-image fallback used by ProductCard.
-                  if (e.target.dataset.fallbackApplied) return;
-                  e.target.dataset.fallbackApplied = '1';
-                  e.target.src =
-                    'https://images.unsplash.com/photo-1490481651871-ab68de25d43d?auto=format&fit=crop&w=700&q=80';
+                  console.warn(`[ProductDetailModal] Image failed to load for "${product.product_name || product.name}": ${e.currentTarget.src}`);
+                  e.currentTarget.onerror = null;
+                  e.currentTarget.src = NEUTRAL_PLACEHOLDER_IMAGE;
                 }}
                 style={{
                   width: '100%',
                   height: '100%',
                   objectFit: 'contain',
+                  padding: '12px',
                 }}
               />
               {isOnSale && (
@@ -479,6 +586,11 @@ export default function ProductDetailModal() {
                     <img
                       src={img}
                       alt={`Thumbnail ${idx + 1}`}
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        e.currentTarget.onerror = null;
+                        e.currentTarget.src = NEUTRAL_PLACEHOLDER_IMAGE;
+                      }}
                       style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                     />
                   </button>
@@ -499,7 +611,7 @@ export default function ProductDetailModal() {
                   fontWeight: 700,
                 }}
               >
-                {product.category?.name || product.category_name || 'Ready to Wear'}
+                {getDisplayCategory(product)}
               </span>
               <h2
                 style={{
@@ -544,50 +656,164 @@ export default function ProductDetailModal() {
             <div
               style={{
                 display: 'flex',
-                alignItems: 'baseline',
-                gap: '12px',
+                flexDirection: 'column',
+                gap: '8px',
                 padding: '12px 16px',
                 backgroundColor: '#FAF7F5',
                 borderRadius: '12px',
                 border: '1px solid rgba(216, 114, 126, 0.2)',
               }}
             >
-              <span
-                style={{
-                  fontSize: '1.75rem',
-                  fontWeight: 700,
-                  color: '#B8505E',
-                  fontFamily: "'Plus Jakarta Sans', sans-serif",
-                }}
-              >
-                ₹{currentPrice.toLocaleString('en-IN')}
-              </span>
-              {isOnSale && (
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px' }}>
                 <span
                   style={{
-                    fontSize: '1.1rem',
-                    color: '#9E8F94',
-                    textDecoration: 'line-through',
-                  }}
-                >
-                  ₹{basePrice.toLocaleString('en-IN')}
-                </span>
-              )}
-              {isOnSale && (
-                <span
-                  style={{
-                    fontSize: '0.78rem',
+                    fontSize: '1.75rem',
                     fontWeight: 700,
-                    color: '#D8727E',
-                    backgroundColor: '#FBF1F0',
-                    padding: '3px 8px',
-                    borderRadius: '6px',
+                    color: '#B8505E',
+                    fontFamily: "'Plus Jakarta Sans', sans-serif",
                   }}
                 >
-                  Save ₹{discountAmount.toLocaleString('en-IN')}
+                  ₹{currentPrice.toLocaleString('en-IN')}
                 </span>
+                {isOnSale && (
+                  <span
+                    style={{
+                      fontSize: '1.1rem',
+                      color: '#9E8F94',
+                      textDecoration: 'line-through',
+                    }}
+                  >
+                    ₹{basePrice.toLocaleString('en-IN')}
+                  </span>
+                )}
+                {isOnSale && (
+                  <span
+                    style={{
+                      fontSize: '0.78rem',
+                      fontWeight: 700,
+                      color: '#D8727E',
+                      backgroundColor: '#FBF1F0',
+                      padding: '3px 8px',
+                      borderRadius: '6px',
+                    }}
+                  >
+                    Save ₹{discountAmount.toLocaleString('en-IN')}
+                  </span>
+                )}
+              </div>
+              {(product.product_url || product.url) && (
+                <a
+                  href={product.product_url || product.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.78rem',
+                    color: '#8E3642',
+                    textDecoration: 'none',
+                    fontWeight: 600,
+                    width: 'fit-content',
+                  }}
+                >
+                  <ExternalLink size={13} />
+                  <span>View Original Catalog Listing</span>
+                </a>
               )}
             </div>
+
+            {/* DIGITAL WARDROBE MATCHES WIDGET: "Goes with N pieces from your wardrobe" */}
+            {wardrobeMatches && wardrobeMatches.length > 0 && (
+              <div
+                style={{
+                  backgroundColor: '#FAF7F5',
+                  borderRadius: '16px',
+                  border: '1px solid #EADBDA',
+                  padding: '1rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Sparkles size={16} color="#9C4146" />
+                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: '#1F191B' }}>
+                      Goes with {wardrobeMatches.length} piece{wardrobeMatches.length !== 1 ? 's' : ''} from your wardrobe
+                    </span>
+                  </div>
+                  <Link
+                    to="/customer/wardrobe"
+                    style={{ fontSize: '0.78rem', color: '#9C4146', fontWeight: 600, textDecoration: 'none' }}
+                  >
+                    View Wardrobe →
+                  </Link>
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: `repeat(${Math.min(wardrobeMatches.length, 3)}, 1fr)`,
+                    gap: '8px',
+                  }}
+                >
+                  {wardrobeMatches.slice(0, 3).map((m, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: '12px',
+                        border: '1px solid #F0E2E0',
+                        padding: '8px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        textAlign: 'center',
+                        gap: '4px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: '54px',
+                          height: '54px',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          backgroundColor: '#FAF9F8',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <img
+                          src={m.thumb_url || m.image_url}
+                          alt={m.item_name}
+                          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        />
+                      </div>
+                      <span
+                        style={{
+                          fontSize: '0.72rem',
+                          fontWeight: 600,
+                          color: '#1F191B',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          maxWidth: '100%',
+                        }}
+                      >
+                        {m.item_name}
+                      </span>
+                      {m.reasons && m.reasons.length > 0 && (
+                        <span style={{ fontSize: '0.66rem', color: '#6B5E63', lineHeight: 1.2 }}>
+                          {m.reasons[0]}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Description */}
             <p
@@ -599,7 +825,7 @@ export default function ProductDetailModal() {
               }}
             >
               {product.description ||
-                'Designed with precision couture craftsmanship. Created for effortless high-fashion wear with sumptuous comfort and delicate contouring.'}
+                `${product.name || product.product_name || 'Item'} — Verified authentic catalog item with true sizing, original images and verified specifications.`}
             </p>
 
             {/* Live Real-time Stock Inventory Breakdown */}
@@ -806,6 +1032,418 @@ export default function ProductDetailModal() {
             </div>
           </div>
         </div>
+
+        {/* ========================================================
+            MATCHES WITH YOUR WARDROBE SECTION (PART 2B)
+            - ONLY customer's own wardrobe pieces passing validate_outfit
+            - Real cutout photo, match percentage, one-line reason
+            - NO store products, NO combo layout, NO total, NO add all
+            - Untouched Frequently Bought Together section below
+            - Hidden when logged out, empty wardrobe, or nothing passes
+            ======================================================== */}
+        {isAuthenticated && wardrobeMatches && wardrobeMatches.length > 0 && (
+          <section
+            style={{
+              marginTop: '2.5rem',
+              paddingTop: '2rem',
+              borderTop: '1px solid #F0E2E0',
+            }}
+            aria-label="Matches with your wardrobe"
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: '1.25rem',
+                flexWrap: 'wrap',
+                gap: '8px',
+              }}
+            >
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Sparkles size={20} color="#9C4146" />
+                  <h3
+                    style={{
+                      margin: 0,
+                      fontFamily: "'Playfair Display', serif",
+                      fontSize: '1.4rem',
+                      fontWeight: 700,
+                      color: '#1F191B',
+                      letterSpacing: '-0.01em',
+                    }}
+                  >
+                    Matches with your wardrobe
+                  </h3>
+                </div>
+                <p style={{ margin: '4px 0 0', fontSize: '0.82rem', color: '#786F72' }}>
+                  Pieces you already own that pair seamlessly with this product
+                </p>
+              </div>
+              <span
+                style={{
+                  fontSize: '0.74rem',
+                  fontWeight: 600,
+                  backgroundColor: '#FAF0F1',
+                  color: '#9C4146',
+                  padding: '4px 10px',
+                  borderRadius: '20px',
+                  border: '1px solid #F5D3D6',
+                }}
+              >
+                {wardrobeMatches.length} {wardrobeMatches.length === 1 ? 'Piece' : 'Pieces'} in Your Closet
+              </span>
+            </div>
+
+            {/* Horizontally scrollable row on mobile / flex layout */}
+            <div
+              style={{
+                display: 'flex',
+                gap: '1rem',
+                overflowX: 'auto',
+                paddingBottom: '0.75rem',
+                WebkitOverflowScrolling: 'touch',
+                scrollbarWidth: 'thin',
+                alignItems: 'stretch',
+              }}
+            >
+              {wardrobeMatches.map((item) => {
+                const imgUrl = item.thumb_url || item.image_url || item.flat_image_url;
+                const matchPct = item.match_percentage || Math.round(item.score || 90);
+                const reasonList = Array.isArray(item.reasons) && item.reasons.length > 0 ? item.reasons : [item.reason || item.match_reason || 'Harmonious outfit complement'];
+                const primaryReason = reasonList[0];
+                const secondaryReason = reasonList[1] || null;
+
+                return (
+                  <div
+                    key={item.wardrobe_item_id || item.id}
+                    onClick={() => setSelectedWardrobePiece(item)}
+                    title={`Tap to view garment details for ${item.item_name}`}
+                    style={{
+                      width: '185px',
+                      flexShrink: 0,
+                      backgroundColor: '#FFFFFF',
+                      borderRadius: '16px',
+                      border: '1px solid #EAE5E3',
+                      overflow: 'hidden',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'translateY(-3px)';
+                      e.currentTarget.style.boxShadow = '0 8px 20px rgba(156,65,70,0.14)';
+                      e.currentTarget.style.borderColor = '#9C4146';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'none';
+                      e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.04)';
+                      e.currentTarget.style.borderColor = '#EAE5E3';
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: '160px',
+                        backgroundColor: '#FAF9F8',
+                        position: 'relative',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '12px',
+                      }}
+                    >
+                      <img
+                        src={resolveMediaUrl(imgUrl)}
+                        alt={item.item_name}
+                        style={{
+                          maxWidth: '100%',
+                          maxHeight: '100%',
+                          objectFit: 'contain',
+                          filter: 'drop-shadow(0 6px 12px rgba(0,0,0,0.08))',
+                        }}
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                        }}
+                      />
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: '8px',
+                          right: '8px',
+                          backgroundColor: '#9C4146',
+                          color: '#FFFFFF',
+                          fontSize: '0.68rem',
+                          fontWeight: 700,
+                          padding: '2px 7px',
+                          borderRadius: '10px',
+                          letterSpacing: '0.02em',
+                        }}
+                      >
+                        {matchPct}% Match
+                      </div>
+                    </div>
+                    <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', flex: 1 }}>
+                      <div
+                        style={{
+                          fontSize: '0.82rem',
+                          fontWeight: 700,
+                          color: '#1F191B',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                        title={item.item_name}
+                      >
+                        {item.item_name}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: '0.7rem',
+                          color: '#9C4146',
+                          textTransform: 'capitalize',
+                          fontWeight: 600,
+                          marginTop: '2px',
+                        }}
+                      >
+                        {item.subtype || item.slot_type}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: '0.7rem',
+                          color: '#6B5E63',
+                          lineHeight: 1.3,
+                          marginTop: '6px',
+                          flex: 1,
+                        }}
+                      >
+                        <div style={{ fontWeight: 500, color: '#4A3E42' }}>• {primaryReason}</div>
+                        {secondaryReason && (
+                          <div style={{ fontSize: '0.66rem', color: '#8A7D82', marginTop: '2px' }}>
+                            • {secondaryReason}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Show more button card */}
+              {hasMoreWardrobeMatches && (
+                <div
+                  onClick={handleLoadMoreWardrobeMatches}
+                  style={{
+                    width: '140px',
+                    flexShrink: 0,
+                    backgroundColor: '#FAF9F8',
+                    borderRadius: '16px',
+                    border: '1px dashed #D1C5C7',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: loadingMoreMatches ? 'wait' : 'pointer',
+                    padding: '1rem',
+                    textAlign: 'center',
+                    transition: 'all 0.2s ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#F5ECE9';
+                    e.currentTarget.style.borderColor = '#9C4146';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = '#FAF9F8';
+                    e.currentTarget.style.borderColor = '#D1C5C7';
+                  }}
+                >
+                  <Sparkles size={22} color="#9C4146" style={{ marginBottom: '8px' }} />
+                  <span style={{ fontSize: '0.84rem', fontWeight: 600, color: '#1F191B' }}>
+                    {loadingMoreMatches ? 'Loading...' : 'Show More'}
+                  </span>
+                  <span style={{ fontSize: '0.7rem', color: '#786F72', marginTop: '4px' }}>
+                    See more matches
+                  </span>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Selected Wardrobe Piece Detail Sheet Modal */}
+        {selectedWardrobePiece && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(0,0,0,0.6)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 3000,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1.25rem',
+            }}
+            onClick={() => setSelectedWardrobePiece(null)}
+          >
+            <div
+              style={{
+                backgroundColor: '#FFFFFF',
+                borderRadius: '20px',
+                maxWidth: '460px',
+                width: '100%',
+                padding: '1.75rem',
+                boxShadow: '0 25px 50px rgba(0,0,0,0.25)',
+                position: 'relative',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Sparkles size={20} color="#9C4146" />
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1F191B', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    Wardrobe Match Detail
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedWardrobePiece(null)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: '#786F72',
+                    padding: '4px',
+                  }}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Garment Cutout View */}
+              <div
+                style={{
+                  height: '220px',
+                  backgroundColor: '#FAF9F8',
+                  borderRadius: '14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '16px',
+                  marginBottom: '1.25rem',
+                  border: '1px solid #ECE7E3',
+                }}
+              >
+                <img
+                  src={resolveMediaUrl(selectedWardrobePiece.thumb_url || selectedWardrobePiece.image_url)}
+                  alt={selectedWardrobePiece.item_name}
+                  style={{
+                    maxWidth: '100%',
+                    maxHeight: '100%',
+                    objectFit: 'contain',
+                    filter: 'drop-shadow(0 10px 20px rgba(0,0,0,0.12))',
+                  }}
+                />
+              </div>
+
+              {/* Title & Match Score */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                <h4 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: '#1F191B' }}>
+                  {selectedWardrobePiece.item_name}
+                </h4>
+                <span
+                  style={{
+                    backgroundColor: '#9C4146',
+                    color: '#FFF',
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    padding: '3px 8px',
+                    borderRadius: '10px',
+                    flexShrink: 0,
+                  }}
+                >
+                  {selectedWardrobePiece.match_percentage || Math.round(selectedWardrobePiece.score || 90)}% Match
+                </span>
+              </div>
+
+              {/* Match Reason Banner */}
+              <div
+                style={{
+                  backgroundColor: '#FAF0F1',
+                  border: '1px solid #F5D3D6',
+                  borderRadius: '10px',
+                  padding: '10px 12px',
+                  fontSize: '0.8rem',
+                  color: '#9C4146',
+                  fontWeight: 500,
+                  marginBottom: '1rem',
+                  lineHeight: 1.4,
+                }}
+              >
+                <strong>Stylist Note:</strong>{' '}
+                {selectedWardrobePiece.reason || (selectedWardrobePiece.reasons && selectedWardrobePiece.reasons[0]) || 'Harmonious outfit complement'}
+              </div>
+
+              {/* Garment Tag Pills */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '1.5rem' }}>
+                <span style={{ fontSize: '0.75rem', backgroundColor: '#F3EFEA', padding: '4px 10px', borderRadius: '6px', color: '#4A3E42' }}>
+                  Slot: <strong>{selectedWardrobePiece.slot_type}</strong>
+                </span>
+                <span style={{ fontSize: '0.75rem', backgroundColor: '#F3EFEA', padding: '4px 10px', borderRadius: '6px', color: '#4A3E42' }}>
+                  Subtype: <strong>{selectedWardrobePiece.subtype}</strong>
+                </span>
+                {selectedWardrobePiece.sleeve_type && (
+                  <span style={{ fontSize: '0.75rem', backgroundColor: '#F3EFEA', padding: '4px 10px', borderRadius: '6px', color: '#4A3E42' }}>
+                    Sleeve: <strong>{selectedWardrobePiece.sleeve_type}</strong>
+                  </span>
+                )}
+                {Array.isArray(selectedWardrobePiece.dominant_colours) && selectedWardrobePiece.dominant_colours.length > 0 && (
+                  <span style={{ fontSize: '0.75rem', backgroundColor: '#F3EFEA', padding: '4px 10px', borderRadius: '6px', color: '#4A3E42' }}>
+                    Colours: <strong>{selectedWardrobePiece.dominant_colours.join(', ')}</strong>
+                  </span>
+                )}
+              </div>
+
+              {/* Navigation link to Digital Wardrobe */}
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <Link
+                  to="/customer/wardrobe"
+                  onClick={() => setSelectedWardrobePiece(null)}
+                  style={{
+                    flex: 1,
+                    textAlign: 'center',
+                    padding: '12px',
+                    borderRadius: '12px',
+                    backgroundColor: '#9C4146',
+                    color: '#FFFFFF',
+                    textDecoration: 'none',
+                    fontWeight: 600,
+                    fontSize: '0.88rem',
+                  }}
+                >
+                  Open in Digital Wardrobe
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setSelectedWardrobePiece(null)}
+                  style={{
+                    padding: '12px 18px',
+                    borderRadius: '12px',
+                    border: '1px solid #D1C5C7',
+                    backgroundColor: '#FFFFFF',
+                    color: '#4A3E42',
+                    fontWeight: 600,
+                    fontSize: '0.88rem',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ========================================================
             FREQUENTLY BOUGHT TOGETHER SECTION

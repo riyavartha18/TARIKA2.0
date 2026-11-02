@@ -2,7 +2,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from rest_framework import status
 from warehouse.serializers import WarehouseProductUpdateSerializer
-from warehouse.views import WarehouseProductDetailView
+from warehouse.views import WarehouseProductDetailView, WarehouseProductListView
 from accounts.authentication import AuthenticatedUser
 from accounts.models import Role
 
@@ -51,6 +51,19 @@ class WarehouseProductAPITests(TestCase):
         response = WarehouseProductDetailView.as_view()(request, product_id='SOME_ID')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_anonymous_product_list_is_rejected(self):
+        response = self.client.get('/api/warehouse/products/')
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+        )
+
+    def test_customer_product_list_is_forbidden(self):
+        request = self.factory.get('/api/warehouse/products/')
+        force_authenticate(request, user=AuthenticatedUser('1', 'c@x.y', Role.CUSTOMER))
+        response = WarehouseProductListView.as_view()(request)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class WarehouseProductUpdateMappingTests(TestCase):
     """
@@ -66,8 +79,8 @@ class WarehouseProductUpdateMappingTests(TestCase):
         # save(update_fields=[...]) raises ValueError for db_column names.
         self.assertEqual(
             sorted(WarehouseService.UPDATE_FIELD_MAP.keys()),
-            ['actual_price', 'available_quantity', 'discount_price', 'discounted_price',
-             'image', 'initial_price', 'is_active', 'link', 'main_category',
+            ['actual_price', 'available_quantity', 'confidence', 'discount_price','discounted_price',
+             'hidden', 'image','initial_price',  'is_active', 'link', 'main_category',
              'product_name', 'sub_category'],
         )
         for model_attr in WarehouseService.UPDATE_FIELD_MAP.values():
@@ -89,6 +102,9 @@ class WarehouseProductUpdateSerializerTests(TestCase):
             'discount_price': 1499.5,
             'actual_price': '2,000',
             'available_quantity': 25,
+            'is_active': False,
+            'hidden': True,
+            'confidence': 0.85,
         })
         self.assertTrue(serializer.is_valid(), serializer.errors)
         # The final price is normalised into the TEXT column format and the
@@ -96,10 +112,29 @@ class WarehouseProductUpdateSerializerTests(TestCase):
         self.assertEqual(serializer.validated_data['actual_price'], '2000.00')
         self.assertEqual(serializer.validated_data['discounted_price'], 2000.0)
         self.assertEqual(serializer.validated_data['available_quantity'], 25.0)
+        self.assertFalse(serializer.validated_data['is_active'])
+        self.assertTrue(serializer.validated_data['hidden'])
+        self.assertEqual(serializer.validated_data['confidence'], 0.85)
 
     def test_empty_product_name_rejected(self):
         serializer = WarehouseProductUpdateSerializer(data={'product_name': '   '})
         self.assertFalse(serializer.is_valid())
+
+    def test_status_fields_can_be_updated_without_other_product_fields(self):
+        for field in ('is_active', 'hidden'):
+            serializer = WarehouseProductUpdateSerializer(data={field: False})
+            self.assertTrue(serializer.is_valid(), serializer.errors)
+            self.assertIs(serializer.validated_data[field], False)
+
+    def test_confidence_requires_a_value_between_zero_and_one(self):
+        for value in (0, 0.6, 1):
+            serializer = WarehouseProductUpdateSerializer(data={'confidence': value})
+            self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        for value in (-0.01, 1.01):
+            serializer = WarehouseProductUpdateSerializer(data={'confidence': value})
+            self.assertFalse(serializer.is_valid())
+            self.assertIn('confidence', serializer.errors)
 
     def test_negative_stock_rejected(self):
         serializer = WarehouseProductUpdateSerializer(data={

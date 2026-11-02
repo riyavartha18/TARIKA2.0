@@ -16,6 +16,7 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path, include
+from digital_wardrobe.views import ProductWardrobeMatchesView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -56,6 +57,18 @@ urlpatterns = [
             ('clv.urls', 'clv'),
             namespace='clv'
         )
+    ),
+    path(
+        'api/wardrobe/',
+        include(
+            ('digital_wardrobe.urls', 'digital_wardrobe'),
+            namespace='digital_wardrobe'
+        )
+    ),
+    path(
+        'api/products/<str:product_key>/wardrobe-matches/',
+        ProductWardrobeMatchesView.as_view(),
+        name='product-wardrobe-matches'
     ),
 ]
 
