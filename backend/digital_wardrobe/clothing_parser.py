@@ -1,13 +1,13 @@
 import io
 import time
 import hashlib
+import importlib
 import numpy as np
 from PIL import Image, ImageOps
 from typing import List, Dict, Any, Tuple, Optional
 import scipy.ndimage as ndi
-import rembg
-
 from .tagger import extract_dominant_colors_lab, generate_garment_name
+import rembg
 
 
 class ClothingParser:
@@ -22,6 +22,12 @@ class ClothingParser:
     @classmethod
     def get_session(cls):
         if cls._session is None:
+            try:
+                rembg = importlib.import_module('rembg')
+            except ImportError as exc:
+                raise RuntimeError(
+                    "The 'rembg' package is required for clothing parsing."
+                ) from exc
             cls._session = rembg.new_session('u2net_cloth_seg')
         return cls._session
 

@@ -80,8 +80,6 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
     { label: 'Smart Budget Stylist', path: '/customer/stylist', isNew: true, icon: <Sparkles size={14} /> },
     { label: 'My Wardrobe', path: '/customer/wardrobe', icon: <Shirt size={14} /> },
     { label: 'New In', path: '/customer/new-in', icon: <Sparkles size={14} /> },
-    { label: 'Trending', path: '/customer/trending', icon: <Flame size={14} /> },
-    { label: 'Sale', path: '/customer/sale', icon: <Tag size={14} /> },
     // The count is the customer's own still-usable campaign list (same list the
     // home page and Member Privileges show), decided by the backend. Used and
     // expired offers stay in the list but no longer count as active.

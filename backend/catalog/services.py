@@ -1,7 +1,9 @@
 import re
 
 from django.db import connection
-from django.db.models import Q, F, FloatField, RawSQL
+# from django.db.models import Q, F, FloatField, RawSQL
+from django.db.models import Q, F, FloatField
+from django.db.models.expressions import RawSQL
 from .models import Product
 from .category_mapping import get_editorial_filter
 
@@ -47,7 +49,7 @@ class CatalogService:
         Stock is carried on the row itself (`available_quantity`); this schema has
         no inventory table.
         """
-        return Product.objects.filter(is_active=True).exclude(hidden=True)
+        # return Product.objects.filter(is_active=True).exclude(hidden=True)
         return Product.objects.filter(
             is_image_valid=True,
             is_active=True,
