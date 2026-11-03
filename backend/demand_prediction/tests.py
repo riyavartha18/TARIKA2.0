@@ -5,47 +5,58 @@ from demand_prediction import inventory_metrics as im
 
 
 class InventoryVelocityClassificationTest(SimpleTestCase):
-    """The transparent, configurable tier rules for the Admin analysis."""
+    """Movement is classified from ACTUAL sales quantity, not from stock."""
 
-    def test_zero_sales_is_never_fast_moving(self):
-        # A product with stock but no sales in the window is NON MOVING, and
-        # days_of_stock is reported as None (∞ / No Sales), never 0.
-        movement, avg, days = im.classify(stock=500, units=0)
-        self.assertEqual(movement, im.MOVEMENT_NON_MOVING)
-        self.assertEqual(avg, 0.0)
-        self.assertIsNone(days)
+    # Tier cuts for a distribution: FAST > 4 units, NORMAL > 2, SLOW <= 2.
+    FAST_CUT, NORMAL_CUT = 4.0, 2.0
 
-    def test_fast_moving_low_days_of_stock(self):
-        # 30 units / 30 days = 1/day; 10 stock -> 10 days <= 15 -> FAST MOVING.
-        movement, avg, days = im.classify(stock=10, units=30)
+    def test_zero_sales_is_always_not_moving(self):
+        # Any zero-sales product is NOT MOVING regardless of stock, and its
+        # days_of_stock is None ("No Sales") when it still holds stock.
+        for stock in (0, 500):
+            movement, avg, days = im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=stock)
+            self.assertEqual(movement, im.MOVEMENT_NOT)
+            self.assertEqual(avg, 0.0)
+        self.assertIsNone(im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=500)[2])
+        self.assertEqual(im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=0)[2], 0.0)
+
+    def test_higher_sales_never_lands_in_a_lower_tier(self):
+        # As sales quantity grows, the tier rank only stays or improves
+        # (lower rank number = higher movement tier); it never regresses.
+        prev_rank = 99
+        for units in range(0, 15):
+            movement, _avg, _d = im.classify(units, self.FAST_CUT, self.NORMAL_CUT, stock=100)
+            rank = im.MOVEMENT_RANK[movement]
+            self.assertLessEqual(rank, prev_rank)
+            prev_rank = rank
+
+    def test_bands_by_sales_quantity(self):
+        self.assertEqual(im.classify(10, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_FAST)
+        self.assertEqual(im.classify(3, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_NORMAL)
+        self.assertEqual(im.classify(2, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_SLOW)
+        self.assertEqual(im.classify(1, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_SLOW)
+
+    def test_stock_never_moves_a_product_up_a_tier(self):
+        # Same sales, wildly different stock => same movement tier.
+        low = im.classify(10, self.FAST_CUT, self.NORMAL_CUT, stock=1)[0]
+        high = im.classify(10, self.FAST_CUT, self.NORMAL_CUT, stock=99999)[0]
+        self.assertEqual(low, high)
+
+    def test_avg_daily_and_days_of_stock_edges(self):
+        # avg daily = units / 30 (2 dp); zero stock with sales => 0 days.
+        _m, avg, days = im.classify(30, self.FAST_CUT, self.NORMAL_CUT, stock=0)
         self.assertEqual(avg, 1.0)
-        self.assertEqual(days, 10.0)
-        self.assertEqual(movement, im.MOVEMENT_FAST)
-
-    def test_normal_and_slow_bands(self):
-        # avg 1/day: 40 stock -> 40 days (16-60) NORMAL.
-        self.assertEqual(im.classify(stock=40, units=30)[0], im.MOVEMENT_NORMAL)
-        # 120 stock -> 120 days (61-180) SLOW.
-        self.assertEqual(im.classify(stock=120, units=30)[0], im.MOVEMENT_SLOW)
-        # 400 stock -> 400 days (>180) NON MOVING.
-        self.assertEqual(im.classify(stock=400, units=30)[0], im.MOVEMENT_NON_MOVING)
-
-    def test_out_of_stock_with_sales_is_flagged_urgent(self):
-        # Zero stock but genuine sales => needs replenishment (FAST MOVING),
-        # and is never mislabelled NON MOVING just because stock is empty.
-        movement, _avg, days = im.classify(stock=0, units=12)
-        self.assertEqual(movement, im.MOVEMENT_FAST)
         self.assertEqual(days, 0.0)
 
-    def test_thresholds_are_configurable_constants(self):
-        # The documented defaults are the ones the SQL and Python share.
-        self.assertEqual(im.SALES_WINDOW_DAYS, 30)
-        self.assertEqual((im.FAST_MAX_DAYS, im.NORMAL_MAX_DAYS, im.SLOW_MAX_DAYS),
-                         (15, 60, 180))
+    def test_tier_labels_and_display_priority(self):
         self.assertEqual(
             list(im.MOVEMENT_LABELS),
-            ['FAST MOVING', 'NORMAL', 'SLOW', 'NON MOVING'],
+            ['FAST MOVING', 'NORMAL MOVING', 'SLOW MOVING', 'NOT MOVING'],
         )
+        self.assertEqual(
+            [im.MOVEMENT_RANK[l] for l in im.MOVEMENT_LABELS], [0, 1, 2, 3],
+        )
+        self.assertEqual(im.SALES_WINDOW_DAYS, 30)
 
 
 class DemandPredictionEngineTest(SimpleTestCase):

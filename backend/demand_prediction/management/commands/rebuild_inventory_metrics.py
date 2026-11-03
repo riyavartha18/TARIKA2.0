@@ -2,8 +2,9 @@
 
 Creates ``public.inventory_velocity_metrics`` (+ refresh-state row and the
 supporting indexes) if missing, then recomputes stock, 30-day delivered sales,
-average daily sales, days of stock and the FAST / NORMAL / SLOW / NON MOVING
-classification for EVERY active product in one SQL aggregation.
+average daily sales, days of stock and the FAST / NORMAL / SLOW / NOT MOVING
+classification -- driven by actual sales quantity with data-driven percentile
+cuts -- for EVERY active product in one SQL aggregation.
 
     python manage.py rebuild_inventory_metrics            # schema + rebuild
     python manage.py rebuild_inventory_metrics --schema-only
@@ -29,8 +30,10 @@ class Command(BaseCommand):
 
         metrics.rebuild_metrics()
         state = metrics.state_snapshot()
+        th = state.get('thresholds', {})
         self.stdout.write(self.style.SUCCESS(
             f"rebuilt {state['product_count']} product rows "
             f"for window {state['window_start']} -> {state['window_end']} "
-            f"(thresholds fast<={metrics.FAST_MAX_DAYS}d normal<={metrics.NORMAL_MAX_DAYS}d "
-            f"slow<={metrics.SLOW_MAX_DAYS}d, window {metrics.SALES_WINDOW_DAYS}d)"))
+            f"(sales-quantity cuts: FAST > {th.get('fast_cut')}, "
+            f"NORMAL > {th.get('normal_cut')} units/{metrics.SALES_WINDOW_DAYS}d, "
+            f"percentiles {metrics.FAST_PERCENTILE}/{metrics.NORMAL_PERCENTILE})"))

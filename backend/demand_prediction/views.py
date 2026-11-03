@@ -347,11 +347,15 @@ class SlowMovingInventoryView(APIView):
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
     # Whitelisted sort keys -> internal ORDER BY SQL (never user input).
+    # The default is the required fixed display order: Fast -> Normal -> Slow ->
+    # Not Moving, and highest sales first within each tier (backed by the
+    # (movement_rank, sales_last_30_days DESC) index).
     _ORDER_BY = {
-        'days_of_stock': ("v.days_of_stock ASC NULLS LAST, "
-                          "v.sales_last_30_days DESC"),
+        'movement': "v.movement_rank ASC, v.sales_last_30_days DESC",
         'sales_last_30_days': "v.sales_last_30_days DESC, v.current_stock DESC",
         'avg_daily_sales': "v.avg_daily_sales DESC, v.sales_last_30_days DESC",
+        'days_of_stock': ("v.days_of_stock ASC NULLS LAST, "
+                          "v.sales_last_30_days DESC"),
         'current_stock': "v.current_stock DESC",
         'product_name': "v.product_name ASC",
     }
@@ -369,7 +373,7 @@ class SlowMovingInventoryView(APIView):
             search = request.query_params.get('search', '').strip().lower()
             category = request.query_params.get('category', '').strip()
             movement = request.query_params.get('movement_status', '').strip().upper()
-            sort_key = request.query_params.get('sort', 'days_of_stock').strip()
+            sort_key = request.query_params.get('sort', 'movement').strip()
             if movement not in metrics.MOVEMENT_LABELS:
                 movement = ''
 
@@ -391,7 +395,7 @@ class SlowMovingInventoryView(APIView):
                 where.append("v.movement_status = %s")
                 params.append(movement)
             where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
-            order_sql = self._ORDER_BY.get(sort_key, self._ORDER_BY['days_of_stock'])
+            order_sql = self._ORDER_BY.get(sort_key, self._ORDER_BY['movement'])
 
             # Summary tiles come straight from the cached state row: they only
             # change when the metrics table is rebuilt, so no per-request scan.
@@ -400,9 +404,9 @@ class SlowMovingInventoryView(APIView):
             summary = {
                 'total_products': total_products,
                 'fast_moving': int(st_summary.get('fast_moving', 0)),
-                'normal': int(st_summary.get('normal', 0)),
-                'slow': int(st_summary.get('slow', 0)),
-                'non_moving': int(st_summary.get('non_moving', 0)),
+                'normal_moving': int(st_summary.get('normal_moving', 0)),
+                'slow_moving': int(st_summary.get('slow_moving', 0)),
+                'not_moving': int(st_summary.get('not_moving', 0)),
                 'out_of_stock': int(st_summary.get('out_of_stock', 0)),
                 'total_window_units': int(st_summary.get('window_units', 0)),
             }
@@ -413,9 +417,9 @@ class SlowMovingInventoryView(APIView):
                 filtered_total = total_products
             elif movement and not has_search and not has_category:
                 _tier_key = {metrics.MOVEMENT_FAST: 'fast_moving',
-                             metrics.MOVEMENT_NORMAL: 'normal',
-                             metrics.MOVEMENT_SLOW: 'slow',
-                             metrics.MOVEMENT_NON_MOVING: 'non_moving'}[movement]
+                             metrics.MOVEMENT_NORMAL: 'normal_moving',
+                             metrics.MOVEMENT_SLOW: 'slow_moving',
+                             metrics.MOVEMENT_NOT: 'not_moving'}[movement]
                 filtered_total = summary[_tier_key]
             else:
                 with connection.cursor() as cursor:
@@ -435,7 +439,7 @@ class SlowMovingInventoryView(APIView):
                     f"""
                     SELECT v.product_key, v.product_name, v.main_category,
                            v.sub_category, v.current_stock, v.sales_last_30_days,
-                           v.avg_daily_sales, v.days_of_stock, v.movement_status
+                           v.movement_status
                     FROM {metrics.METRICS_TABLE} v
                     {where_sql}
                     ORDER BY {order_sql}
@@ -449,9 +453,6 @@ class SlowMovingInventoryView(APIView):
             for r in rows:
                 stock = float(r['current_stock'] or 0)
                 units = int(r['sales_last_30_days'] or 0)
-                avg_daily = round(float(r['avg_daily_sales'] or 0), 2)
-                days_of_stock = float(r['days_of_stock']) if r['days_of_stock'] is not None else None
-                no_sales = units == 0
                 items.append({
                     'product_key': r['product_key'],
                     'product_name': r['product_name'] or 'Unknown Product',
@@ -459,10 +460,6 @@ class SlowMovingInventoryView(APIView):
                     'sub_category': r['sub_category'] or '',
                     'current_stock': int(stock),
                     'sales_last_30_days': units,
-                    'avg_daily_sales': avg_daily,
-                    # NULL days_of_stock with stock on hand = no sales (∞).
-                    'days_of_stock': days_of_stock,
-                    'no_sales': no_sales,
                     'movement_status': r['movement_status'],
                 })
 
@@ -478,10 +475,16 @@ class SlowMovingInventoryView(APIView):
                 'analysis_date': _fmt(state and state['window_end']),
                 'sales_window_start': _fmt(state and state['window_start']),
                 'sales_window_days': metrics.SALES_WINDOW_DAYS,
+                # Data-driven, transparent tier boundaries: the sales-quantity
+                # cut points (units in the window) from the seller distribution.
                 'thresholds': {
-                    'fast_max_days': metrics.FAST_MAX_DAYS,
-                    'normal_max_days': metrics.NORMAL_MAX_DAYS,
-                    'slow_max_days': metrics.SLOW_MAX_DAYS,
+                    'basis': 'sales_quantity',
+                    'window_days': metrics.SALES_WINDOW_DAYS,
+                    'fast_percentile': metrics.FAST_PERCENTILE,
+                    'normal_percentile': metrics.NORMAL_PERCENTILE,
+                    'fast_cut': (state or {}).get('thresholds', {}).get('fast_cut'),
+                    'normal_cut': (state or {}).get('thresholds', {}).get('normal_cut'),
+                    'not_moving_rule': 'zero units sold in the window',
                 },
                 'summary': summary,
                 'items': items,
