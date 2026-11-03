@@ -212,6 +212,33 @@ class DigitalWardrobeTests(TestCase):
         res_media = self.client.get(signed_url_for_b)
         self.assertEqual(res_media.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_display_modes_are_limited_to_render_and_original(self):
+        item = WardrobeItem.objects.create(
+            customer_id=self.cust_a,
+            item_name="Legacy Wardrobe Item",
+            display_mode="3d",
+        )
+        self.client.credentials(HTTP_X_CUSTOMER_ID=self.cust_a)
+
+        detail = self.client.get(f'/api/wardrobe/items/{item.id}/')
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data['display_mode'], 'render')
+
+        original = self.client.post(
+            f'/api/wardrobe/items/{item.id}/toggle-display/',
+            data={'mode': 'original'},
+            format='json'
+        )
+        self.assertEqual(original.status_code, status.HTTP_200_OK)
+        self.assertEqual(original.data['display_mode'], 'original')
+
+        unsupported = self.client.post(
+            f'/api/wardrobe/items/{item.id}/toggle-display/',
+            data={'mode': '3d'},
+            format='json'
+        )
+        self.assertEqual(unsupported.status_code, status.HTTP_400_BAD_REQUEST)
+
     # --------------------------------------------------------------------------
     # 2. ORDER IMPORT IDEMPOTENCY & RETURN FILTERING
     # --------------------------------------------------------------------------
@@ -647,4 +674,3 @@ class DigitalWardrobeTests(TestCase):
         # Test unknown color falls back gracefully
         fallback_res = get_closest_palette_color('electric_neon_chartreuse')
         self.assertEqual(fallback_res, 'neutral')
-

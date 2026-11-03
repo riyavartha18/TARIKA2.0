@@ -80,15 +80,6 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
     { label: 'Smart Budget Stylist', path: '/customer/stylist', isNew: true, icon: <Sparkles size={14} /> },
     { label: 'My Wardrobe', path: '/customer/wardrobe', icon: <Shirt size={14} /> },
     { label: 'New In', path: '/customer/new-in', icon: <Sparkles size={14} /> },
-    // The count is the customer's own still-usable campaign list (same list the
-    // home page and Member Privileges show), decided by the backend. Used and
-    // expired offers stay in the list but no longer count as active.
-    {
-      label: 'Your Offers',
-      path: '/customer/offers',
-      icon: <Ticket size={14} />,
-      badge: activeOfferCount,
-    },
   ];
 
   const currentPath = location.pathname;
@@ -145,11 +136,12 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           style={{
             maxWidth: '1680px',
             margin: '0 auto',
-            padding: '0.75rem 2rem',
+            padding: '0.75rem clamp(1.25rem, 2.5vw, 2.5rem)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            gap: '1.5rem',
+            gap: '1.25rem',
+            boxSizing: 'border-box',
           }}
         >
           {/* Brand Logo */}
@@ -270,7 +262,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
             className="customer-nav-search"
             style={{
               position: 'relative',
-              maxWidth: '320px',
+              maxWidth: '240px',
               width: '100%',
               display: 'flex',
               alignItems: 'center',
@@ -286,11 +278,11 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
               }}
               style={{
                 width: '100%',
-                padding: '0.55rem 2.2rem 0.55rem 2.2rem',
+                padding: '0.52rem 2rem 0.52rem 2.2rem',
                 backgroundColor: '#FAF7F5',
                 border: '1px solid rgba(216, 114, 126, 0.25)',
                 borderRadius: '9999px',
-                fontSize: '0.85rem',
+                fontSize: '0.84rem',
                 color: '#1F191B',
                 fontFamily: 'inherit',
                 outline: 'none',
@@ -337,7 +329,16 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
           </form>
 
           {/* Action Icons: Wishlist, Bag, Profile */}
-          <div className="customer-nav-actions" style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0 }}>
+          <div
+            className="customer-nav-actions"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.85rem',
+              flexShrink: 0,
+              paddingRight: '0.25rem',
+            }}
+          >
             {/* Wishlist Icon */}
             <Link
               to="/customer/wishlist"
@@ -346,8 +347,8 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                width: '40px',
-                height: '40px',
+                width: '38px',
+                height: '38px',
                 borderRadius: '50%',
                 backgroundColor: currentPath === '/customer/wishlist' ? '#FBF1F0' : 'rgba(250, 247, 245, 0.8)',
                 border: '1px solid rgba(216, 114, 126, 0.2)',
@@ -375,8 +376,8 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                 position: 'relative',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '8px',
-                padding: '0.45rem 0.85rem',
+                gap: '7px',
+                padding: '0.42rem 0.85rem',
                 borderRadius: '9999px',
                 backgroundColor: currentPath === '/customer/bag' ? '#FBF1F0' : 'rgba(250, 247, 245, 0.8)',
                 border: '1px solid rgba(216, 114, 126, 0.25)',
@@ -387,7 +388,7 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
               title="View Shopping Bag"
             >
               <ShoppingBag
-                size={18}
+                size={17}
                 className={bagBounced ? 'animate-bag-bounce' : ''}
                 color="#B8505E"
               />
@@ -411,16 +412,17 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '6px',
-                  padding: '0.45rem 0.75rem',
+                  gap: '7px',
+                  padding: '0.4rem 0.8rem',
                   borderRadius: '9999px',
                   backgroundColor: '#FAF7F5',
-                  border: '1px solid rgba(216, 114, 126, 0.2)',
+                  border: '1px solid rgba(216, 114, 126, 0.25)',
                   cursor: 'pointer',
                   color: '#1F191B',
                   fontSize: '0.84rem',
                   fontWeight: 600,
                   transition: 'all 0.2s ease',
+                  boxShadow: '0 1px 3px rgba(0, 0, 0, 0.04)',
                 }}
               >
                 <div
@@ -433,14 +435,14 @@ export default function CustomerNavbar({ onSearchChange, searchTerm = '' }) {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    fontSize: '0.75rem',
+                    fontSize: '0.76rem',
                     fontWeight: 700,
                   }}
                 >
-                  {user?.full_name ? user.full_name[0].toUpperCase() : 'C'}
+                  {user?.full_name ? user.full_name[0].toUpperCase() : 'R'}
                 </div>
                 <span style={{ maxWidth: '90px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {user?.full_name?.split(' ')[0] || 'Member'}
+                  {user?.full_name?.split(' ')[0] || 'Riya'}
                 </span>
                 <ChevronDown size={14} color="#9E8F94" />
               </button>

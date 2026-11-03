@@ -46,6 +46,7 @@ def run_migration():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wardrobe_items_slot ON wardrobe_items(slot_type);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wardrobe_items_active ON wardrobe_items(is_active);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wardrobe_items_render_status ON wardrobe_items(render_status);")
+        cursor.execute("UPDATE wardrobe_items SET display_mode = 'render' WHERE display_mode = '3d';")
 
         # Backfill existing 2 rows if any
         cursor.execute("""
