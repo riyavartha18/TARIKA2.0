@@ -1,25 +1,56 @@
 // Shared vocabulary for the Campaigns module: the two offer families, their
-// simple human-readable options, segment list and payload <-> form mapping.
-// Everything here mirrors the backend rules in rfm_analysis (benefits.py,
-// serializers.py); nothing customer- or campaign-specific is hardcoded.
+// simple human-readable options, the K-Means customer groups and the payload
+// <-> form mapping. Everything here mirrors the backend rules in rfm_analysis
+// (benefits.py, serializers.py, cluster_targeting.py); nothing customer- or
+// campaign-specific is hardcoded - the four groups, their labels, their ids and
+// their counts always come from the persisted clustering run through the API.
 
 export const PALETTE = {
   ink: '#1F191B', muted: '#6B5E63', faint: '#9E8F94',
   rose: '#D8727E', roseDeep: '#B8505E', border: '#F0E2E0', bg: '#FFFFFF',
 };
 
-// The six primary RFM segments. Never Purchased is deliberately absent:
-// buyer-segment campaigns must never target non-buyers, and there is no
-// "Others" segment. Big Spender is only a secondary condition.
-export const SEGMENTS = [
-  'Champions', 'Loyal Customers', 'Potential Loyalists',
-  'New Customers', 'At-Risk', 'Hibernating',
-];
-export const BIG_SPENDER_TAG = 'Big Spender';
+// Which segmentation a campaign's audience was chosen from. Campaign targeting
+// uses the four K-Means groups; `LEGACY_RFM` only ever marks a historical row so
+// the page can say so without repeating the segment names it once used.
+export const KMEANS_MODE = 'KMEANS';
+export const LEGACY_MODE = 'LEGACY_RFM';
+
+// Shown instead of the old segment names of a historical campaign, so no
+// previous RFM label appears anywhere in the campaign UI.
+export const LEGACY_AUDIENCE_LABEL = 'Previous RFM targeting (no longer shown to customers)';
+
+/** The customer groups one campaign targets, as names for a table cell. */
+export function audienceGroups(campaign) {
+  if (!campaign) return [];
+  if ((campaign.targeting_mode || LEGACY_MODE) !== KMEANS_MODE) {
+    return [LEGACY_AUDIENCE_LABEL];
+  }
+  const labels = campaign.target_cluster_labels || [];
+  return labels.length
+    ? labels
+    : (campaign.target_cluster_ids || []).map((id) => `Cluster ${id}`);
+}
+
+/** A campaign authored before the switch to K-Means groups. */
+export function isLegacyAudience(campaign) {
+  return Boolean(campaign)
+    && (campaign.targeting_mode || LEGACY_MODE) === LEGACY_MODE;
+}
 
 export const STATUS_COLORS = {
   DRAFT: '#6B5E63', PUBLISHED: '#2E7D32', PAUSED: '#B8505E', EXPIRED: '#9E8F94',
 };
+
+// The stored status vocabulary is unchanged (PAUSED keeps meaning "not available
+// to customers, history intact"); only the admin wording is what the campaign
+// feature actually offers: Deactivate and Reactivate, never a delete of a
+// published campaign.
+export const STATUS_LABELS = {
+  DRAFT: 'Draft', PUBLISHED: 'Published', PAUSED: 'Deactivated', EXPIRED: 'Expired',
+};
+
+export const statusLabel = (status) => STATUS_LABELS[status] || status;
 
 export const DISCOUNT_OPTIONS = [
   { type: 'PERCENTAGE', label: 'Percentage Discount', example: 'e.g. 15% OFF' },
@@ -56,8 +87,9 @@ export const emptyForm = () => ({
   product_offer_mode: 'PERCENTAGE',    // PERCENTAGE | FLAT (PRODUCT_DISCOUNT)
   // Applicable products
   scope_mode: 'ALL', scope_products: [], scope_categories: [],
-  // Customers
-  target_segments: [], big_spender_only: false,
+  // Customers: the four K-Means groups of the latest persisted clustering run.
+  targeting_mode: KMEANS_MODE,
+  target_cluster_ids: [],
   // Conditions & validity
   min_order_amount: 0, max_discount: '',
   start_date: '', end_date: '',
@@ -135,8 +167,12 @@ export function buildPayload(form) {
     buy_get_rule: hasBuyGet ? buildBuyGetRule(form) : {},
     scope: buildScope(form),
     benefits_combinable: form.offer_category === 'COMBINED' ? form.benefits_combinable : false,
-    target_segments: form.target_segments,
-    target_tags: form.big_spender_only ? [BIG_SPENDER_TAG] : [],
+    // The audience is always the K-Means groups: the old segment fields are
+    // sent empty so a campaign can never carry both targeting kinds.
+    targeting_mode: KMEANS_MODE,
+    target_cluster_ids: form.target_cluster_ids,
+    target_segments: [],
+    target_tags: [],
     min_order_amount: num(form.min_order_amount),
     max_discount: form.max_discount === '' || form.max_discount === null
       ? null : num(form.max_discount),
@@ -186,8 +222,11 @@ export function formFromCampaign(c) {
     scope_mode: scope.mode || 'ALL',
     scope_products: scope.product_ids || (bg.product_ids || []),
     scope_categories: scope.categories || [],
-    target_segments: c.target_segments || [],
-    big_spender_only: (c.target_tags || []).includes(BIG_SPENDER_TAG),
+    targeting_mode: KMEANS_MODE,
+    // A historical campaign's stored segments are not offered as a target: an
+    // edit of one moves it onto the K-Means groups (only a draft can be saved).
+    target_cluster_ids: (c.targeting_mode || LEGACY_MODE) === KMEANS_MODE
+      ? (c.target_cluster_ids || []) : [],
     min_order_amount: c.min_order_amount ?? 0,
     max_discount: c.max_discount ?? '',
     start_date: toLocalInput(c.start_date), end_date: toLocalInput(c.end_date),
@@ -238,16 +277,19 @@ export function scopeText(form) {
 }
 
 /** The admin-facing preview: exactly what will be offered, and to whom. */
-export function previewSummary(form) {
+export function previewSummary(form, clusters = []) {
   const offers = [];
   if (form.offer_category !== 'BUY_GET') offers.push(discountRuleText(form));
   if (form.offer_category !== 'DISCOUNT') offers.push(buyGetRuleText(form));
   const days = form.start_date && form.end_date
     ? Math.max(0, Math.round((new Date(form.end_date) - new Date(form.start_date)) / 86400000))
     : null;
-  const audience = form.target_segments.length
-    ? form.target_segments.join(' + ') + (form.big_spender_only ? ' who are Big Spenders' : '')
-    : 'No segment selected yet';
+  const clusterMode = (form.targeting_mode || KMEANS_MODE) === KMEANS_MODE;
+  const audience = clusterMode && form.target_cluster_ids.length
+    ? form.target_cluster_ids
+      .map((id) => clusterName(clusters, id))
+      .join(' + ') + ` (~${clusterCustomerCount(clusters, form.target_cluster_ids).toLocaleString('en-IN')} customers)`
+    : 'No customer group selected yet';
   return {
     name: form.name || 'Untitled campaign',
     audience,
@@ -255,6 +297,20 @@ export function previewSummary(form) {
     products: scopeText(form),
     validity: days === null ? 'No dates selected yet' : `${days} day${days === 1 ? '' : 's'}`,
   };
+}
+
+/** Business label of one cluster of the stored run (never assumed by id). */
+export function clusterName(clusters, clusterId) {
+  const found = (clusters || []).find((c) => Number(c.cluster_id) === Number(clusterId));
+  return found ? found.category : `Cluster ${clusterId}`;
+}
+
+/** Customers the stored assignment puts in these clusters. */
+export function clusterCustomerCount(clusters, clusterIds) {
+  return (clusterIds || []).reduce((total, id) => {
+    const found = (clusters || []).find((c) => Number(c.cluster_id) === Number(id));
+    return total + (found ? Number(found.customer_count || 0) : 0);
+  }, 0);
 }
 
 /** Effective badge for the list: a published-but-lapsed row shows Expired. */

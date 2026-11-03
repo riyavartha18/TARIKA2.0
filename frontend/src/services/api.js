@@ -1830,17 +1830,71 @@ export async function getRfmRunStatus(token) {
   }
 }
 
-/** GET /api/analytics/rfm/summary -> aggregate KPIs and segment cards. */
-export async function getRfmSummary(token) {
+/** GET /api/analytics/rfm/summary -> aggregate KPIs and segment cards.
+ *
+ *  Deduplicated and briefly cached on the client: the Analysis overview shows a
+ *  compact RFM card and the full dashboard reads the same payload, so opening
+ *  one from the other must not pay twice, and React mounting a component twice
+ *  (dev StrictMode, or a back-and-forth navigation) must not send two requests.
+ *  `peekRfmSummaryCache` hands the stored payload to a component synchronously,
+ *  which is what lets the dashboard paint instantly and refresh in background.
+ */
+const RFM_SUMMARY_TTL_MS = 15000;
+const rfmSummaryCache = { token: null, at: 0, data: null, inflight: null };
+
+function rfmSummaryCacheFresh(token) {
+  return rfmSummaryCache.token === token
+    && rfmSummaryCache.data
+    && (Date.now() - rfmSummaryCache.at) < RFM_SUMMARY_TTL_MS;
+}
+
+export function peekRfmSummaryCache(token) {
+  return rfmSummaryCacheFresh(token) ? rfmSummaryCache.data : null;
+}
+
+export async function getRfmSummary(token, { force = false } = {}) {
+  if (!force && rfmSummaryCacheFresh(token)) return { success: true, ...rfmSummaryCache.data };
+  if (!force && rfmSummaryCache.inflight && rfmSummaryCache.token === token) {
+    return rfmSummaryCache.inflight;      // one request serves every caller
+  }
+  const request = (async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/summary`, {
+        headers: authHeaders(token),
+      });
+      const data = await response.json();
+      if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch RFM summary.' };
+      rfmSummaryCache.token = token;
+      rfmSummaryCache.at = Date.now();
+      rfmSummaryCache.data = data;
+      return { success: true, ...data };
+    } catch (err) {
+      return { success: false, error: 'Network error fetching RFM summary.' };
+    } finally {
+      if (rfmSummaryCache.inflight === request) rfmSummaryCache.inflight = null;
+    }
+  })();
+  rfmSummaryCache.token = token;
+  rfmSummaryCache.inflight = request;
+  return request;
+}
+
+/** GET /api/analytics/rfm/analytics -> the heavy analytics, read after paint.
+ *
+ *  Per-cluster RFM profiles, the mapping confidence, the ambiguity report, the
+ *  clustering run bookkeeping and the legacy segment mix. The dashboard renders
+ *  without it, so it is fetched once the first paint is on screen.
+ */
+export async function getRfmAnalyticsDetail(token) {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/summary`, {
+    const response = await fetch(`${API_BASE_URL}/api/analytics/rfm/analytics`, {
       headers: authHeaders(token),
     });
     const data = await response.json();
-    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch RFM summary.' };
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch RFM analytics.' };
     return { success: true, ...data };
   } catch (err) {
-    return { success: false, error: 'Network error fetching RFM summary.' };
+    return { success: false, error: 'Network error fetching RFM analytics.' };
   }
 }
 
@@ -1944,12 +1998,37 @@ export async function getRfmClusterCustomers(token, category, params = {}) {
   }
 }
 
+/** GET /api/campaigns/clusters/ -> the K-Means customer groups a campaign may
+ *  target (admin). One entry per cluster of the latest persisted clustering
+ *  run: its business label, its cluster id and how many customers are actually
+ *  assigned to it. Nothing here is inferred from a fixed id -> label table.
+ */
+export async function getCampaignClusters(token) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/campaigns/clusters/`, {
+      headers: authHeaders(token),
+    });
+    const data = await response.json();
+    if (!response.ok) return { success: false, error: data.detail || 'Failed to fetch customer groups.' };
+    return {
+      success: true,
+      available: Boolean(data.available),
+      clusters: data.clusters || [],
+      run: data.run || null,
+      message: data.message || '',
+    };
+  } catch (err) {
+    return { success: false, error: 'Network error fetching customer groups.' };
+  }
+}
+
 /** GET /api/campaigns/ -> list campaigns with admin filters (admin). */
 export async function getCampaigns(token, params = {}) {
   try {
     const query = new URLSearchParams();
     if (params.status && params.status !== 'ALL') query.append('status', params.status);
     if (params.segment && params.segment !== 'ALL') query.append('segment', params.segment);
+    if (params.cluster && params.cluster !== 'ALL') query.append('cluster', params.cluster);
     if (params.offer_type && params.offer_type !== 'ALL') query.append('offer_type', params.offer_type);
     if (params.search) query.append('search', params.search);
     if (params.page) query.append('page', params.page);
@@ -1965,6 +2044,7 @@ export async function getCampaigns(token, params = {}) {
       count: data.count || 0,
       totalPages: data.total_pages || 1,
       currentPage: data.page || 1,
+      legacyAudience: data.legacy_audience || null,
     };
   } catch (err) {
     return { success: false, error: 'Network error fetching campaigns.' };
@@ -2019,7 +2099,12 @@ export async function deleteCampaign(token, campaignId) {
   }
 }
 
-/** POST /api/campaigns/{id}/status/ -> publish / pause / resume / expire (admin). */
+/** POST /api/campaigns/{id}/status/ -> publish / pause / resume / expire (admin).
+ *
+ *  Publishing a K-Means campaign also assigns its coupon to the customers of the
+ *  selected clusters, so the response carries `audience` - how many customers
+ *  were targeted and how many were actually issued a coupon.
+ */
 export async function setCampaignStatus(token, campaignId, status) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/campaigns/${campaignId}/status/`, {
@@ -2027,7 +2112,7 @@ export async function setCampaignStatus(token, campaignId, status) {
     });
     const data = await response.json();
     if (!response.ok) return { success: false, error: data.detail || 'Failed to change campaign status.' };
-    return { success: true, campaign: data };
+    return { success: true, campaign: data, audience: data.audience || null };
   } catch (err) {
     return { success: false, error: 'Network error changing campaign status.' };
   }

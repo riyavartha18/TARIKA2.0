@@ -41,6 +41,12 @@ RFM_SNAPSHOT_META_KEY = 'rfm:analysis:snapshot:meta:{version}'
 RFM_SNAPSHOT_RECORDS_KEY = 'rfm:analysis:snapshot:records:{version}'
 RFM_RUN_STATUS_KEY = 'rfm:analysis:run_status'
 RFM_RUN_LOCK_KEY = 'rfm:analysis:run_lock'
+# Rate limit for the dashboard's background freshness nudge. Opening the RFM
+# page must not pay for a state read plus a possible run decision on every
+# request: the first request in this window schedules it on a worker thread and
+# the rest simply get the already-cached run status.
+RFM_FRESHNESS_NUDGE_KEY = 'rfm:analysis:freshness_nudge'
+RFM_FRESHNESS_NUDGE_SECONDS = int(os.getenv('RFM_FRESHNESS_NUDGE_SECONDS', 2 * 60))
 # Memo of the single-row analysis state (version/dates/buyer_count), so the
 # dashboard summary path knows which cached bundle to read without a per-request
 # round trip to the remote database. Rewritten by a completed run.
@@ -92,8 +98,11 @@ RFM_REFRESH_AFTER_SECONDS = int(os.getenv('RFM_REFRESH_AFTER_SECONDS', 3 * 3600)
 
 SNAPSHOT_VERSION_MIN = 1
 
-# ---------------------------------------------------------------------------
-# Segment vocabulary (labels only - the numeric rules are in segmentation.py)
+# Segment vocabulary of the *previous* rule-based segmentation. It is no longer
+# offered when authoring a campaign - the Campaign page now targets the four
+# K-Means clusters below - but it must keep resolving exactly as before for the
+# campaigns, coupons and redemption rows that were published against it, and for
+# the CLV segment reads that still use the persisted `segment` column.
 # ---------------------------------------------------------------------------
 SEGMENT_CHAMPIONS = 'Champions'
 SEGMENT_LOYAL = 'Loyal Customers'
@@ -104,6 +113,20 @@ SEGMENT_HIBERNATING = 'Hibernating'
 SEGMENT_NEVER_PURCHASED = 'Never Purchased'
 
 TAG_BIG_SPENDER = 'Big Spender'
+
+# Whether campaigns authored on the *previous* rule-based segments may still
+# reach a customer. Personalised coupons are now chosen from the four K-Means
+# clusters, and a customer must see only the offer of the group they belong to,
+# so a legacy segment campaign no longer becomes visible or redeemable.
+#
+# This gates visibility only. Nothing is deleted or reinterpreted: the campaign
+# rows, their issued coupons and every redemption record stay exactly as they
+# are, the admin list still shows them (marked "Previous RFM segmentation"), and
+# setting RFM_LEGACY_CAMPAIGNS_VISIBLE_TO_CUSTOMERS=1 restores the old behaviour
+# without a code change or a migration.
+LEGACY_CAMPAIGNS_VISIBLE_TO_CUSTOMERS = (
+    os.getenv('RFM_LEGACY_CAMPAIGNS_VISIBLE_TO_CUSTOMERS', '0').strip() == '1'
+)
 
 # Every eligible buyer is assigned to one of these six primary segments (see
 # segmentation._fallback_classify for the residual mapping). There is no longer
@@ -126,8 +149,10 @@ SECONDARY_TAGS = [TAG_BIG_SPENDER]
 # K-Means++ clustering vocabulary (labels only - the algorithm lives in
 # `clustering.py`). These four business categories are the label a numeric
 # K-Means cluster is mapped to *after* clustering, from the cluster's unscaled
-# RFM profile. They are separate from the six rule-based segments above and are
-# never read by CLV or campaign targeting.
+# RFM profile. They are separate from the six rule-based segments above: CLV
+# still reads the RFM metrics only, and campaign targeting now selects its
+# audience from these four clusters (`cluster_targeting.py`) instead of the
+# rule-based segments, which stay in place only for historical campaigns.
 #
 # The four categories are spending / frequency / dormancy descriptions, chosen
 # so the label is always backed by the cluster's real RFM numbers. They are NOT

@@ -11,6 +11,13 @@ without duplicating anything that already exists:
   order-level redemption auditing (usage limits, global limits, duplicate
   protection) without adding columns to the read-only `public.orders` table and
   without any permanent customer-coupon assignment table.
+* `rfm_campaign_audience` - the coupon assignments of a K-Means campaign, i.e.
+  the exact customers it was published to. Added when targeting moved from the
+  rule-based segments to the four K-Means clusters: a segment campaign can be
+  evaluated from the customer's current label, but a published cluster campaign
+  must not move when clustering is re-run, so its members are recorded here.
+* `rfm_kmeans_runs` - one append-only row per completed clustering run, so a
+  campaign can name the run its audience came from.
 * `rfm_customer_segments` + `rfm_analysis_state` - the segment label of the
   latest completed analysis per buyer, so a customer page reads one indexed row
   instead of rebuilding the cached snapshot (or recomputing the analysis).
@@ -55,6 +62,25 @@ class OfferCategory(models.TextChoices):
     COMBINED = 'COMBINED', 'Combined offer'
 
 
+class TargetingMode(models.TextChoices):
+    """Which segmentation a campaign's audience was chosen from.
+
+    Two vocabularies exist in this module's history and both must stay
+    readable, so a campaign declares which one it uses instead of the code
+    guessing from the stored labels:
+
+    * `LEGACY_RFM` - the previous rule-based segments (`target_segments` /
+      `target_tags`). The default, so every campaign row written before the
+      K-Means switch keeps its original meaning and audience untouched.
+    * `KMEANS` - one or more of the four K-Means++ clusters of a specific
+      persisted clustering run (`target_cluster_ids` + `clustering_run`), with
+      the buyers of those clusters materialized into `CampaignAudience` when
+      the campaign is published.
+    """
+    LEGACY_RFM = 'LEGACY_RFM', 'Rule-based RFM segment (legacy)'
+    KMEANS = 'KMEANS', 'K-Means cluster'
+
+
 class Campaign(models.Model):
     campaign_id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=200)
@@ -86,8 +112,23 @@ class Campaign(models.Model):
 
     # Targeting: JSON lists of segment labels / secondary tags. Empty target
     # segment list means the campaign targets no one and is never shown.
+    # These two are the LEGACY_RFM audience and are only ever read for a
+    # campaign whose `targeting_mode` is LEGACY_RFM.
     target_segments = models.JSONField(default=list, blank=True)
     target_tags = models.JSONField(default=list, blank=True)
+
+    # K-Means targeting (the current segmentation). `target_cluster_ids` are the
+    # numeric clusters selected from `clustering_run`, and `target_cluster_labels`
+    # is the business label each of those clusters carried *in that run* - stored
+    # so a later re-cluster (which may map a different label onto the same id)
+    # can never rename what an existing campaign was actually aimed at.
+    targeting_mode = models.CharField(max_length=20, choices=TargetingMode.choices,
+                                      default=TargetingMode.LEGACY_RFM)
+    target_cluster_ids = models.JSONField(default=list, blank=True)
+    target_cluster_labels = models.JSONField(default=list, blank=True)
+    clustering_run = models.ForeignKey('ClusteringRun', null=True, blank=True,
+                                       on_delete=models.SET_NULL,
+                                       related_name='campaigns')
 
     start_date = models.DateTimeField()
     end_date = models.DateTimeField()
@@ -117,8 +158,98 @@ class Campaign(models.Model):
                          name='campaign_live_window'),
         ]
 
+    @property
+    def targets_clusters(self):
+        """Is this campaign aimed at K-Means clusters rather than old segments?"""
+        return self.targeting_mode == TargetingMode.KMEANS
+
     def __str__(self):
         return f"{self.name} ({self.coupon_code})"
+
+
+class ClusteringRun(models.Model):
+    """Append-only history of every successfully completed K-Means++ run.
+
+    `KmeansRunState` is a singleton describing only the *latest* run, so a
+    campaign that references it would silently change meaning as soon as
+    clustering is re-run. This table keeps one row per completed run - the same
+    mapping the run persisted, plus which RFM version it clustered and when -
+    so a campaign's audience can always be traced to the exact run that produced
+    it and an older run's interpretation is never rewritten.
+
+    Rows are only ever added (by `clustering._store_run_state`); the one
+    exception is `relabel_stored_run`, which refreshes the business labels of the
+    newest row from its own stored profiles, exactly as it does for the
+    singleton. Deleting a row cannot affect a campaign (`SET_NULL`) and never
+    touches coupons or redemption history.
+    """
+    run_id = models.BigAutoField(primary_key=True)
+    algorithm = models.CharField(max_length=64, default='KMeans(k-means++)')
+    rfm_version = models.PositiveIntegerField(default=0)
+    n_clusters = models.PositiveIntegerField(default=0)
+    clustered = models.PositiveIntegerField(default=0)
+    # [{'cluster_id', 'category', 'customer_count', 'confidence', ...profile}]
+    mapping = models.JSONField(default=list, blank=True)
+    started_at = models.DateTimeField()
+    completed_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'rfm_kmeans_runs'
+        ordering = ['-run_id']
+
+    def __str__(self):
+        return f'Run #{self.run_id} on RFM v{self.rfm_version} ({self.clustered} buyers)'
+
+
+class CampaignAudience(models.Model):
+    """One row per (campaign, customer) coupon assignment.
+
+    A K-Means campaign's audience is *materialized* when the campaign is
+    published: every buyer in the selected clusters of the selected clustering
+    run gets exactly one row here, which is the coupon issued to them. That is
+    what freezes the audience - a future clustering run may move the buyer to
+    another cluster, but the campaign keeps the members it was actually issued
+    to, and the unique constraint makes a duplicate assignment impossible at the
+    database level rather than by convention.
+
+    Legacy (rule-based segment) campaigns never write here: their audience is
+    still decided from the customer's current segment, so nothing about an
+    already-published old campaign changes when this table is introduced.
+
+    Customer identity is a plain text key (like `CampaignRedemption`) because
+    `public.customers` is an unmanaged dataset table.
+    """
+    assignment_id = models.BigAutoField(primary_key=True)
+    campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE,
+                                 related_name='audience_assignments')
+    customer_id = models.CharField(max_length=255)
+    cluster_id = models.PositiveIntegerField()
+    cluster_label = models.CharField(max_length=40, blank=True, default='')
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'rfm_campaign_audience'
+        ordering = ['assignment_id']
+        constraints = [
+            # One coupon, one customer: publishing twice (or widening a live
+            # campaign to a cluster that overlaps it) can never issue a second
+            # coupon to the same buyer.
+            models.UniqueConstraint(
+                fields=['campaign', 'customer_id'],
+                name='unique_coupon_assignment_per_customer',
+            ),
+        ]
+        indexes = [
+            # A customer's offer list asks "which published campaigns hold me"
+            # in one query, for every campaign at once. The per-campaign count
+            # (coupons issued) is served by the unique constraint's own index,
+            # so only this reverse direction needs an index of its own.
+            models.Index(fields=['customer_id', 'campaign'],
+                         name='audience_customer_campaign'),
+        ]
+
+    def __str__(self):
+        return f"{self.customer_id} in campaign {self.campaign_id}"
 
 
 class CampaignRedemption(models.Model):
@@ -206,14 +337,17 @@ class CustomerSegment(models.Model):
     tags = models.JSONField(default=list, blank=True)
     # K-Means++ (k=4) clustering result over the *standardized* RFM features.
     # These two columns are completely independent of the rule-based `segment`
-    # above and are never consumed by CLV or campaign targeting: the cluster id
-    # is the raw numeric K-Means output (0-3, no business meaning) and the
-    # category is the business label mapped from that cluster's *unscaled* RFM
-    # profile. Both are nullable so a buyer that has not been clustered yet (or
-    # has no eligible RFM metrics) simply carries no value, and a clustering
-    # rerun overwrites the same row instead of adding a duplicate. The original
-    # recency/frequency/monetary columns above are left exactly as the RFM run
-    # wrote them - the standardized values used for clustering are never stored.
+    # above: the cluster id is the raw numeric K-Means output (0-3, no business
+    # meaning) and the category is the business label mapped from that cluster's
+    # *unscaled* RFM profile. Both are nullable so a buyer that has not been
+    # clustered yet (or has no eligible RFM metrics) simply carries no value, and
+    # a clustering rerun overwrites the same row instead of adding a duplicate.
+    # The original recency/frequency/monetary columns above are left exactly as
+    # the RFM run wrote them - the standardized values used for clustering are
+    # never stored. CLV still reads only the RFM columns; the cluster id is what
+    # K-Means campaign targeting resolves a customer's group from (see
+    # `cluster_targeting`), and publishing a campaign copies the assignment it
+    # used into `rfm_campaign_audience` so the campaign's own audience is frozen.
     kmeans_cluster_id = models.PositiveIntegerField(null=True, blank=True)
     kmeans_category = models.CharField(max_length=40, blank=True, default='')
     # Purchase-date bookends kept alongside the metrics so the paginated RFM
@@ -242,9 +376,13 @@ class CustomerSegment(models.Model):
             models.Index(fields=['segment', 'monetary'],
                          name='rfm_segment_by_monetary'),
             # K-Means cluster counts / profiles are aggregated by category and
-            # cluster id whenever the dashboard or a rerun reads them back.
+            # cluster id whenever the dashboard, a rerun or a campaign audience
+            # read them back. `kmeans_cluster_id` first, because every campaign
+            # targeting query filters and groups by the cluster alone.
             models.Index(fields=['kmeans_category', 'kmeans_cluster_id'],
                          name='rfm_kmeans_by_category'),
+            models.Index(fields=['kmeans_cluster_id', 'kmeans_category'],
+                         name='rfm_kmeans_by_cluster'),
         ]
 
     def __str__(self):
@@ -286,6 +424,12 @@ class KmeansRunState(models.Model):
     # Fitted scaler statistics {'mean': [...], 'scale': [...]} of the three
     # standardized features. Reporting only: never written to the RFM columns.
     scaler = models.JSONField(default=dict, blank=True)
+    # The append-only history row written for this same run. Campaigns reference
+    # that row (not this singleton), so a later clustering run can never change
+    # what an existing campaign points at; this pointer only lets a read of the
+    # latest run name the run it describes.
+    run = models.ForeignKey('ClusteringRun', null=True, blank=True,
+                            on_delete=models.SET_NULL, related_name='+')
     started_at = models.DateTimeField()
     completed_at = models.DateTimeField()
 
@@ -294,6 +438,37 @@ class KmeansRunState(models.Model):
 
     def __str__(self):
         return f'K-Means on RFM v{self.rfm_version} ({self.clustered} buyers)'
+
+
+class DashboardSnapshot(models.Model):
+    """One row per analysis version: the assembled dashboard aggregate.
+
+    The RFM page's first paint used to pay for a GROUPING SETS aggregation over
+    ~100k persisted buyer rows plus a count of the `customers` table whenever
+    the in-process cache was empty - which happens on every `runserver`
+    restart, because LocMemCache dies with the process and a remote Neon query
+    costs hundreds of milliseconds each. This row makes that expensive assembly
+    durable: it stores exactly the payload the dashboard reads, keyed by the
+    analysis version it was computed from and by the clustering run whose
+    labels it contains. A reader that matches both numbers takes this row
+    instead of re-running the aggregation; anything else (a new analysis, a
+    re-clustering) recomputes and overwrites the row. The numbers are the same
+    aggregates the live query would return, so caching never trades correctness
+    for speed - a snapshot for a superseded version is simply never served.
+    """
+    version = models.PositiveIntegerField(primary_key=True)
+    # The clustering run whose labels are baked into `payload`. A different (or
+    # later) run means the stored cluster counts are no longer current.
+    clustering_run_id = models.PositiveIntegerField(null=True, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    computed_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'rfm_dashboard_snapshot'
+        ordering = ['-version']
+
+    def __str__(self):
+        return f'Dashboard bundle v{self.version} (run {self.clustering_run_id})'
 
 
 class RfmAnalysisState(models.Model):

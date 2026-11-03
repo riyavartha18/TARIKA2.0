@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../auth/AuthContext';
 import {
-  getRfmSummary, getRfmSegmentCustomers, getRfmClusterCustomers,
+  getRfmSummary, getRfmAnalyticsDetail, getRfmSegmentCustomers,
+  getRfmClusterCustomers, peekRfmSummaryCache,
 } from '../../services/api';
 import { KMEANS_CATEGORY_META } from '../../data/rfmSegments';
 import { ArrowLeft, Search, Loader2, X } from 'lucide-react';
@@ -106,8 +107,9 @@ function Divider() {
 
 // Compact label + medium value metric (no icon, no card decoration). The value
 // counts up on load unless the user prefers reduced motion. `title` shows the
-// exact amount behind a compact display.
-function DarkMetric({ label, value, format, title }) {
+// exact amount behind a compact display. Memoized so a background refresh that
+// leaves a KPI unchanged never re-renders (and re-animates) it.
+const DarkMetric = memo(function DarkMetric({ label, value, format, title }) {
   const reduced = usePrefersReducedMotion();
   const animated = useCountUp(Number(value) || 0, { enabled: !reduced });
   const fmt = format || ((v) => Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 }));
@@ -117,13 +119,14 @@ function DarkMetric({ label, value, format, title }) {
       <div style={{ fontSize: '1.45rem', fontWeight: 650, color: DARK.value, lineHeight: 1.15, fontVariantNumeric: 'tabular-nums' }}>{fmt(animated)}</div>
     </div>
   );
-}
+});
 
 // One horizontal progress-bar row: category name left, "count (pct%)" right,
 // rose fill underneath that animates to the cluster's share of the clustered
 // buyers on load and transitions smoothly when the data refreshes. Clicking
-// opens that cluster's actual customers.
-function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0, caution = false }) {
+// opens that cluster's actual customers. Memoized: the bars depend only on their
+// own numbers, so a poll that changes nothing re-renders nothing.
+const SegmentBar = memo(function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0, caution = false }) {
   const reduced = usePrefersReducedMotion();
   const target = Math.min(100, Math.max(0, pct));
   const [width, setWidth] = useState(reduced ? target : 0);
@@ -167,20 +170,27 @@ function SegmentBar({ label, count, pct, onClick, color = DARK.bar, index = 0, c
       </div>
     </button>
   );
-}
+});
 
 export default function AdminRFMView({ onBack }) {
   const { token } = useAuth();
-  const [summary, setSummary] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // The client-side payload the Analysis overview already fetched: when it is
+  // there, the dashboard paints it immediately and refreshes in background, so
+  // opening the page from the card costs no wait at all.
+  const [summary, setSummary] = useState(() => peekRfmSummaryCache(token));
+  const [loading, setLoading] = useState(() => !peekRfmSummaryCache(token));
   const [error, setError] = useState(null);
+  // The heavier analytics (profiles, confidence, ambiguity report, run state,
+  // legacy segment mix) arrive on their own request, after the first paint.
+  const [analytics, setAnalytics] = useState(null);
   // The K-Means cluster whose actual customers are open, and (for the two
   // independent secondary-insight rows) the legacy label being listed.
   const [activeCluster, setActiveCluster] = useState(null);
   const [activeInsight, setActiveInsight] = useState(null);
 
-  const loadSummary = useCallback(async () => {
-    const res = await getRfmSummary(token);
+  const loadSummary = useCallback(async ({ force = false } = {}) => {
+    // Deduplicated + briefly cached in the API layer; a poll forces a real read.
+    const res = await getRfmSummary(token, { force });
     if (res.success) { setSummary(res); setError(null); return res; }
     setError(res.error);
     return null;
@@ -188,21 +198,48 @@ export default function AdminRFMView({ onBack }) {
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    loadSummary().then(() => { if (alive) setLoading(false); });
+    if (!summary) setLoading(true);
+    loadSummary().then((res) => { if (alive && res) setLoading(false); });
     return () => { alive = false; };
-  }, [loadSummary]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount + token only
+  }, [token]);
 
   // Reading the summary endpoint also nudges the backend to auto-refresh, so
-  // there is no Run button. Poll only while a completed snapshot is pending.
+  // there is no Run button. Poll only while a completed snapshot is pending,
+  // and force a genuine read so the poll can actually observe it finishing.
   useEffect(() => {
     const needsPoll = !summary?.available || summary?.refreshing;
     if (!needsPoll) return undefined;
-    const timer = setInterval(loadSummary, 3000);
+    const timer = setInterval(() => loadSummary({ force: true }), 3000);
     return () => clearInterval(timer);
   }, [summary, loadSummary]);
 
-  if (loading) {
+  // Second paint: the detailed analytics are loaded once the page is on screen
+  // (idle callback when available), from the same server-side cached aggregate.
+  const analyticsLoaded = Boolean(analytics);
+  const hasData = Boolean(summary?.available);
+  useEffect(() => {
+    if (!hasData || analyticsLoaded) return undefined;
+    let alive = true;
+    const run = () => {
+      getRfmAnalyticsDetail(token).then((res) => {
+        if (alive && res.success) setAnalytics(res);
+      });
+    };
+    const idle = typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function';
+    const handle = idle
+      ? window.requestIdleCallback(run, { timeout: 2000 })
+      : setTimeout(run, 0);
+    return () => {
+      alive = false;
+      if (idle) window.cancelIdleCallback?.(handle);
+      else clearTimeout(handle);
+    };
+  }, [hasData, analyticsLoaded, token]);
+
+  // Only a page with nothing to show waits: when the overview already delivered
+  // a payload, it is painted now and refreshed behind the screen.
+  if (loading && !summary) {
     return (
       <div style={{ backgroundColor: DARK.bg, borderRadius: 20, border: `1px solid ${PALETTE.border}`, boxShadow: '0 8px 30px rgba(31, 25, 27, 0.04)', padding: '3rem', textAlign: 'center' }}>
         <Loader2 size={26} color={PALETTE.roseDeep} style={{ animation: 'spin 0.8s linear infinite' }} />
@@ -219,6 +256,12 @@ export default function AdminRFMView({ onBack }) {
   const avgFrequency = buyers ? (orders / buyers) : 0;
   const pctOfBuyers = (n) => Math.round((Number(n || 0) / buyers) * 100);
   const pctOfCustomers = (n) => Math.round((Number(n || 0) / customers) * 100);
+  // The full per-cluster records (profiles, cautions, confidence) come from the
+  // lazily loaded analytics, matched by cluster id; before they arrive the bars
+  // are already correct, since counts and labels came with the summary.
+  const detailClusters = analytics?.kmeans?.clusters || [];
+  const detailFor = (cluster) => detailClusters.find(
+    (c) => c.cluster_id === cluster.cluster_id) || cluster;
 
   return (
     <div style={{ backgroundColor: DARK.bg, borderRadius: 20, padding: '1.6rem 1.8rem', color: DARK.text, border: `1px solid ${PALETTE.border}`, boxShadow: '0 8px 30px rgba(31, 25, 27, 0.04)' }}>
@@ -291,9 +334,9 @@ export default function AdminRFMView({ onBack }) {
                 </p>
               );
             }
-            const state = kmeans.state || {};
-            const stamp = formatStamp(state.completed_at);
-            const basis = Number(kmeans.total || buyers);
+            const ambiguities = analytics?.kmeans?.ambiguities || [];
+            const unsupported = analytics?.kmeans?.unsupported_categories || [];
+            const stamp = formatStamp(analytics?.kmeans?.state?.completed_at);
             return (
               <>
                 {clusters.map((c, i) => (
@@ -305,20 +348,25 @@ export default function AdminRFMView({ onBack }) {
                     pct={c.percent ?? pctOfBuyers(c.customer_count)}
                     color={(KMEANS_CATEGORY_META[c.category] || {}).color || DARK.barSecondary}
                     caution={c.supported === false}
-                    onClick={() => setActiveCluster(c)}
+                    onClick={() => setActiveCluster(detailFor(c))}
                   />
                 ))}
-                
-                {kmeans.unsupported_categories?.length > 0 && (
+
+                {unsupported.length > 0 && (
                   <p style={{ margin: '0.4rem 0 0', fontSize: '0.74rem', color: '#9E8F94' }}>
-                    No cluster maps onto: {kmeans.unsupported_categories.join(', ')}
+                    No cluster maps onto: {unsupported.join(', ')}
                   </p>
                 )}
-                {kmeans.ambiguities?.length > 0 && (
+                {stamp && (
+                  <p style={{ margin: '0.45rem 0 0', fontSize: '0.72rem', color: '#9E8F94' }}>
+                    Last clustered {stamp} — the page reads that stored result, it does not re-run K-Means.
+                  </p>
+                )}
+                {ambiguities.length > 0 && (
                   <div style={{ marginTop: '0.6rem', fontSize: '0.76rem', color: '#6B5E63', backgroundColor: 'rgba(176,138,46,0.08)', border: '1px solid rgba(176,138,46,0.25)', borderRadius: 10, padding: '0.6rem 0.75rem' }}>
                     <div style={{ fontWeight: 700, marginBottom: 3, color: '#8A5A00' }}>What the data does not support</div>
                     <ul style={{ margin: 0, paddingLeft: '1rem', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {kmeans.ambiguities.map((text) => (<li key={text}>{text}</li>))}
+                      {ambiguities.map((text) => (<li key={text}>{text}</li>))}
                     </ul>
                   </div>
                 )}

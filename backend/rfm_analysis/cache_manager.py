@@ -242,6 +242,19 @@ def release_run_lock():
     cache.delete(utils.RFM_RUN_LOCK_KEY)
 
 
+def try_freshness_nudge():
+    """Return True once per cooldown window when a freshness check may be run.
+
+    The dashboard read path must not turn every page open into a database state
+    read plus a refresh decision; this rate limits the background nudge the same
+    way the offer self-heal does, on its own key so it never blocks an explicit
+    admin "recalculate" request.
+    """
+    return cache.add(utils.RFM_FRESHNESS_NUDGE_KEY,
+                     1,
+                     utils.RFM_FRESHNESS_NUDGE_SECONDS)
+
+
 def get_campaign_epoch():
     """Monotonic counter identifying the current campaign configuration.
 
@@ -356,6 +369,11 @@ def set_never_purchased(version, rows):
 # never a stale segment mix or a stale clustering. A warm dashboard render is a
 # pure cache read (zero database round trips), which is what removes the ~250 ms
 # per-query remote-Neon latency from every page load once the bundle is cached.
+# A further per-process memo of the bundle was deliberately NOT added: the epoch
+# counter lives in this same cache and restarts at 1 after a clear, so an
+# in-process copy could be matched to a reused epoch and served superseded
+# numbers. One LocMem read of a small aggregate payload is microseconds, and the
+# durable `dashboard_cache` snapshot covers the cold-process case instead.
 def dashboard_bundle_key(version, kmeans_epoch):
     return f'rfm:dashboard_bundle:{version}:{kmeans_epoch}'
 
@@ -371,6 +389,15 @@ def set_dashboard_bundle(version, kmeans_epoch, payload):
         return
     cache.set(dashboard_bundle_key(version, kmeans_epoch), payload,
               utils.SNAPSHOT_TTL_SECONDS)
+
+
+def delete_dashboard_bundle(version):
+    """Drop this cache's copy of a version's bundle."""
+    if version is None:
+        # LocMemCache/Redis cannot enumerate keys by pattern; a clustering run
+        # already made every old key unreachable by bumping the epoch.
+        return
+    cache.delete(dashboard_bundle_key(version, get_kmeans_epoch()))
 
 
 # The single-row analysis state (version / dates / buyer_count) that every

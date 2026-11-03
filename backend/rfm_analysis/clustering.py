@@ -49,7 +49,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 from . import utils
-from .models import CustomerSegment, KmeansRunState
+from .models import ClusteringRun, CustomerSegment, KmeansRunState
 
 logger = logging.getLogger(__name__)
 
@@ -488,9 +488,25 @@ def _persist_orm(pairs):
 
 
 def _store_run_state(result, started_at):
-    """Persist (and memoize) the single row describing this clustering run."""
+    """Persist (and memoize) the single row describing this clustering run.
+
+    Also appends a `ClusteringRun` history row for the same run. The singleton
+    is always overwritten by the next clustering, so a campaign that referenced
+    it would silently change audience meaning as soon as K-Means is re-run;
+    campaigns reference the immutable history row instead.
+    """
     from . import cache_manager, segment_store
 
+    clusters = result['clusters']
+    run = ClusteringRun.objects.create(
+        algorithm=result['algorithm'],
+        rfm_version=result['rfm_version'],
+        n_clusters=result['effective_clusters'],
+        clustered=result['clustered'],
+        mapping=clusters,
+        started_at=started_at,
+        completed_at=utils.utcnow(),
+    )
     state = KmeansRunState.objects.update_or_create(
         id=KmeansRunState.SINGLETON_ID,
         defaults={
@@ -498,20 +514,30 @@ def _store_run_state(result, started_at):
             'rfm_version': result['rfm_version'],
             'n_clusters': result['effective_clusters'],
             'clustered': result['clustered'],
-            'mapping': result['clusters'],
+            'mapping': clusters,
             'unsupported_categories': result['unsupported_categories'],
             'scaler': result.get('scaler') or {},
+            'run': run,
             'started_at': started_at,
-            'completed_at': utils.utcnow(),
+            'completed_at': run.completed_at,
         })[0]
     cache_manager.set_kmeans_state_memo(_state_payload(state))
     cache_manager.bump_kmeans_epoch()
+    # The dashboard bundle carries the cluster counts, so a completed clustering
+    # also refreshes it: the next RFM page open reads the aggregate this run just
+    # produced from cache instead of running it again for the first visitor.
+    from . import dashboard_cache
+    dashboard_cache.warm(state.rfm_version, run_id=run.run_id)
     return state
 
 
 def _state_payload(state):
     return {
         'algorithm': state.algorithm,
+        # The history row of the run this state describes (None for a run that
+        # predates campaign cluster targeting; the singleton itself still holds
+        # every value needed to explain the labels).
+        'run_id': state.run_id,
         'rfm_version': state.rfm_version,
         'n_clusters': state.n_clusters,
         'clustered': state.clustered,
@@ -537,6 +563,68 @@ def get_run_state():
     payload = _state_payload(state)
     cache_manager.set_kmeans_state_memo(payload)
     return payload
+
+
+def latest_run():
+    """The newest completed `ClusteringRun` history row, or None.
+
+    This is the run a *new* campaign must be aimed at: it carries the cluster
+    ids and the business labels exactly as the persisted buyer assignments were
+    written, and it never changes once written. Campaigns store a reference to
+    this row, so a later clustering run creates a new row instead of moving the
+    ground under a published campaign.
+    """
+    return ClusteringRun.objects.order_by('-run_id').first()
+
+
+def ensure_run_history():
+    """The newest history row, derived from the stored state when none exists.
+
+    A clustering run persisted before campaign cluster targeting only wrote the
+    singleton row. That singleton describes the run completely - the same stored
+    mapping, the same RFM version and timestamps - so one history row is
+    derived from it, which lets a campaign created now still name the run its
+    audience came from. Nothing is re-clustered, no buyer moves, and the call is
+    idempotent.
+    """
+    from . import cache_manager
+
+    run = latest_run()
+    if run is not None:
+        return run
+    state = KmeansRunState.objects.filter(pk=KmeansRunState.SINGLETON_ID).first()
+    if state is None:
+        return None
+    run = ClusteringRun.objects.create(
+        algorithm=state.algorithm,
+        rfm_version=state.rfm_version,
+        n_clusters=state.n_clusters,
+        clustered=state.clustered,
+        mapping=state.mapping or [],
+        started_at=state.started_at,
+        completed_at=state.completed_at,
+    )
+    if state.run_id is None:
+        state.run = run
+        state.save(update_fields=['run'])
+        cache_manager.set_kmeans_state_memo(_state_payload(state))
+    return run
+
+
+def run_view(run):
+    """Serializable description of one clustering run (for campaign displays)."""
+    if run is None:
+        return None
+    return {
+        'run_id': run.run_id,
+        'algorithm': run.algorithm,
+        'rfm_version': run.rfm_version,
+        'n_clusters': run.n_clusters,
+        'clustered': run.clustered,
+        'started_at': run.started_at.isoformat() if run.started_at else None,
+        'completed_at': (run.completed_at.isoformat()
+                         if run.completed_at else None),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +824,9 @@ def _state_view(state, denominator):
     current_version = (segment_store.get_cached_state() or {}).get('version')
     return {
         'algorithm': state.get('algorithm'),
+        # Which stored clustering run these labels came from, so a page can name
+        # it (and a campaign page can prove it aimed at the latest one).
+        'run_id': state.get('run_id'),
         'rfm_version': state.get('rfm_version'),
         'current_rfm_version': current_version,
         'clustered': state.get('clustered'),
@@ -893,9 +984,22 @@ def relabel_stored_run():
         state.mapping = new_rows
         state.unsupported_categories = unsupported
         state.save()
+        # Keep the history row of this same run in step with the singleton, so
+        # campaign authoring offers the refreshed labels for the run a new
+        # campaign will be aimed at. Older history rows are never rewritten:
+        # they document what each existing campaign was actually published on.
+        run = state.run or ClusteringRun.objects.order_by('-run_id').first()
+        if run is not None:
+            run.mapping = new_rows
+            run.save(update_fields=['mapping'])
 
     cache_manager.set_kmeans_state_memo(_state_payload(state))
     cache_manager.bump_kmeans_epoch()
+    # The stored bundle was aggregated with the old label strings, and the
+    # clustering run id has not changed, so it must be dropped: the next read
+    # re-aggregates the same numbers under the corrected labels.
+    from . import dashboard_cache
+    dashboard_cache.invalidate(state.rfm_version)
 
     return {
         'relabelled': True,
@@ -909,17 +1013,12 @@ def reconcile_stored_labels():
     """Self-heal a persisted run whose stored labels predate the current set.
 
     Called from the dashboard read paths. Cheap and idempotent: it inspects the
-    single run-state row and only rewrites labels when they are not already the
-    current four categories (i.e. a legacy run). It never re-runs K-Means and
-    never touches a buyer's cluster assignment. Returns True when it changed
-    something.
+    memoized run state (the same read the page needs anyway, so no extra query)
+    and only rewrites labels when they are not already the current four
+    categories (i.e. a legacy run). It never re-runs K-Means and never touches a
+    buyer's cluster assignment. Returns True when it changed something.
     """
-    from . import cache_manager
-
-    state = cache_manager.get_kmeans_state_memo()
-    if not isinstance(state, dict) or 'rfm_version' not in state:
-        row = KmeansRunState.objects.filter(pk=KmeansRunState.SINGLETON_ID).first()
-        state = _state_payload(row) if row else None
+    state = get_run_state()
     if state is None or labels_are_current(state):
         return False
     return bool(relabel_stored_run())

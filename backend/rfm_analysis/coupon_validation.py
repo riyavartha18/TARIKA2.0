@@ -6,16 +6,18 @@ Validation is a strict chain and the first failed check returns a clear reason:
 1. The coupon exists.
 2. Its campaign is PUBLISHED.
 3. It is within its validity dates (a lapsed campaign is refused).
-4. The authenticated customer currently has a segment.
-5. That segment/tags match the campaign's targeting.
-6. The cart meets the minimum order amount.
-7. This customer has not already redeemed this coupon (one use per customer).
-8. The customer/global usage limits of the campaign are not exhausted.
+4. The authenticated customer belongs to the campaign's audience - its issued
+   coupon assignments for a K-Means campaign, the customer's current
+   segment/tags for a historical rule-segment campaign.
+5. The cart meets the minimum order amount.
+6. This customer has not already redeemed this coupon (one use per customer).
+7. The customer/global usage limits of the campaign are not exhausted.
 
 The benefit itself (discount, cashback, free shipping, gift - including every
 Buy & Get rule) is computed by `benefits.py` from the server-side cart lines
 when they are available, and from the cart value alone for simple percentage/
-fixed offers.
+fixed offers. Discount, expiry, minimum-order, usage-limit and redemption rules
+are identical for both audience kinds; only step 4 differs.
 
 A coupon is only *consumed* when `redeem()` books a row, which the checkout
 service does inside the same transaction that writes the order rows: a failed
@@ -76,26 +78,39 @@ def validate_coupon(customer_id, coupon_code, cart_value, cart_lines=None):
     if campaign.start_date > now:
         raise ValidationError({'coupon_code': 'This offer has not started yet.'})
 
-    segment, tags, _record, version = personalization.get_customer_segment(customer_id)
-    if not segment and version is None:
-        # No completed analysis in this process yet (e.g. a restarted server,
-        # since the snapshot is cache-only). Ask for a run and ask the customer
-        # to retry, rather than rejecting a coupon they are actually eligible
-        # for. The run lock keeps concurrent requests from stacking up.
-        from . import cache_manager, engine
-        if cache_manager.try_offer_self_heal():
-            engine.ensure_latest()
-        raise ValidationError({
-            'coupon_code': 'Your offers are being refreshed. Please try again in a minute.'
-        })
-    if not segment:
-        raise ValidationError({'coupon_code': NOT_AVAILABLE})
-
     from . import campaign_engine
-    if not campaign_engine.matches_customer(campaign, segment, tags):
-        # Also covers someone typing another segment's code by hand: eligibility
-        # is always decided from the server-side segment, never from the input.
-        raise ValidationError({'coupon_code': NOT_AVAILABLE})
+    if campaign.targets_clusters:
+        # Eligibility is the coupon this customer was issued, not a live RFM
+        # rule: the audience was frozen when the campaign was published, so a
+        # later clustering (or even a later RFM run) cannot move a customer out
+        # of a campaign they already hold a coupon for - or into one they do not.
+        if not campaign_engine.is_eligible(campaign, customer_id, None, None):
+            raise ValidationError({'coupon_code': NOT_AVAILABLE})
+    else:
+        if not campaign_engine.legacy_reachable():
+            # A campaign from the previous rule-based segmentation: its segment
+            # names are not this customer's K-Means group, so it is not theirs to
+            # use. Nothing is deleted - the campaign and its history stay.
+            raise ValidationError({'coupon_code': NOT_AVAILABLE})
+        segment, tags, _record, version = personalization.get_customer_segment(customer_id)
+        if not segment and version is None:
+            # No completed analysis in this process yet (e.g. a restarted server,
+            # since the snapshot is cache-only). Ask for a run and ask the customer
+            # to retry, rather than rejecting a coupon they are actually eligible
+            # for. The run lock keeps concurrent requests from stacking up.
+            from . import cache_manager, engine
+            if cache_manager.try_offer_self_heal():
+                engine.ensure_latest()
+            raise ValidationError({
+                'coupon_code': 'Your offers are being refreshed. Please try again in a minute.'
+            })
+        if not segment:
+            raise ValidationError({'coupon_code': NOT_AVAILABLE})
+        if not campaign_engine.matches_customer(campaign, segment, tags):
+            # Also covers someone typing another segment's code by hand:
+            # eligibility is always decided from the server-side segment, never
+            # from the input.
+            raise ValidationError({'coupon_code': NOT_AVAILABLE})
 
     # One customer, one redemption per coupon - whatever the usage type says.
     if _customer_usage_count(campaign, customer_id) >= 1:

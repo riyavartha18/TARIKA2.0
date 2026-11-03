@@ -1,9 +1,11 @@
 """Rule-based personalization: match a customer to their eligible offers.
 
 The customer's identity always comes from the authenticated session (never a
-frontend-supplied id), their segment is read from the latest *successfully
-completed* snapshot, and eligibility is decided purely against persisted, admin-
-published campaigns. Nothing here auto-creates or auto-publishes anything.
+frontend-supplied id), and eligibility is decided purely against persisted,
+admin-published campaigns: a K-Means campaign by the coupon assignments it was
+published with, the historical rule-segment campaigns by the segment read from
+the latest *successfully completed* analysis. Nothing here auto-creates or
+auto-publishes anything.
 
 If no completed analysis exists yet, a customer simply has no segment and so
 sees no personalized offers; the code never fabricates a segment or falls back
@@ -121,6 +123,12 @@ def _offer_payload(campaign, redemption=None, now=None):
         'end_date': campaign.end_date.isoformat(),
         'target_segments': campaign.target_segments,
         'target_tags': campaign.target_tags,
+        # Which segmentation this offer was aimed at, and - for a K-Means offer -
+        # the four-label group it belongs to. Displayed as the offer's own
+        # wording, never as an internal RFM term.
+        'targeting_mode': campaign.targeting_mode,
+        'target_cluster_ids': campaign.target_cluster_ids,
+        'target_cluster_labels': campaign.target_cluster_labels,
         # Redemption state, decided from the audit table (never from the
         # frontend): AVAILABLE / USED / EXPIRED.
         'status': offer_status(campaign, redemption, now),
@@ -142,12 +150,13 @@ def offer_status(campaign, redemption=None, now=None):
 def eligible_offers(customer_id):
     """Every visible, personalized offer for this authenticated customer.
 
-    The list is exactly the campaigns that target the customer's current
-    segment and are live right now, plus the ones this customer has already
-    redeemed (a Used offer stays visible, it never becomes redeemable again and
-    its row is never deleted). Paused and draft campaigns stay hidden, and a
-    campaign of another segment is never included - not even one the customer
-    happened to redeem before their segment changed.
+    The list is exactly the campaigns whose audience contains this customer and
+    that are live right now, plus the ones this customer has already redeemed (a
+    Used offer stays visible, it never becomes redeemable again and its row is
+    never deleted). Paused and draft campaigns stay hidden, and a campaign of
+    another audience is never included - neither a K-Means campaign the customer
+    was not issued a coupon by, nor a legacy campaign of a segment the customer
+    does not belong to.
 
     Still-usable offers come first (newest campaign first), so every customer
     surface - the home feature, Your Offers and Member Privileges - leads with
@@ -172,9 +181,7 @@ def eligible_offers(customer_id):
         return {'version': version, 'segment': None, 'tags': [], 'offers': [],
                 'syncing': False}
 
-    live = [campaign
-            for campaign in campaign_engine.fetch_published_campaigns()
-            if campaign_engine.matches_customer(campaign, segment, tags)]
+    live = campaign_engine.live_campaigns_for(customer_id, segment, tags)
     live_ids = {campaign.campaign_id for campaign in live}
 
     # Redemptions decide the Used state, and also keep a campaign visible after
@@ -186,7 +193,8 @@ def eligible_offers(customer_id):
                 .select_related('campaign')
                 .order_by('redemption_id')):
         campaign = row.campaign
-        if not campaign or not campaign_engine.matches_customer(campaign, segment, tags):
+        if not campaign or not campaign_engine.is_eligible(
+                campaign, customer_id, segment, tags):
             continue
         redemptions[campaign.campaign_id] = {
             'campaign_id': campaign.campaign_id,

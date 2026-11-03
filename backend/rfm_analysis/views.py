@@ -8,6 +8,7 @@ search, sorting and pagination, so the browser never receives all ~100k rows.
 """
 
 import logging
+import time
 
 from django.db import DatabaseError, connection
 from django.db.models import Q
@@ -23,8 +24,10 @@ from cart.models import CartItem
 from cart.services import CustomerResolver
 from catalog.pricing import get_product_selling_price_map
 
-from . import (cache_manager, clustering, campaign_audience, coupon_validation,
-               engine, personalization, queries, segment_store, utils)
+from . import (cache_manager, campaign_engine, campaign_publishing,
+               cluster_targeting, clustering, campaign_audience,
+               coupon_validation, dashboard_cache, engine, personalization,
+               queries, segment_store, utils)
 from .models import Campaign, CampaignStatus, CustomerSegment
 from .serializers import CampaignSerializer
 
@@ -178,21 +181,68 @@ class RfmRunView(AdminRFMView):
                         status=status.HTTP_200_OK)
 
 
-class RfmSummaryView(AdminRFMView):
-    """GET /api/analytics/rfm/summary -> aggregate KPIs and segment cards.
+def _kmeans_compact(kmeans):
+    """Only the fields the dashboard paints immediately, never the profiles.
 
-    Served from the *persisted* RFM result table via SQL aggregation, so the
-    page shows the latest completed analysis immediately - even right after a
-    restart, and without waiting for (or triggering inline) the expensive order
-    scan. A background refresh keeps the table current (Section 2) and is
-    nudged by `ensure_latest`, but the response never blocks on it: a run in
-    flight simply means `refreshing=True` while the last completed results are
-    shown. The assembled aggregate is cached per analysis version, so repeated
-    opens are a pure in-process cache read.
+    The bars need label, count, share and whether the label is supported. The
+    per-cluster unscaled profiles, the confidence, the run bookkeeping and the
+    ambiguity report are the *detailed* analytics, served by
+    `RfmAnalyticsDetailView` after the first paint.
+    """
+    keep = ('cluster_id', 'category', 'customer_count', 'percent', 'supported',
+            'cautions')
+    return {
+        'available': kmeans['available'],
+        'clustered': kmeans['clustered'],
+        'total': kmeans['total'],
+        'clusters': [{key: cluster.get(key) for key in keep} for cluster in kmeans['clusters']],
+    }
+
+
+def _dashboard_bundle(version):
+    """The dashboard aggregate, from the fastest place that has it.
+
+    In-process cache -> durable per-version snapshot -> one grouped SQL pass
+    (which then refreshes both caches). `timing` records which one answered and
+    how long the query cost, so the measured numbers are in the API response
+    rather than assumed: a warm read performs no database query at all.
+    """
+    started = time.perf_counter()
+    run_id = dashboard_cache.current_clustering_run_id()
+    bundle, source = dashboard_cache.load(version, run_id)
+    lookup_ms = round((time.perf_counter() - started) * 1000, 2)
+    if bundle is not None:
+        return bundle, {'bundle_source': source, 'lookup_ms': lookup_ms, 'query_ms': 0}
+    try:
+        bundle, timing = dashboard_cache.build(version=version, run_id=run_id)
+    except DatabaseError:
+        raise
+    timing['bundle_source'] = 'query'
+    timing['lookup_ms'] = lookup_ms
+    return bundle, timing
+
+
+class RfmSummaryView(AdminRFMView):
+    """GET /api/analytics/rfm/summary -> the KPIs and the four cluster bars.
+
+    This is the fast path: everything comes from the *persisted* RFM result
+    table's already-assembled aggregate (in-process cache, then the durable
+    per-version snapshot, and only then one grouped SQL statement which is
+    cached for everyone after it). K-Means is never fitted here - the page reads
+    the stored assignment of the latest completed clustering run - and no
+    customer rows are loaded, aggregated or shipped by this endpoint.
+
+    The freshness check runs on a background thread (`engine.nudge_latest`), so
+    opening the page never waits on a state read: it always shows the latest
+    successfully completed analysis immediately and reports `refreshing` when a
+    run is genuinely in flight. The heavier analytics (cluster profiles, run
+    bookkeeping, ambiguity report, segment distribution) are a separate lazy
+    call, and the customer lists are server-side paginated elsewhere.
     """
 
     def get(self, request):
-        freshness = engine.ensure_latest()
+        started = time.perf_counter()
+        freshness = engine.nudge_latest()
         # A clustering run persisted before the current four-category vocabulary
         # would otherwise still show its old label strings (the chart aggregates
         # the persisted `kmeans_category`). Re-derive them from the run's stored
@@ -208,29 +258,23 @@ class RfmSummaryView(AdminRFMView):
                 'available': False,
                 'refreshing': True,
                 'run_status': freshness['run_status'],
-                'kmeans': clustering.summarize_clusters([], state=None),
+                'kmeans': _kmeans_compact(clustering.summarize_clusters([], state=None)),
                 'message': 'Preparing the RFM analysis. This runs automatically in the background.',
             }, status=status.HTTP_200_OK)
 
         version = state['version']
-        kmeans_epoch = cache_manager.get_kmeans_epoch()
-        # One cached bundle carries totals + segment distribution + K-Means
-        # clusters (assembled from a single aggregate query) plus the customer
-        # count, keyed by (version, clustering epoch). Warm reads are pure
-        # cache; only a new run or a re-clustering recomputes it.
-        bundle = cache_manager.get_dashboard_bundle(version, kmeans_epoch)
-        if bundle is None:
-            try:
-                bundle = queries.fetch_dashboard_bundle()
-                bundle['total_customers'] = queries.fetch_total_customers()
-            except DatabaseError as exc:
-                return _safe_db_error(request, exc)
-            cache_manager.set_dashboard_bundle(version, kmeans_epoch, bundle)
+        try:
+            bundle, timing = _dashboard_bundle(version)
+        except DatabaseError as exc:
+            return _safe_db_error(request, exc)
 
         totals = bundle['totals']
         buyer_count = totals['buyer_count'] or 0
         total_customers = bundle['total_customers']
         never_purchased = max(total_customers - buyer_count, 0)
+        kmeans = clustering.summarize_clusters(bundle['kmeans_clusters'],
+                                               total=buyer_count)
+        timing['assemble_ms'] = round((time.perf_counter() - started) * 1000, 2)
 
         return Response({
             'available': True,
@@ -238,8 +282,10 @@ class RfmSummaryView(AdminRFMView):
             'analysis_date': state['analysis_date'],
             'computed_at': state['completed_at'],
             'refreshing': freshness['refreshing'],
+            'nudging': freshness.get('nudging', False),
             'run_status': cache_manager.get_run_status(),
-            'source': 'persisted_results',
+            'source': 'cached_aggregate' if timing['bundle_source'] != 'query' else 'persisted_results',
+            'timing': timing,
             'totals': {
                 'total_customers': total_customers,
                 'total_eligible_buyers': buyer_count,
@@ -249,14 +295,50 @@ class RfmSummaryView(AdminRFMView):
             },
             'buyer_count': buyer_count,
             'big_spender_count': totals['big_spender_count'] or 0,
-            # K-Means++ (k=4) is the RFM page's segmentation: four business
-            # categories mapped from each cluster's unscaled RFM profile, with
-            # the counts, percentages, confidence and profile check merged from
-            # the stored clustering run. The old rule-based distribution is not
-            # served here any more - the persisted `segment` column survives only
-            # as the internal label CLV and campaign targeting read per buyer.
-            'kmeans': clustering.summarize_clusters(
-                bundle['kmeans_clusters'], total=buyer_count),
+            # K-Means++ (k=4) is the RFM page's segmentation: the four business
+            # categories of the stored clustering run, with their counts and
+            # shares. The old rule-based distribution is not served here any more
+            # - the persisted `segment` column survives only as the internal label
+            # CLV reads and as the audience definition of the campaigns that were
+            # published against it before the Campaign page moved to clusters.
+            'kmeans': _kmeans_compact(kmeans),
+        }, status=status.HTTP_200_OK)
+
+
+class RfmAnalyticsDetailView(AdminRFMView):
+    """GET /api/analytics/rfm/analytics -> the heavy analytics, loaded lazily.
+
+    The first paint only needs the KPIs and the four bars; the profile detail
+    behind each label (unscaled Recency / Frequency / Monetary, medians, tenure,
+    one-time-buyer share, mapping confidence), the honesty report, the run
+    bookkeeping and the legacy segment distribution are read by the page after
+    it has rendered, from the same cached bundle. So this costs no additional
+    database query on a warm cache and never delays what the admin sees first.
+    """
+
+    def get(self, request):
+        clustering.reconcile_stored_labels()
+        state = segment_store.get_cached_state()
+        if state is None:
+            return Response({'available': False, 'refreshing': True,
+                             'message': 'Preparing the RFM analysis.'},
+                            status=status.HTTP_200_OK)
+        version = state['version']
+        try:
+            bundle, timing = _dashboard_bundle(version)
+        except DatabaseError as exc:
+            return _safe_db_error(request, exc)
+        buyer_count = bundle['totals']['buyer_count'] or 0
+        kmeans = clustering.summarize_clusters(bundle['kmeans_clusters'],
+                                              total=buyer_count)
+        return Response({
+            'available': True,
+            'version': version,
+            'buyer_count': buyer_count,
+            'big_spender_count': bundle['totals']['big_spender_count'] or 0,
+            'timing': timing,
+            'distribution': bundle['distribution'],
+            'kmeans': kmeans,
         }, status=status.HTTP_200_OK)
 
 
@@ -398,15 +480,10 @@ class RfmSegmentsView(AdminRFMView):
         # so opening the segments endpoint after the dashboard is a pure cache
         # read with no database round trip.
         version = state['version']
-        kmeans_epoch = cache_manager.get_kmeans_epoch()
-        bundle = cache_manager.get_dashboard_bundle(version, kmeans_epoch)
-        if bundle is None:
-            try:
-                bundle = queries.fetch_dashboard_bundle()
-                bundle['total_customers'] = queries.fetch_total_customers()
-            except DatabaseError as exc:
-                return _safe_db_error(request, exc)
-            cache_manager.set_dashboard_bundle(version, kmeans_epoch, bundle)
+        try:
+            bundle, _timing = _dashboard_bundle(version)
+        except DatabaseError as exc:
+            return _safe_db_error(request, exc)
 
         counts = {row['segment']: row['count'] for row in bundle['distribution']}
         return Response({
@@ -660,13 +737,48 @@ class RfmIncrementalRefreshView(AdminRFMView):
                         status=status.HTTP_200_OK)
 
 
+def _campaign_payload(campaign, detailed=False):
+    """One campaign as the admin page reads it, plus its audience and coupons.
+
+    `detailed` adds the per-cluster breakdown and the full clustering-run
+    description; a list page leaves it off so it stays two counted queries for
+    the whole page instead of a handful per row.
+    """
+    data = CampaignSerializer(campaign, context={'include_audience': detailed}).data
+    data['eligible_audience_count'] = campaign_audience.campaign_audience_count(
+        campaign)
+    data.update(campaign_audience.audience_summary(campaign))
+    return data
+
+
+class CampaignClusterOptionsView(AdminRFMView):
+    """GET /api/campaigns/clusters/ -> the customer groups a campaign may target.
+
+    The Campaign page asks this instead of the RFM dashboard so authoring reads
+    exactly the same numbers the dashboard shows: the four clusters of the
+    latest persisted K-Means++ run, each with its business label (never assumed
+    from the numeric id), how many customers are actually assigned to it and the
+    unscaled RFM profile that label was derived from - plus the run they come
+    from, which the campaign stores alongside its audience.
+    """
+
+    def get(self, request):
+        # A run persisted before the current label vocabulary would otherwise be
+        # offered with its old labels; heal them from the stored profiles first
+        # (no re-clustering, no buyer moved) exactly like the dashboard reads do.
+        clustering.reconcile_stored_labels()
+        return Response(cluster_targeting.available_clusters(),
+                        status=status.HTTP_200_OK)
+
+
 class CampaignListCreateView(AdminRFMView):
     """GET/POST /api/campaigns/ -> filterable list or author a campaign.
 
-    The list supports the admin filters (status, target segment, offer type,
-    free-text search over name/coupon code) with server-side pagination, and
-    every row carries its live eligible-audience count from the latest RFM
-    snapshot, so the table always answers "who actually receives this?".
+    The list supports the admin filters (status, target customer group, offer
+    type, free-text search over name/coupon code) with server-side pagination,
+    and every row carries its audience and coupon figures - the eligible
+    customer count plus coupons issued / redeemed / still valid - so the table
+    answers "who actually receives this, and what did they do with it?".
     """
 
     # Pseudo-statuses the UI filter offers beyond the stored values.
@@ -676,23 +788,30 @@ class CampaignListCreateView(AdminRFMView):
     def get(self, request):
         rows = self._apply_filters(request, Campaign.objects.all())
 
-        # Segment targeting lives in a JSON list, so that one filter is
-        # evaluated in Python (campaign tables stay small by nature; every
+        # Segment / cluster targeting lives in JSON lists, so those two filters
+        # are evaluated in Python (campaign tables stay small by nature; every
         # other filter and the pagination are done server-side).
         segment = (request.query_params.get('segment') or '').strip()
         if segment and segment != 'ALL':
-            rows = [c for c in rows if segment in (c.target_segments or [])]
+            rows = [c for c in rows
+                    if not c.targets_clusters and segment in (c.target_segments or [])]
+        cluster = (request.query_params.get('cluster') or '').strip()
+        if cluster and cluster != 'ALL':
+            rows = [c for c in rows
+                    if c.targets_clusters and cluster in (c.target_cluster_labels or [])]
 
         total = len(rows)
         page, page_size = _parse_pagination(request)
         offset = (page - 1) * page_size
         page_rows = rows[offset:offset + page_size]
 
+        summaries = campaign_audience.bulk_audience_summaries(page_rows)
         results = []
         for campaign in page_rows:
             data = CampaignSerializer(campaign).data
-            data['eligible_audience_count'] = campaign_audience.audience_count(
-                campaign.target_segments, campaign.target_tags)
+            data['eligible_audience_count'] = campaign_audience.campaign_audience_count(
+                campaign)
+            data.update(summaries.get(campaign.campaign_id, {}))
             results.append(data)
         return Response({
             'count': total,
@@ -700,6 +819,12 @@ class CampaignListCreateView(AdminRFMView):
             'page_size': page_size,
             'total_pages': (total + page_size - 1) // page_size if page_size else 1,
             'results': results,
+            # So the page can tell the admin why old campaigns are listed but no
+            # longer reaching customers (nothing about them is deleted).
+            'legacy_audience': {
+                'visible_to_customers': campaign_engine.legacy_reachable(),
+                'campaign_count': sum(1 for c in rows if not c.targets_clusters),
+            },
         }, status=status.HTTP_200_OK)
 
     def _apply_filters(self, request, queryset):
@@ -734,11 +859,12 @@ class CampaignListCreateView(AdminRFMView):
             serializer.is_valid(raise_exception=True)
         except DRFValidationError:
             return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
+        campaign = serializer.save()
         # Customers must see a new campaign immediately, not after the brief
         # per-customer offer cache has expired.
         cache_manager.bump_campaign_epoch()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(_campaign_payload(campaign, detailed=True),
+                        status=status.HTTP_201_CREATED)
 
 
 class CampaignDetailView(AdminRFMView):
@@ -748,9 +874,7 @@ class CampaignDetailView(AdminRFMView):
         campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
         if not campaign:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
-        data = CampaignSerializer(campaign).data
-        data['eligible_audience_count'] = campaign_audience.audience_count(
-            campaign.target_segments, campaign.target_tags)
+        data = _campaign_payload(campaign, detailed=True)
         data['redemption_count'] = campaign.redemptions.count()
         return Response(data, status=status.HTTP_200_OK)
 
@@ -763,69 +887,75 @@ class CampaignDetailView(AdminRFMView):
             serializer.is_valid(raise_exception=True)
         except DRFValidationError:
             return Response({'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
+        # Remember whether this edit deliberately restated the audience: only
+        # then is a live campaign's coupon list extended. An untouched audience
+        # keeps the customers it was published to, whatever clustering does
+        # afterwards.
+        audience_restated = (
+            request.data.get('target_cluster_ids') is not None
+            and list(campaign.target_cluster_ids or [])
+            != list(serializer.validated_data.get('target_cluster_ids') or []))
+        saved = serializer.save()
         cache_manager.bump_campaign_epoch()
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        if audience_restated and saved.status == CampaignStatus.PUBLISHED:
+            cluster_targeting.materialize_audience(saved)
+        return Response(_campaign_payload(saved, detailed=True),
+                        status=status.HTTP_200_OK)
 
     def delete(self, request, campaign_id):
-        deleted, _ = Campaign.objects.filter(campaign_id=campaign_id).delete()
-        if not deleted:
+        """Delete a campaign - drafts only.
+
+        A campaign that has been published has issued coupons and a redemption
+        history; deleting its row would cascade and destroy those records. The
+        requirement is the opposite (history is kept forever), so the correct
+        action there is Deactivate, which hides the offer and blocks redemption
+        while keeping every issued coupon and redemption row.
+        """
+        campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
+        if not campaign:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
+        issued = (campaign.status != CampaignStatus.DRAFT
+                  or campaign.redemptions.exists()
+                  or cluster_targeting.has_audience(campaign))
+        if issued:
+            return Response({'detail': (
+                'This campaign has been published, so it cannot be deleted - that '
+                'would remove the coupons it issued and its redemption records. '
+                'Deactivate it instead: customers can then no longer claim or use '
+                'it, and the history stays intact.')},
+                status=status.HTTP_409_CONFLICT)
+        campaign.delete()
         cache_manager.bump_campaign_epoch()
         return Response({'message': 'Campaign deleted.'}, status=status.HTTP_200_OK)
 
 
 class CampaignStatusView(AdminRFMView):
-    """POST /api/campaigns/{id}/status/ -> publish, pause, resume, draft, expire.
+    """POST /api/campaigns/{id}/status/ -> publish, deactivate, reactivate, draft, expire.
 
-    Publishing is an explicit admin action; nothing auto-publishes. Resuming
-    or publishing re-checks the campaign end to end first: a campaign without
-    a target segment, with no valid offer, or whose dates have already lapsed
-    is refused, so a "Published" row is always one customers may actually see.
-    Pausing keeps every campaign row and its redemption history untouched -
-    it only flips availability.
+    Thin HTTP layer over `campaign_publishing`, the one workflow the admin
+    endpoint and the seed command share: publishing re-checks the audience, the
+    dates and the offer end to end, issues the coupon to the customers of the
+    campaign's own clustering run, and reports how many were targeted and issued.
+    Deactivating (stored as PAUSED, shown as "Deactivated") only flips
+    availability - every campaign row, issued coupon and redemption record stays.
     """
 
     def post(self, request, campaign_id):
         new_status = (request.data.get('status') or '').strip().upper()
-        allowed = {CampaignStatus.DRAFT, CampaignStatus.PUBLISHED,
-                   CampaignStatus.PAUSED, CampaignStatus.EXPIRED}
-        if new_status not in allowed:
-            return Response({'errors': {'status': f'Status must be one of {sorted(allowed)}.'}},
-                            status=status.HTTP_400_BAD_REQUEST)
+        if new_status not in campaign_publishing.ALLOWED_STATUSES:
+            return Response({'errors': {'status': (
+                f'Status must be one of {sorted(campaign_publishing.ALLOWED_STATUSES)}.')}},
+                status=status.HTTP_400_BAD_REQUEST)
         campaign = Campaign.objects.filter(campaign_id=campaign_id).first()
         if not campaign:
             return Response({'detail': 'Campaign not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if new_status == CampaignStatus.PUBLISHED:
-            error = self._publish_blocker(campaign)
-            if error:
-                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
-        campaign.status = new_status
-        campaign.save(update_fields=['status', 'updated_at'])
-        cache_manager.bump_campaign_epoch()
-        data = CampaignSerializer(campaign).data
-        data['eligible_audience_count'] = campaign_audience.audience_count(
-            campaign.target_segments, campaign.target_tags)
+        audience, error = campaign_publishing.change_status(campaign, new_status)
+        if error:
+            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
+        data = _campaign_payload(campaign, detailed=True)
+        if audience is not None:
+            data['audience'] = audience
         return Response(data, status=status.HTTP_200_OK)
-
-    @staticmethod
-    def _publish_blocker(campaign):
-        if not campaign.target_segments:
-            return ('Publish this campaign to at least one RFM segment first - '
-                    'offers must never go to all customers.')
-        now = timezone.now()
-        if campaign.end_date <= now:
-            return ('This campaign\'s validity has already ended. '
-                    'Update its dates before publishing.')
-        serializer = CampaignSerializer(campaign, data={}, partial=True)
-        # Re-run the full offer validation against the stored configuration,
-        # so a campaign edited before the rules tightened cannot be published
-        # half-configured.
-        try:
-            serializer.is_valid(raise_exception=True)
-        except DRFValidationError as exc:
-            return _flatten_error(exc)
-        return None
 
 
 class CustomerOffersView(APIView):

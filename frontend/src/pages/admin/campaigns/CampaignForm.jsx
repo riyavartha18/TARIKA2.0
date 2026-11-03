@@ -6,8 +6,9 @@ import {
 import { getCategories } from '../../../services/api';
 import ProductPicker from './ProductPicker';
 import {
-  PALETTE, SEGMENTS, DISCOUNT_OPTIONS, BUY_GET_OPTIONS,
+  PALETTE, KMEANS_MODE, DISCOUNT_OPTIONS, BUY_GET_OPTIONS,
   emptyForm, buildPayload, previewSummary, buyGetRuleText,
+  clusterName, clusterCustomerCount,
 } from './offerCatalog';
 
 const STEPS = [
@@ -23,13 +24,29 @@ const labelStyle = { fontSize: '0.76rem', fontWeight: 700, color: PALETTE.muted,
 const inputStyle = { width: '100%', boxSizing: 'border-box', border: `1px solid ${PALETTE.border}`, borderRadius: 9, padding: '0.5rem 0.6rem', fontSize: '0.85rem', color: PALETTE.ink, backgroundColor: '#fff' };
 const hintStyle = { fontSize: '0.74rem', color: PALETTE.faint, margin: '4px 0 0' };
 
-export default function CampaignForm({ editingId, initialForm, saving, onSubmit }) {
+/**
+ * The six-step campaign authoring wizard. Step 3 aims the offer at one or more
+ * of the four K-Means customer groups of the latest persisted clustering run;
+ * the labels, ids and customer counts are the ones the backend read from that
+ * run, never a hardcoded list. A campaign still carrying the previous
+ * rule-based segments is shown as what it is and only a draft may be moved over.
+ */
+export default function CampaignForm({
+  editingId, editingStatus, editingLegacyAudience = false, initialForm, saving, onSubmit,
+  clusters = [], clustersLoading = false, clustersError = null, clusteringRun = null,
+  audiencePulse = null, onAudienceChange = null,
+}) {
   const [form, setForm] = useState(initialForm || emptyForm());
   const [step, setStep] = useState(0);
   const [localError, setLocalError] = useState(null);
   const [categories, setCategories] = useState([]);
 
   useEffect(() => { setForm(initialForm || emptyForm()); setStep(0); }, [initialForm]);
+
+  // A campaign that has issued coupons keeps their terms: the backend refuses an
+  // edit that would change them, so the offer, conditions and date steps are
+  // presented as locked here instead of letting the admin discover it on save.
+  const termsFrozen = Boolean(editingId) && editingStatus !== 'DRAFT';
 
   useEffect(() => {
     let alive = true;
@@ -39,11 +56,34 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
     return () => { alive = false; };
   }, []);
 
+  // The always-visible group panel pushes a click here: switch the audience to
+  // the K-Means groups (a legacy draft may be converted), toggle that group, and
+  // show the customer step so the selection is visible where it belongs.
+  useEffect(() => {
+    if (!audiencePulse) return;
+    setForm((f) => {
+      // A historical campaign's stored segments are not carried over: the admin
+      // picks the current groups deliberately.
+      const ids = f.target_cluster_ids || [];
+      const next = ids.includes(audiencePulse.clusterId)
+        ? ids.filter((x) => x !== audiencePulse.clusterId)
+        : [...ids, audiencePulse.clusterId];
+      return { ...f, targeting_mode: KMEANS_MODE, target_cluster_ids: next };
+    });
+    setStep(2);
+    setLocalError(null);
+  }, [audiencePulse]);
+
+  // Report the audience upward so the panel highlights what the form holds.
+  useEffect(() => {
+    if (onAudienceChange) onAudienceChange(form.target_cluster_ids || []);
+  }, [form.target_cluster_ids, onAudienceChange]);
+
   const set = (key, value) => { setForm((f) => ({ ...f, [key]: value })); setLocalError(null); };
-  const toggleSegment = (s) => set('target_segments',
-    form.target_segments.includes(s)
-      ? form.target_segments.filter((x) => x !== s)
-      : [...form.target_segments, s]);
+  const toggleCluster = (id) => set('target_cluster_ids',
+    form.target_cluster_ids.includes(id)
+      ? form.target_cluster_ids.filter((x) => x !== id)
+      : [...form.target_cluster_ids, id]);
   const toggleCategory = (c) => set('scope_categories',
     form.scope_categories.includes(c)
       ? form.scope_categories.filter((x) => x !== c)
@@ -68,7 +108,7 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
           && (!Number(form.buy_qty) || !Number(form.get_qty))) return false;
       return true;
     }
-    if (index === 2) return form.target_segments.length > 0;
+    if (index === 2) return form.target_cluster_ids.length > 0;
     if (index === 3) {
       if (form.usage_type === 'LIMITED' && !Number(form.per_customer_limit)) return false;
       if (form.scope_mode === 'PRODUCTS' && !bundleActive && !form.scope_products.length) return false;
@@ -89,12 +129,16 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
 
   const submit = async (statusAction) => {
     if (!stepReady(0)) { setStep(0); setLocalError('Campaign name and coupon code are required.'); return; }
-    if (!form.target_segments.length) { setStep(2); setLocalError('Select at least one target segment - offers must never go to all customers.'); return; }
+    if (!stepReady(2)) {
+      setStep(2);
+      setLocalError('Select at least one customer group - offers must never go to all customers.');
+      return;
+    }
     if (!form.start_date || !form.end_date) { setStep(4); setLocalError('Pick the campaign start and end dates.'); return; }
     await onSubmit(buildPayload(form), statusAction);
   };
 
-  const preview = previewSummary(form);
+  const preview = previewSummary(form, clusters);
 
   return (
     <div style={{ backgroundColor: PALETTE.bg, border: `1px solid ${PALETTE.border}`, borderRadius: 16, padding: '1.3rem' }}>
@@ -131,12 +175,25 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
         </div>
       )}
 
+      {/* Issued coupons keep their terms: everything the holder is entitled to is
+          locked once the campaign has been published, and the backend refuses an
+          edit that would change it. */}
+      {termsFrozen && (
+        <div style={{ backgroundColor: '#FFF8E7', border: '1px solid #F0DFAE', borderRadius: 12, padding: '0.7rem 0.9rem', fontSize: '0.8rem', color: '#7A5B12', marginBottom: '0.9rem' }}>
+          <strong>Issued coupons keep their original terms.</strong> This campaign has
+          been published, so its offer, its limits and its validity dates are locked
+          (the name, description and customer groups stay editable — adding a group only
+          extends the audience, it never changes what existing holders received). To offer
+          different terms, <strong>Deactivate</strong> this campaign and create a new one.
+        </div>
+      )}
+
       {/* Step 1 — Basic information */}
       {step === 0 && (
         <div style={{ display: 'grid', gap: '0.9rem', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
           <div>
             <label style={labelStyle}>Campaign Name</label>
-            <input style={inputStyle} value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="Champions VIP Shopping Offer" />
+            <input style={inputStyle} value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="High Spending Thank-You Offer" />
           </div>
           <div>
             <label style={labelStyle}>Coupon Code</label>
@@ -226,31 +283,54 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
         </div>
       )}
 
-      {/* Step 3 — Choose your customers */}
+      {/* Step 3 — Choose your customers: the four K-Means groups, and nothing else. */}
       {step === 2 && (
         <div style={{ display: 'grid', gap: '1rem' }}>
-          <div>
-            <label style={labelStyle}>Target RFM segments (choose one or more) — required</label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {SEGMENTS.map((s) => (
-                <Chip key={s} active={form.target_segments.includes(s)} onClick={() => toggleSegment(s)} label={s} />
-              ))}
+          {editingId && editingLegacyAudience && (
+            <div style={{ backgroundColor: '#FFF8E7', border: '1px solid #F0DFAE', borderRadius: 12, padding: '0.7rem 0.9rem', fontSize: '0.82rem', color: '#7A5B12' }}>
+              <strong>This campaign targets the previous RFM segmentation.</strong> Its old
+              segments are no longer offered as a target and its offers are no longer shown to
+              customers. Pick the K-Means groups below and save to move it onto the current
+              groups — its already-issued coupons and redemption history stay as they are.
             </div>
-            <p style={hintStyle}>
-              Only customers currently in the selected segments will see and be able to use this offer.
-              Everyone else — including other segments — never receives it.
-            </p>
-          </div>
+          )}
           <div>
-            <label style={labelStyle}>Optional extra condition</label>
-            <Chip active={form.big_spender_only} onClick={() => set('big_spender_only', !form.big_spender_only)}
-              label="Big Spenders only" />
-            <p style={hintStyle}>Narrows the chosen segments further; Big Spender is a tag, not a segment.</p>
+            <label style={labelStyle}>Target customer groups (choose one or more) — required</label>
+            {clustersLoading ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: PALETTE.faint, fontSize: '0.84rem' }}>
+                <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} /> Loading the customer groups…
+              </div>
+            ) : clustersError ? (
+              <div style={{ color: '#B3261E', backgroundColor: '#FDECEA', border: '1px solid #F5C6C0', borderRadius: 10, padding: '0.6rem 0.8rem', fontSize: '0.82rem' }}>
+                {clustersError}
+              </div>
+            ) : clusters.length === 0 ? (
+              <p style={hintStyle}>No K-Means clustering has been persisted yet. Run the clustering on the RFM analysis page, then come back.</p>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
+                {clusters.map((c) => (
+                  <ClusterCard key={c.cluster_id} active={form.target_cluster_ids.includes(c.cluster_id)}
+                    cluster={c} onClick={() => toggleCluster(c.cluster_id)} />
+                ))}
+              </div>
+            )}
+            <p style={hintStyle}>
+              Only the customers the latest K-Means clustering assigned to the selected groups receive
+              this offer. Customers of the other groups never see it and cannot use its coupon.
+            </p>
+            {clusteringRun && (
+              <p style={hintStyle}>
+                Audience taken from clustering run #{clusteringRun.run_id}
+                {' '}(RFM v{clusteringRun.rfm_version},
+                {' '}{clusteringRun.completed_at ? new Date(clusteringRun.completed_at).toLocaleString() : 'date unavailable'}
+                ) — stored with the campaign, so a later clustering run cannot move this audience.
+              </p>
+            )}
           </div>
-          {form.target_segments.length > 0 && (
+          {form.target_cluster_ids.length > 0 && (
             <div style={{ backgroundColor: '#FDF7F6', border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: '0.7rem 0.9rem', fontSize: '0.83rem', color: PALETTE.ink }}>
-              This offer will reach: <strong>{form.target_segments.join(' + ')}</strong>
-              {form.big_spender_only ? ' who are Big Spenders' : ''}.
+              This offer will reach: <strong>{form.target_cluster_ids.map((id) => clusterName(clusters, id)).join(' + ')}</strong>
+              {' '}— {clusterCustomerCount(clusters, form.target_cluster_ids).toLocaleString('en-IN')} eligible customers.
             </div>
           )}
         </div>
@@ -347,7 +427,9 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
             <PreviewRow label="Coupon code" value={form.coupon_code || '—'} />
           </div>
           <p style={hintStyle}>
-            Publishing makes the offer visible immediately to the selected segments only. You can pause it any time from the campaign list.
+            Publishing issues the coupon to the selected customer groups' customers only, and they can see it
+            immediately. You can deactivate it any time from the campaign list; issued coupons and their
+            redemption records are always kept.
           </p>
         </div>
       )}
@@ -389,7 +471,7 @@ export default function CampaignForm({ editingId, initialForm, saving, onSubmit 
 function stepHintError(step) {
   if (step === 0) return 'Campaign name and coupon code are required.';
   if (step === 1) return 'Please complete the offer details (bundle deals need at least two selected products).';
-  if (step === 2) return 'Select at least one target segment - campaigns must never go to all customers.';
+  if (step === 2) return 'Select at least one customer group - campaigns must never go to all customers.';
   if (step === 3) return 'Finish the conditions (usage limits and product selection).';
   if (step === 4) return 'Pick both the start and end dates.';
   return 'Please review the campaign.';
@@ -430,6 +512,28 @@ function TypeCard({ active, onClick, label, example }) {
     }}>
       <div style={{ fontWeight: 700, fontSize: '0.8rem', color: active ? PALETTE.roseDeep : PALETTE.ink }}>{label}</div>
       <div style={{ fontSize: '0.7rem', color: PALETTE.faint, marginTop: 2 }}>{example}</div>
+    </button>
+  );
+}
+
+// One selectable customer group: the business label the stored clustering run
+// gave this cluster, its id (internal reference only) and its real size.
+function ClusterCard({ active, onClick, cluster }) {
+  return (
+    <button type="button" onClick={onClick} style={{
+      textAlign: 'left', cursor: 'pointer', borderRadius: 12, padding: '0.7rem 0.8rem',
+      border: `1.5px solid ${active ? PALETTE.roseDeep : PALETTE.border}`,
+      background: active ? 'rgba(216,114,126,0.10)' : '#fff',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        <span style={{ fontWeight: 800, fontSize: '0.86rem', color: active ? PALETTE.roseDeep : PALETTE.ink }}>
+          {cluster.category || `Cluster ${cluster.cluster_id}`}
+        </span>
+        <span style={{ fontSize: '0.68rem', color: PALETTE.faint }}>#{cluster.cluster_id}</span>
+      </div>
+      <div style={{ fontSize: '0.75rem', color: PALETTE.muted, marginTop: 2 }}>
+        {Number(cluster.customer_count || 0).toLocaleString('en-IN')} customers
+      </div>
     </button>
   );
 }

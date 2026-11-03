@@ -108,8 +108,15 @@ def _round_or_none(value, digits):
 
 
 def _fetch_dashboard_bundle_orm():
-    """Backend-agnostic fallback (SQLite tests): same shape, a few ORM reads."""
-    from django.db.models import Avg, Count, DecimalField, Q, Sum, Value
+    """Backend-agnostic fallback (SQLite tests): same shape, a few ORM reads.
+
+    Only non-PostgreSQL backends land here, and the one thing they cannot do is
+    the JSONB `tags @> [...]` containment the SQL statement uses - `contains` is
+    not implemented on SQLite - so the Big Spender count is tallied from the
+    stored tag lists in Python instead. Production always takes the single
+    GROUPING SETS statement above.
+    """
+    from django.db.models import Avg, Count, DecimalField, Sum, Value
     from django.db.models.functions import Coalesce
 
     totals = CustomerSegment.objects.aggregate(
@@ -118,9 +125,10 @@ def _fetch_dashboard_bundle_orm():
         total_revenue=Coalesce(
             Sum('monetary'), Value(0),
             output_field=DecimalField(max_digits=16, decimal_places=2)),
-        big_spender_count=Count(
-            'customer_id', filter=Q(tags__contains=[utils.TAG_BIG_SPENDER])),
     )
+    big_spenders = sum(1 for tags in
+                       CustomerSegment.objects.values_list('tags', flat=True)
+                       if utils.TAG_BIG_SPENDER in (tags or []))
     distribution = [
         {'segment': row['segment'], 'count': row['count']}
         for row in CustomerSegment.objects.values('segment')
@@ -154,7 +162,7 @@ def _fetch_dashboard_bundle_orm():
             'buyer_count': totals['buyer_count'] or 0,
             'total_orders': totals['total_orders'] or 0,
             'total_revenue': round(float(totals['total_revenue'] or 0), 2),
-            'big_spender_count': totals['big_spender_count'] or 0,
+            'big_spender_count': big_spenders,
         },
         'distribution': distribution,
         'kmeans_clusters': kmeans_clusters,
@@ -250,7 +258,15 @@ def fetch_total_customers():
     Never Purchased) is computed from the already-fetched per-customer metrics
     in `engine`, so this is the only aggregate that needs a database round-trip
     and it is a cheap primary-key count on `customers`.
+
+    On a backend without the pre-existing dataset table - the SQLite used for
+    unit tests has no `public.customers` - there is nothing to count, so it
+    reports 0 instead of failing. That is the same convention
+    `compute_source_fingerprint` uses for a missing `public.orders`, and it is
+    what lets the dashboard aggregate be built and cached on any backend.
     """
+    if connection.vendor != 'postgresql':
+        return 0
     with connection.cursor() as cursor:
         cursor.execute(AGGREGATE_TOTALS_SQL)
         return int(cursor.fetchone()[0] or 0)

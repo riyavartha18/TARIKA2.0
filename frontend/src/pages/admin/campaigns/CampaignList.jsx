@@ -4,7 +4,8 @@ import {
 } from 'lucide-react';
 import { getCampaigns, getCampaignDetail, setCampaignStatus, deleteCampaign } from '../../../services/api';
 import {
-  PALETTE, SEGMENTS, STATUS_COLORS, OFFER_CATEGORY_LABELS, effectiveStatus,
+  PALETTE, STATUS_COLORS, statusLabel, OFFER_CATEGORY_LABELS, effectiveStatus,
+  audienceGroups, isLegacyAudience,
 } from './offerCatalog';
 
 const PAGE_SIZE = 10;
@@ -13,24 +14,33 @@ const selectStyle = {
   fontSize: '0.8rem', color: PALETTE.ink, backgroundColor: '#fff', cursor: 'pointer',
 };
 
-export default function CampaignList({ token, editingId, onEdit, refreshToken }) {
+/**
+ * The campaign table. Every row states the customer groups it is aimed at (the
+ * four K-Means clusters for a new campaign, the old rule-based segments for a
+ * historical one, clearly labelled), its coupon figures from the persisted
+ * assignments and redemptions, and its status.
+ */
+export default function CampaignList({
+  token, editingId, onEdit, refreshToken, clusters = [], onPublished,
+}) {
   const [campaigns, setCampaigns] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('ALL');
-  const [segmentFilter, setSegmentFilter] = useState('ALL');
+  const [groupFilter, setGroupFilter] = useState('ALL');
   const [offerFilter, setOfferFilter] = useState('ALL');
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [detail, setDetail] = useState(null); // loaded campaign for the modal
   const [detailLoading, setDetailLoading] = useState(false);
+  const [legacyAudience, setLegacyAudience] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     const res = await getCampaigns(token, {
-      status: statusFilter, segment: segmentFilter, offer_type: offerFilter,
+      status: statusFilter, cluster: groupFilter, offer_type: offerFilter,
       search, page, page_size: PAGE_SIZE,
     });
     if (res.success) {
@@ -38,9 +48,10 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
       setTotal(res.count);
       setTotalPages(res.totalPages);
       setPage(res.currentPage);
+      setLegacyAudience(res.legacyAudience || null);
     }
     setLoading(false);
-  }, [token, statusFilter, segmentFilter, offerFilter, search, page]);
+  }, [token, statusFilter, groupFilter, offerFilter, search, page]);
 
   useEffect(() => { load(); }, [load, refreshToken]);
 
@@ -52,22 +63,28 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
 
   const changeStatus = async (c, newStatus) => {
     const status = effectiveStatus(c);
+    const groups = audienceGroups(c).join(', ') || 'no group yet';
     const messages = {
-      PAUSED: `Pause "${c.name}"? It immediately stops appearing in customer offers and its coupon stops working at checkout. History stays intact.`,
+      PAUSED: `Deactivate "${c.name}"? Customers can no longer claim or redeem its coupon at checkout, but every issued coupon and redemption record is kept.`,
       EXPIRED: `Expire "${c.name}"? It will end early and no customer can use it any more.`,
       PUBLISHED: status === 'PAUSED'
-        ? `Resume "${c.name}"? Validity, dates and customer eligibility are re-checked automatically.`
-        : `Publish "${c.name}"? Only customers in its target segments will see it.`,
+        ? `Reactivate "${c.name}"? Its dates, offer rules and eligibility are re-checked first, and it goes back to exactly the customers its coupons were already issued to.`
+        : `Publish "${c.name}"? Its coupon will be issued to the customers of: ${groups}.`,
       DRAFT: `Move "${c.name}" back to draft? It will be hidden from all customers.`,
     };
     if (newStatus !== 'DRAFT' && !window.confirm(messages[newStatus] || 'Change status?')) return;
     const res = await setCampaignStatus(token, c.campaign_id, newStatus);
-    if (res.success) { await load(); onEdit(null); }
-    else window.alert(res.error || 'Could not change the campaign status.');
+    if (res.success) {
+      await load();
+      onEdit(null);
+      if (newStatus === 'PUBLISHED' && onPublished) onPublished(res.audience, c);
+    } else {
+      window.alert(res.error || 'Could not change the campaign status.');
+    }
   };
 
   const remove = async (c) => {
-    if (!window.confirm(`Delete "${c.name}" completely? This also removes its redemption history. Prefer Pause or Expire to keep the record.`)) return;
+    if (!window.confirm(`Delete the draft "${c.name}"? Published campaigns cannot be deleted - their issued coupons and redemption history stay on record; deactivate them instead.`)) return;
     const res = await deleteCampaign(token, c.campaign_id);
     if (res.success) await load();
     else window.alert(res.error || 'Could not delete the campaign.');
@@ -88,9 +105,23 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
       <div>
         <h3 style={{ margin: 0, fontFamily: "'Playfair Display', serif", fontSize: '1.3rem', color: PALETTE.ink }}>Your Campaigns</h3>
         <p style={{ color: PALETTE.muted, margin: '0.25rem 0 0', fontSize: '0.85rem' }}>
-          {total} campaign{total === 1 ? '' : 's'}. Eligible-customer counts come from the latest completed RFM analysis.
+          {total} campaign{total === 1 ? '' : 's'}. Eligible-customer and coupon counts come from the latest
+          completed K-Means clustering and the issued-coupon records.
         </p>
       </div>
+
+      {/* Old rule-segment campaigns stay on record but no longer reach customers,
+          because their segments are not the customer's K-Means group. */}
+      {legacyAudience && legacyAudience.campaign_count > 0 && !legacyAudience.visible_to_customers && (
+        <div style={{ backgroundColor: '#FFF8E7', border: '1px solid #F0DFAE', borderRadius: 12, padding: '0.7rem 0.9rem', fontSize: '0.8rem', color: '#7A5B12' }}>
+          <strong>{legacyAudience.campaign_count} campaign{legacyAudience.campaign_count === 1 ? '' : 's'}</strong>
+          {' '}still target the previous rule-based RFM segments, so customers are not shown
+          those offers: a customer only ever sees the coupon of their own K-Means group.
+          Nothing is deleted — the campaigns, their issued coupons and their redemption
+          history are intact, and to serve such an offer again create a new campaign aimed
+          at the matching customer groups.
+        </div>
+      )}
 
       {/* Filters */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
@@ -99,13 +130,13 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
           <option value="ALL">All</option>
           <option value="ACTIVE">Active</option>
           <option value="DRAFT">Draft</option>
-          <option value="PAUSED">Paused</option>
+          <option value="PAUSED">Deactivated</option>
           <option value="EXPIRED">Expired</option>
         </select>
-        <label style={{ fontSize: '0.74rem', fontWeight: 700, color: PALETTE.muted }}>Segment</label>
-        <select style={selectStyle} value={segmentFilter} onChange={(e) => setFilter(setSegmentFilter)(e.target.value)}>
-          <option value="ALL">All Segments</option>
-          {SEGMENTS.map((s) => <option key={s} value={s}>{s}</option>)}
+        <label style={{ fontSize: '0.74rem', fontWeight: 700, color: PALETTE.muted }}>Customer Group</label>
+        <select style={selectStyle} value={groupFilter} onChange={(e) => setFilter(setGroupFilter)(e.target.value)}>
+          <option value="ALL">All Groups</option>
+          {clusters.map((c) => <option key={c.cluster_id} value={c.category}>{c.category}</option>)}
         </select>
         <label style={{ fontSize: '0.74rem', fontWeight: 700, color: PALETTE.muted }}>Offer</label>
         <select style={selectStyle} value={offerFilter} onChange={(e) => setFilter(setOfferFilter)(e.target.value)}>
@@ -136,7 +167,7 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
             <thead>
               <tr style={{ backgroundColor: '#FBF5F4' }}>
-                {['Campaign', 'Offer Type', 'Offer Details', 'Target Segment', 'Validity', 'Status', 'Eligible Customers', 'Actions'].map((h) => (
+                {['Campaign', 'Offer Type', 'Offer Details', 'Target Customer Group', 'Validity', 'Status', 'Eligible Customers', 'Coupons (Issued / Redeemed / Left)', 'Actions'].map((h) => (
                   <th key={h} style={{ padding: '0.7rem 0.8rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700, whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
@@ -161,30 +192,42 @@ export default function CampaignList({ token, editingId, onEdit, refreshToken })
                     </td>
                     <td style={{ padding: '0.7rem 0.8rem' }}>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                        {(c.target_segments || []).map((s) => (
-                          <span key={s} style={{ background: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 12, padding: '2px 8px', fontSize: '0.72rem', fontWeight: 700 }}>{s}</span>
+                        {audienceGroups(c).map((g) => (
+                          <span key={g} style={{ background: 'rgba(216,114,126,0.12)', color: PALETTE.roseDeep, borderRadius: 12, padding: '2px 8px', fontSize: '0.72rem', fontWeight: 700 }}>{g}</span>
                         ))}
+                        {audienceGroups(c).length === 0 && (
+                          <span style={{ fontSize: '0.72rem', color: PALETTE.faint }}>None selected</span>
+                        )}
                       </div>
-                      {(c.target_tags || []).length > 0 && (
-                        <div style={{ fontSize: '0.68rem', color: PALETTE.faint, marginTop: 2 }}>+ {c.target_tags.join(', ')} only</div>
+                      {isLegacyAudience(c) ? (
+                        <div style={{ fontSize: '0.68rem', color: '#7A5B12', marginTop: 2 }}>
+                          Previous RFM segmentation
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.68rem', color: PALETTE.faint, marginTop: 2 }}>
+                          K-Means run #{c.clustering_run_id ?? '—'}
+                        </div>
                       )}
                     </td>
                     <td style={{ padding: '0.7rem 0.8rem', color: PALETTE.faint, fontSize: '0.75rem', whiteSpace: 'nowrap' }}>
                       {new Date(c.start_date).toLocaleDateString()} → {new Date(c.end_date).toLocaleDateString()}
                     </td>
                     <td style={{ padding: '0.7rem 0.8rem' }}>
-                      <span style={{ color: STATUS_COLORS[status] || PALETTE.muted, fontWeight: 700, fontSize: '0.75rem' }}>{status}</span>
+                      <span style={{ color: STATUS_COLORS[status] || PALETTE.muted, fontWeight: 700, fontSize: '0.75rem' }}>{statusLabel(status)}</span>
                     </td>
                     <td style={{ padding: '0.7rem 0.8rem', color: PALETTE.ink, whiteSpace: 'nowrap' }}>
-                      {c.eligible_audience_count == null ? 'Run RFM first' : c.eligible_audience_count.toLocaleString('en-IN')}
+                      {c.eligible_audience_count == null ? 'Run clustering first' : c.eligible_audience_count.toLocaleString('en-IN')}
+                    </td>
+                    <td style={{ padding: '0.7rem 0.8rem', color: PALETTE.ink, whiteSpace: 'nowrap', fontSize: '0.78rem' }}>
+                      {(c.coupons_issued ?? 0).toLocaleString('en-IN')} / {(c.coupons_redeemed ?? 0).toLocaleString('en-IN')} / {(c.coupons_remaining ?? 0).toLocaleString('en-IN')}
                     </td>
                     <td style={{ padding: '0.7rem 0.5rem', whiteSpace: 'nowrap' }}>
                       <IconBtn title="View details" onClick={() => openDetail(c)}><Eye size={15} /></IconBtn>
                       <IconBtn title="Edit" onClick={() => onEdit(c)}><Pencil size={15} /></IconBtn>
                       {c.status === 'PUBLISHED' ? (
-                        <IconBtn title="Pause campaign" onClick={() => changeStatus(c, 'PAUSED')}><Pause size={15} /></IconBtn>
+                        <IconBtn title="Deactivate campaign" onClick={() => changeStatus(c, 'PAUSED')}><Pause size={15} /></IconBtn>
                       ) : (
-                        <IconBtn title={status === 'EXPIRED' ? 'Publish (dates ended)' : 'Publish / Resume'} onClick={() => changeStatus(c, 'PUBLISHED')}><Play size={15} /></IconBtn>
+                        <IconBtn title={status === 'EXPIRED' ? 'Publish (dates ended)' : 'Activate / Reactivate'} onClick={() => changeStatus(c, 'PUBLISHED')}><Play size={15} /></IconBtn>
                       )}
                       {c.status !== 'EXPIRED' && status !== 'EXPIRED' && (
                         <IconBtn title="Expire campaign now" onClick={() => changeStatus(c, 'EXPIRED')}><CalendarX2 size={15} /></IconBtn>
@@ -254,16 +297,25 @@ function DetailModal({ campaign, loading, onClose }) {
             {row('Coupon code', c.coupon_code)}
             {row('Offer type', OFFER_CATEGORY_LABELS[c.offer_category])}
             {row('Offer details', c.offer_summary)}
-            {row('Target segments', (c.target_segments || []).join(', '))}
-            {row('Extra condition', (c.target_tags || []).join(', ') || 'None')}
-            {row('Eligible customers', c.eligible_audience_count == null ? 'Run RFM first' : c.eligible_audience_count.toLocaleString('en-IN'))}
+            {row('Target customer group', audienceGroups(c).join(', ') || '—')}
+            {row('Segmentation used', isLegacyAudience(c)
+              ? 'Previous rule-based RFM segments (historical)'
+              : `K-Means clusters${c.clustering_run ? ` (run #${c.clustering_run.run_id}, RFM v${c.clustering_run.rfm_version}, completed ${c.clustering_run.completed_at ? new Date(c.clustering_run.completed_at).toLocaleString() : '—'})` : ''}`)}
+            {(c.audience_clusters || []).map((g) => row(
+              `   Cluster #${g.cluster_id}`,
+              `${g.category} — ${Number(g.eligible_customers || 0).toLocaleString('en-IN')} eligible, ${Number(g.coupons_issued || 0).toLocaleString('en-IN')} issued`,
+            ))}
+            {row('Eligible customers', c.eligible_audience_count == null ? 'Run clustering first' : c.eligible_audience_count.toLocaleString('en-IN'))}
+            {row('Coupons issued', (c.coupons_issued ?? 0).toLocaleString('en-IN'))}
+            {row('Coupons redeemed', (c.coupons_redeemed ?? c.redemption_count ?? 0).toLocaleString('en-IN'))}
+            {row('Coupons still valid', (c.coupons_remaining ?? 0).toLocaleString('en-IN'))}
             {row('Total redemptions', c.redemption_count)}
             {row('Minimum order', c.min_order_amount ? `₹${Number(c.min_order_amount).toLocaleString('en-IN')}` : 'None')}
             {row('Maximum discount', c.max_discount ? `₹${Number(c.max_discount).toLocaleString('en-IN')}` : 'None')}
             {row('Usage limit', `${c.usage_type}${c.usage_type === 'LIMITED' ? ` (${c.per_customer_limit} per customer)` : ''}`)}
             {row('Global usage limit', c.global_usage_limit || 'Unlimited')}
             {row('Validity', `${new Date(c.start_date).toLocaleString()} → ${new Date(c.end_date).toLocaleString()}`)}
-            {row('Status', effectiveStatus(c))}
+            {row('Status', statusLabel(effectiveStatus(c)))}
             {c.description && row('Description', c.description)}
           </>
         )}

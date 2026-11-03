@@ -13,8 +13,10 @@ export default function RfmAnalysisCard({ onOpen }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    const res = await getRfmSummary(token);
+  const load = useCallback(async ({ force = false } = {}) => {
+    // Shares the dashboard's deduplicated, briefly cached payload: the overview
+    // and the full page never fetch the same aggregate twice.
+    const res = await getRfmSummary(token, { force });
     setSummary(res.success ? res : null);
     setLoading(false);
   }, [token]);
@@ -26,10 +28,11 @@ export default function RfmAnalysisCard({ onOpen }) {
   const available = summary?.available;
 
   // Only poll while the analysis is still being prepared. Once a completed
-  // snapshot is available the card is static, keeping the page lightweight.
+  // snapshot is available the card is static, keeping the page lightweight; a
+  // poll forces a real read so it can actually observe the run finishing.
   useEffect(() => {
     if (available) return undefined;
-    const timer = setInterval(load, 4000);
+    const timer = setInterval(() => load({ force: true }), 4000);
     return () => clearInterval(timer);
   }, [available, load]);
 

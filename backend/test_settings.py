@@ -18,3 +18,12 @@ DATABASES = {
         'NAME': ':memory:',
     }
 }
+
+# `catalog`'s migrations only ALTER the pre-existing dataset tables `products`
+# and `categories`, which exist on the live Neon database and nowhere else, so
+# replaying them on the SQLite test database fails on a missing table before any
+# test can run. Skipping that app's migrations lets Django create its tables
+# straight from the models instead; every other app - including the managed
+# `rfm_analysis` campaign tables - is still migrated, so a new migration is
+# genuinely exercised by the test run.
+MIGRATION_MODULES = {'catalog': None}

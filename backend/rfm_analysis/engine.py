@@ -17,8 +17,8 @@ import threading
 from django.db import close_old_connections
 from django.utils import timezone
 
-from . import (cache_manager, queries, rfm_calculator, rfm_scoring,
-               segment_store, segmentation, utils)
+from . import (cache_manager, dashboard_cache, queries, rfm_calculator,
+               rfm_scoring, segment_store, segmentation, utils)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,10 @@ def run_and_publish(full=True):
         fingerprint = queries.compute_source_fingerprint()
         stats = store_segments(version, records, analysis_date, full=full,
                                source_fingerprint=fingerprint, return_stats=True)
+        # Warm the dashboard's cached aggregate right here, so the next admin
+        # open is a cache read instead of a GROUPING SETS pass over ~100k rows
+        # on the critical path of the first request after a run.
+        dashboard_cache.warm(version, run_id=dashboard_cache.current_clustering_run_id())
         cache_manager.set_run_status(
             'completed',
             finished_at=utils.utcnow().isoformat(),
@@ -251,3 +255,46 @@ def ensure_latest():
         return {'refreshing': accepted, 'started': accepted, 'run_status': run_status}
 
     return {'refreshing': False, 'started': False, 'run_status': status}
+
+
+def nudge_latest():
+    """Non-blocking freshness nudge for the dashboard read path.
+
+    `ensure_latest` decides whether a refresh is needed, and that decision can
+    cost a database round trip when the in-process cache is cold (right after a
+    restart). The RFM page must not pay for that on the request, so the whole
+    check is moved onto a worker thread, rate limited by a cache key:
+
+    * a run already in flight is reported as refreshing (a pure cache read);
+    * the first request in the cooldown window schedules the real check and is
+      told `nudging=True` while still being served the last completed analysis;
+    * every other request only reads the cached run status - no query at all.
+
+    The data itself is never delayed for a refresh: the dashboard always shows
+    the latest *successfully completed* analysis, exactly as before.
+    """
+    status = cache_manager.get_run_status()
+    if status.get('status') in ('queued', 'running'):
+        return {'refreshing': True, 'started': False, 'run_status': status}
+
+    scheduled = cache_manager.try_freshness_nudge()
+    if scheduled:
+        _start_freshness_worker()
+    return {'refreshing': False, 'started': scheduled, 'nudging': scheduled,
+            'run_status': status}
+
+
+def _start_freshness_worker():
+    """Run `ensure_latest` off the request thread (it may start a run itself)."""
+
+    def _worker():
+        # A background thread owns its own database connection and must reap it.
+        close_old_connections()
+        try:
+            ensure_latest()
+        except Exception:  # noqa: BLE001 - a failed nudge is retried next window
+            logger.warning('RFM freshness nudge failed')
+        finally:
+            close_old_connections()
+
+    threading.Thread(target=_worker, name='rfm-freshness', daemon=True).start()

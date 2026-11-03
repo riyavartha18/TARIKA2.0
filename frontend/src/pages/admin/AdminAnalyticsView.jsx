@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import demandForecastingVisual from '../../assets/demand_forecasting_visual.png';
 import { useAuth } from '../../auth/AuthContext';
@@ -36,9 +36,13 @@ import {
 } from 'lucide-react';
 import '../../styles/admin-portal.css';
 import RfmAnalysisCard from './RfmAnalysisCard';
-import RfmDashboard from './AdminRFMView';
 import ClvAnalysisCard from './ClvAnalysisCard';
 import ClvDashboard from './AdminClvView';
+
+// The full RFM dashboard is only needed when the admin actually opens it, so it
+// (and its drill-down screens) is loaded on demand instead of being parsed and
+// hashed before the overview is even readable.
+const RfmDashboard = lazy(() => import('./AdminRFMView'));
 
 export default function AdminAnalyticsView() {
   const { token: authContextToken } = useAuth();
@@ -546,7 +550,13 @@ export default function AdminAnalyticsView() {
          ========================================================================== */}
       {activeView === 'rfm' && (
         <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-          <RfmDashboard onBack={() => setActiveView('overview')} />
+          <Suspense fallback={(
+            <div style={{ padding: '3rem', textAlign: 'center', color: '#6B5E63' }}>
+              Loading the RFM dashboard…
+            </div>
+          )}>
+            <RfmDashboard onBack={() => setActiveView('overview')} />
+          </Suspense>
         </div>
       )}
 
