@@ -444,8 +444,13 @@ class WardrobeToggleDisplayView(BaseWardrobeAPIView):
         requested_mode = request.data.get('mode')
         if requested_mode in ('render', 'original'):
             item.display_mode = requested_mode
-        else:
+        elif requested_mode is None:
             item.display_mode = 'original' if item.display_mode == 'render' else 'render'
+        else:
+            return Response(
+                {'error': "Display mode must be 'render' or 'original'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         item.save(update_fields=['display_mode'])
         return Response(sign_item_urls(item, cust_id, request), status=status.HTTP_200_OK)

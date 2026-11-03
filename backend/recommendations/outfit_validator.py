@@ -44,78 +44,78 @@ NEUTRAL_COLORS = {
 # Occasion rules for footwear and accessories
 OCCASION_RULES = {
     'chic': {
-        'blocked_footwear': {'flip_flop', 'slipper'},
-        'allowed_footwear': {'heel', 'flat', 'sandal', 'dress_shoe', 'jutti'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
+        'allowed_footwear': {'heel', 'flat', 'dress_shoe', 'jutti'},
         'blocked_ethnic': set(),
         'max_saree_formality': 5,
     },
     'party': {
-        'blocked_footwear': {'flip_flop', 'slipper'},
-        'allowed_footwear': {'heel', 'flat', 'sandal', 'dress_shoe', 'jutti'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
+        'allowed_footwear': {'heel', 'flat', 'dress_shoe', 'jutti'},
         'blocked_ethnic': set(),
         'max_saree_formality': 5,
     },
     'formal': {
-        'blocked_footwear': {'flip_flop', 'slipper', 'sneaker'},
-        'allowed_footwear': {'heel', 'flat', 'dress_shoe', 'sandal'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sneaker', 'sandal'},
+        'allowed_footwear': {'heel', 'flat', 'dress_shoe'},
         'blocked_ethnic': set(),
         'min_formality': 3,
         'max_saree_formality': 5,
     },
     'elegant': {
-        'blocked_footwear': {'flip_flop', 'slipper'},
-        'allowed_footwear': {'heel', 'flat', 'sandal', 'dress_shoe', 'jutti'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
+        'allowed_footwear': {'heel', 'flat', 'dress_shoe', 'jutti'},
         'blocked_ethnic': set(),
         'max_saree_formality': 5,
     },
     'traditional': {
-        'blocked_footwear': {'sneaker', 'sports'},
-        'preferred_footwear': {'jutti', 'sandal', 'heel', 'kolhapuri', 'flat'},
+        'blocked_footwear': {'sneaker', 'sports', 'flip_flop', 'slipper', 'sandal'},
+        'preferred_footwear': {'jutti', 'heel', 'kolhapuri', 'flat'},
         'blocked_bags': {'backpack', 'sports_bag'},
         'preferred_bags': {'potli', 'clutch', 'ethnic_sling'},
         'blocked_ethnic': set(),
         'max_saree_formality': 5,
     },
     'festive': {
-        'blocked_footwear': {'sneaker', 'sports', 'flip_flop', 'slipper'},
-        'preferred_footwear': {'jutti', 'sandal', 'heel', 'kolhapuri', 'flat'},
+        'blocked_footwear': {'sneaker', 'sports', 'flip_flop', 'slipper', 'sandal'},
+        'preferred_footwear': {'jutti', 'heel', 'kolhapuri', 'flat'},
         'blocked_bags': {'backpack', 'sports_bag'},
         'preferred_bags': {'potli', 'clutch', 'ethnic_sling'},
         'blocked_ethnic': set(),
         'max_saree_formality': 5,
     },
     'casual': {
-        'blocked_footwear': {'flip_flop', 'slipper'},  # slippers strictly excluded
-        'allowed_footwear': {'sneaker', 'flat', 'sandal', 'other'},
-        'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt'},  # Lehengas never for casual
-        'max_saree_formality': 3,  # Only light cotton/printed sarees (formality <= 3)
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
+        'allowed_footwear': {'sneaker', 'flat', 'heel', 'other'},
+        'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt'},
+        'max_saree_formality': 3,
     },
     'college': {
-        'blocked_footwear': {'flip_flop', 'slipper'},
-        'allowed_footwear': {'sneaker', 'flat', 'sandal', 'other'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
+        'allowed_footwear': {'sneaker', 'flat', 'heel', 'other'},
         'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt'},
         'max_saree_formality': 3,
     },
     'streetwear': {
-        'blocked_footwear': {'flip_flop', 'slipper'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal'},
         'allowed_footwear': {'sneaker', 'flat', 'other'},
         'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt'},
         'max_saree_formality': 3,
     },
     'sportswear': {
-        'blocked_footwear': {'flip_flop', 'slipper', 'heel', 'jutti', 'flat', 'dress_shoe'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal', 'heel', 'jutti', 'flat', 'dress_shoe'},
         'allowed_footwear': {'sneaker'},
         'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt', 'saree'},
         'max_saree_formality': 0,
     },
     'activewear': {
-        'blocked_footwear': {'flip_flop', 'slipper', 'heel', 'jutti', 'flat', 'dress_shoe'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal', 'heel', 'jutti', 'flat', 'dress_shoe'},
         'allowed_footwear': {'sneaker'},
         'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt', 'saree'},
         'max_saree_formality': 0,
     },
     'sports': {
-        'blocked_footwear': {'flip_flop', 'slipper', 'heel', 'jutti', 'flat', 'dress_shoe'},
+        'blocked_footwear': {'flip_flop', 'slipper', 'sandal', 'heel', 'jutti', 'flat', 'dress_shoe'},
         'allowed_footwear': {'sneaker'},
         'blocked_ethnic_subtypes': {'lehenga_set', 'lehenga_skirt', 'saree'},
         'max_saree_formality': 0,
@@ -278,14 +278,17 @@ def validate_outfit(pieces, user_prefs=None):
 
     for acc in accessories:
         acc_nm = (_get_item_attr(acc, 'product_name', '') or '').lower()
-        if any(j in acc_nm for j in [
+        is_craft_junk = ('craft' in acc_nm and 'handcraft' not in acc_nm and 'handicraft' not in acc_nm)
+        if is_craft_junk or any(j in acc_nm for j in [
             'ring sizer', 'ring tool', 'mandrel', 'ring size adjuster', 'ring adjuster for loose rings',
-            'invisible ring sizer', 'stopper', 'safety pin', 'brooch pin back', 'craft', 'raw material',
+            'invisible ring sizer', 'stopper', 'safety pin', 'brooch pin back', 'raw material',
+            'craft supply', 'craft tool', 'craft kit', 'craft wire', 'craft material', 'art & craft',
             'elastic band', 'hair elastic', 'rubber band', 'bead wire', 'keychain hook', 'jewellery making',
             'hair tie', 'scrunchie', 'hair band', 'ponytail holder', 'nail', 'screw', 'fevicol', 'glue'
         ]):
             reasons.append("Accessory item is utility/craft tool/hardware, not wearable fashion jewellery.")
             return False, reasons
+
 
     # --------------------------------------------------------------------------
     # 2. CLOTHING BASE CHECK & SLOT LEGITIMACY
@@ -324,14 +327,35 @@ def validate_outfit(pieces, user_prefs=None):
                     reasons.append(f"Product '{_get_item_attr(p, 'product_name')}' is a men's product and cannot be in a women's outfit.")
                     return False, reasons
 
+    BOTTOM_KEYWORDS = (
+        'pant', 'pants', 'trouser', 'trousers', 'jeans', 'sweatpant', 'sweatpants',
+        'jogger', 'joggers', 'palazzo', 'salwar', 'track pant', 'trackpant',
+        'capri', 'shorts', 'legging', 'leggings'
+    )
+    ONE_PIECE_SAFE = ('jumpsuit', 'romper', 'playsuit', 'dress', 'gown')
+
+    # RULE: A bottom-wear product (pants, jeans, etc.) can NEVER be used as a one-piece
+    if has_one_piece:
+        op_name = (_get_item_attr(one_piece, 'product_name', '') or '').lower()
+        is_bottom_name = any(k in op_name for k in BOTTOM_KEYWORDS) and not any(k in op_name for k in ONE_PIECE_SAFE)
+        if is_bottom_name:
+            reasons.append(f"Product '{_get_item_attr(one_piece, 'product_name')}' is bottomwear (pants/trousers) and cannot be a one-piece garment.")
+            return False, reasons
+
     # RULE: Do not pair two bottom-wear products together
-    bottom_pieces = [p for p in all_pieces if _get_item_attr(p, 'slot_type') == 'bottom']
+    def is_bottom_item(p):
+        if _get_item_attr(p, 'slot_type') == 'bottom':
+            return True
+        p_name = (_get_item_attr(p, 'product_name', '') or '').lower()
+        return any(k in p_name for k in BOTTOM_KEYWORDS) and not any(k in p_name for k in ONE_PIECE_SAFE)
+
+    bottom_pieces = [p for p in all_pieces if is_bottom_item(p)]
     if len(bottom_pieces) > 1:
         reasons.append("An outfit cannot contain two bottom-wear products.")
         return False, reasons
 
     # RULE: No one-piece with a bottom
-    if has_one_piece and has_bottom:
+    if has_one_piece and (has_bottom or len(bottom_pieces) > 0):
         reasons.append("One-piece garment (dress/jumpsuit/saree/lehenga) cannot be paired with bottomwear.")
         return False, reasons
 
@@ -403,27 +427,19 @@ def validate_outfit(pieces, user_prefs=None):
             return False, reasons
 
     # --------------------------------------------------------------------------
-    # 4. STATEMENT PIECE RULE (At most ONE printed/embellished piece)
+    # 4. STATEMENT PIECE RULE (At most ONE printed/embellished garment)
     # --------------------------------------------------------------------------
-    statement_items = []
-    for p in all_pieces:
-        pat = _get_item_attr(p, 'pattern', 'solid')
-        if pat in ('printed', 'embellished'):
-            statement_items.append(_get_item_attr(p, 'product_name', 'Item'))
+    statement_garments = []
+    for p in (top, bottom, one_piece):
+        if p:
+            pat = _get_item_attr(p, 'pattern', 'solid')
+            if pat in ('printed', 'embellished'):
+                statement_garments.append(_get_item_attr(p, 'product_name', 'Garment'))
 
-    # Heavy jewellery or bold bags also count as statement pieces
-    for acc in accessories:
-        a_type = _get_item_attr(acc, 'accessory_type')
-        a_pat = _get_item_attr(acc, 'pattern', 'solid')
-        a_name = (_get_item_attr(acc, 'product_name', '') or '').lower()
-        if a_type == 'jewellery' and any(w in a_name for w in ['heavy', 'choker', 'bridal', 'necklace set', 'statement']):
-            if _get_item_attr(acc, 'product_name') not in statement_items:
-                statement_items.append(_get_item_attr(acc, 'product_name', 'Jewellery Set'))
-
-    if len(statement_items) > 1:
+    if len(statement_garments) > 1:
         reasons.append(
-            f"Outfit has {len(statement_items)} statement pieces ({', '.join(statement_items[:2])}); "
-            f"at most 1 printed/embellished statement piece is permitted."
+            f"Outfit has {len(statement_garments)} statement clothing pieces ({', '.join(statement_garments[:2])}); "
+            f"at most 1 printed/embellished clothing piece is permitted."
         )
         return False, reasons
 
@@ -533,18 +549,25 @@ def validate_outfit(pieces, user_prefs=None):
         fw_sub = _get_item_attr(footwear, 'sub_category', '')
         fw_name = (_get_item_attr(footwear, 'product_name', '') or '').lower()
 
-        # Digital wardrobe / stylist is strictly for women: block men's footwear
         fw_cat = (_get_item_attr(footwear, 'main_category', '') or '').lower()
-        if any(m in fw_name for m in ("men's", "mens ", "for men", " men ")) or ('men' in fw_cat and 'women' not in fw_cat):
+        if ('men' in fw_cat and 'women' not in fw_cat) or (
+            any(m in fw_name for m in ("men's", "mens ", "for men", " gents ")) and 'women' not in fw_name
+        ):
             reasons.append("Men's footwear is not permitted in women's styling.")
             return False, reasons
 
-        # Slippers / flip-flops are strictly excluded from all stylist recommendations
-        if fw_type in ('flip_flop', 'slipper') or fw_sub == 'Slippers' or 'slipper' in fw_name or 'flip flop' in fw_name or 'flipflop' in fw_name:
-            reasons.append("Slippers and flip flops are strictly excluded from Smart Budget Stylist recommendations.")
+        # 1. Sandals, slides, and slippers are strictly excluded from all recommendations
+        is_sandal_slipper = (
+            fw_type in ('sandal', 'flip_flop', 'slipper') or
+            fw_sub in ('Sandals', 'Fashion Sandals', 'Slippers', 'Flip Flops') or
+            'sandal' in fw_sub.lower() or 'sandle' in fw_sub.lower() or
+            any(w in fw_name for w in ['sandal', 'sandals', 'sandle', 'sandles', 'slide', 'slides', 'chappal', 'chappals', 'slipper', 'slippers', 'flip flop', 'flipflop', 'toe ring'])
+        )
+        if is_sandal_slipper:
+            reasons.append("Sandals, slides, and slippers are strictly excluded from Smart Budget Stylist recommendations.")
             return False, reasons
 
-        # Sportswear / activewear check
+        # 2. Sportswear / activewear check
         has_sport = (
             occasion in ('sportswear', 'activewear', 'sports') or
             any(
@@ -563,23 +586,51 @@ def validate_outfit(pieces, user_prefs=None):
             reasons.append(f"{fw_type.replace('_', ' ').title()} footwear is strictly blocked for {occasion.title()} occasion.")
             return False, reasons
 
-        # Western outfit footwear check: Western outfits (jeans-and-top, skirts, dresses, jumpsuits)
-        # MUST take heels (strictly no sneakers, sandals, or ethnic juttis)!
-        is_pure_western = False
-        if has_one_piece and _get_item_attr(one_piece, 'style_family') == 'western' and _get_item_attr(one_piece, 'subtype') not in ('saree', 'lehenga_set'):
-            is_pure_western = True
+        # 3. Detect Look Type for Category-Specific Footwear Rules
+        is_ethnic_look = False
+        is_jeans_top_look = False
+        is_western_dress_look = False
+
+        if has_one_piece:
+            op_sub = _get_item_attr(one_piece, 'subtype', 'other')
+            op_style = _get_item_attr(one_piece, 'style_family', 'western')
+            op_name = (_get_item_attr(one_piece, 'product_name', '') or '').lower()
+            if op_sub in ('saree', 'lehenga_set') or 'anarkali' in op_name or op_style == 'ethnic':
+                is_ethnic_look = True
+            else:
+                is_western_dress_look = True
         elif has_top and has_bottom:
             t_style = _get_item_attr(top, 'style_family', 'western')
             t_nm = (_get_item_attr(top, 'product_name', '') or '').lower()
             b_nm = (_get_item_attr(bottom, 'product_name', '') or '').lower()
             b_sub = _get_item_attr(bottom, 'subtype', 'other')
-            if t_style == 'western' and not any(k in t_nm for k in ('kurta', 'kurti', 'anarkali')):
-                if b_sub in ('jeans', 'skirt', 'shorts', 'trousers', 'cargo') or 'jeans' in b_nm:
-                    is_pure_western = True
+            is_kurta = any(k in t_nm for k in ('kurta', 'kurti', 'anarkali', 'chikankari')) or _get_item_attr(top, 'subtype') == 'kurta'
+            is_ethnic_bot = b_sub in ('palazzo', 'salwar', 'churidar', 'sharara') or any(k in b_nm for k in ('palazzo', 'salwar', 'sharara'))
 
-        if is_pure_western:
-            if fw_type in ('jutti', 'sneaker') or any(k in fw_name for k in ['juti', 'jutti', 'mojari', 'rajasthani', 'kolhapuri', 'sneaker', 'trainer', 'running', 'sport', 'athletic', 'walking']):
-                reasons.append("Western outfits cannot be paired with sneakers or ethnic juttis (heels required).")
+            if is_kurta and is_ethnic_bot:
+                is_ethnic_look = True
+            elif not is_kurta and (b_sub in ('jeans', 'denim') or 'jeans' in b_nm or 'denim' in b_nm):
+                is_jeans_top_look = True
+
+        # Western jeans-and-top: prefer sneakers, boots, or heels (Do NOT pair flats with jeans-and-top by default; strictly NO ethnic juttis)
+        if is_jeans_top_look:
+            if fw_type == 'jutti' or any(k in fw_name for k in ['juti', 'jutti', 'mojari', 'rajasthani', 'kolhapuri']):
+                reasons.append("Western jeans-and-top outfits cannot be paired with ethnic juttis.")
+                return False, reasons
+            if fw_type == 'flat' and not any(k in fw_name for k in ['sneaker', 'boot', 'heel', 'trainer', 'loafer']):
+                reasons.append("Western jeans-and-top outfits do not take casual flats by default; prefer sneakers, boots, or suitable heels.")
+                return False, reasons
+
+        # Western dresses and jumpsuits: prefer heels, boots, or dress shoes (NO ethnic juttis)
+        if is_western_dress_look:
+            if fw_type == 'jutti' or any(k in fw_name for k in ['juti', 'jutti', 'mojari', 'rajasthani', 'kolhapuri']):
+                reasons.append("Western dresses and jumpsuits cannot be paired with ethnic juttis.")
+                return False, reasons
+
+        # Ethnic outfits (sarees, Anarkalis, lehengas): prefer juttis, traditional flats, or heels (strictly NO sneakers / athletic shoes)
+        if is_ethnic_look:
+            if fw_type in ('sneaker', 'sports') or any(k in fw_name for k in ['sneaker', 'trainer', 'running', 'sport', 'athletic', 'walking']):
+                reasons.append("Traditional ethnic outfits (sarees, Anarkalis) cannot be paired with sneakers or sports shoes.")
                 return False, reasons
 
     # --------------------------------------------------------------------------

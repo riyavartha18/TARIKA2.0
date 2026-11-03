@@ -11,7 +11,7 @@ import {
   Store,
   ChevronDown,
 } from 'lucide-react';
-import { getSmartBudgetOutfits, getWardrobeItems } from '../../services/api';
+import { getSmartBudgetOutfits, getWardrobeItems, getCustomerCoins, redeemCoinsForOutfit } from '../../services/api';
 import { useCustomer } from '../../context/CustomerContext';
 import { useAuth } from '../../auth/AuthContext';
 
@@ -67,7 +67,12 @@ export default function SmartBudgetStylistPage() {
   const [sortBy, setSortBy] = useState('best');
   const [selectedBaseFilter, setSelectedBaseFilter] = useState('all');
   const [visibleCount, setVisibleCount] = useState(24);
-  const [personaliseLooks, setPersonaliseLooks] = useState(true);
+
+  // TARIKA Coins & Loyalty State
+  const [userCoins, setUserCoins] = useState(null);
+  const [redeemedOutfits, setRedeemedOutfits] = useState({});
+  const [redeemingOutfitId, setRedeemingOutfitId] = useState(null);
+  const [coinActionMessage, setCoinActionMessage] = useState({});
 
   // Outfit Favourites
   const [favouritedOutfits, setFavouritedOutfits] = useState({});
@@ -91,6 +96,18 @@ export default function SmartBudgetStylistPage() {
       }
     });
   }, [token]);
+
+  // Fetch real customer coins on auth change
+  useEffect(() => {
+    const customerId = user?.customer_id || user?.id || user?.auth_user_id || null;
+    if (customerId) {
+      getCustomerCoins(customerId, token).then((res) => {
+        if (res && res.success && res.coins) {
+          setUserCoins(res.coins);
+        }
+      });
+    }
+  }, [user, token]);
 
   // Loading & Results
   const [loading, setLoading] = useState(false);
@@ -127,6 +144,61 @@ export default function SmartBudgetStylistPage() {
     }
   };
 
+  // Secure coin redemption on outfit
+  const handleRedeemCoins = async (outfit) => {
+    const customerId = user?.customer_id || user?.id || user?.auth_user_id;
+    if (!customerId) {
+      setCoinActionMessage(prev => ({
+        ...prev,
+        [outfit.id]: { type: 'error', text: 'Please log in to redeem TARIKA coins.' }
+      }));
+      return;
+    }
+
+    const available = userCoins?.available_coins || 0;
+    const eligible = outfit.eligible_coins || Math.min(available, Math.floor((outfit.subtotal_price || outfit.total_price) * 0.15));
+    if (eligible <= 0) {
+      setCoinActionMessage(prev => ({
+        ...prev,
+        [outfit.id]: { type: 'error', text: 'No coins available or eligible for this look.' }
+      }));
+      return;
+    }
+
+    setRedeemingOutfitId(outfit.id);
+    const res = await redeemCoinsForOutfit({
+      customerId,
+      outfitId: outfit.id,
+      coins: eligible,
+      token
+    });
+    setRedeemingOutfitId(null);
+
+    if (res.success) {
+      setRedeemedOutfits(prev => ({
+        ...prev,
+        [outfit.id]: {
+          redeemed: true,
+          coinsRedeemed: res.redeemed_coins,
+          discountAmount: res.discount_amount,
+        }
+      }));
+      setUserCoins(prev => ({
+        ...prev,
+        available_coins: res.new_available_coins
+      }));
+      setCoinActionMessage(prev => ({
+        ...prev,
+        [outfit.id]: { type: 'success', text: `₹${res.discount_amount} coin discount applied successfully!` }
+      }));
+    } else {
+      setCoinActionMessage(prev => ({
+        ...prev,
+        [outfit.id]: { type: 'error', text: res.error || 'Failed to redeem coins.' }
+      }));
+    }
+  };
+
   const fetchOutfits = useCallback(async (isInitial = false, overrideParams = {}) => {
     setLoading(true);
     setError('');
@@ -137,7 +209,6 @@ export default function SmartBudgetStylistPage() {
     const targetDirection = overrideParams.direction !== undefined ? overrideParams.direction : fashionDirection;
     const targetSort = overrideParams.sort !== undefined ? overrideParams.sort : sortBy;
     const targetWardrobeIds = overrideParams.wardrobe_item_ids !== undefined ? overrideParams.wardrobe_item_ids : selectedWardrobeItemIds;
-    const targetPersonalise = overrideParams.personalise !== undefined ? overrideParams.personalise : personaliseLooks;
 
     const customerId = user?.customer_id || user?.id || user?.auth_user_id || null;
 
@@ -149,12 +220,15 @@ export default function SmartBudgetStylistPage() {
       sort: targetSort,
       wardrobe_item_ids: targetWardrobeIds,
       customer_id: customerId,
-      personalise: targetPersonalise,
+      personalise: true, // Auto-personalised using preference signals
       token: token,
     });
     setLoading(false);
     if (res.success && res.outfits && res.outfits.length > 0) {
       setOutfitsData(res);
+      if (res.user_coins) {
+        setUserCoins(res.user_coins);
+      }
       if (!isInitial && resultsRef.current) {
         resultsRef.current.scrollIntoView({ behavior: 'smooth' });
       }
@@ -162,11 +236,11 @@ export default function SmartBudgetStylistPage() {
       setOutfitsData(null);
       setError(res.error || res.message || `No outfit combinations found under ₹${targetBudget.toLocaleString()}. Try increasing your budget.`);
     }
-  }, [budget, selectedColor, fashionDirection, sortBy, selectedWardrobeItemIds, personaliseLooks, user, token]);
+  }, [budget, selectedColor, fashionDirection, sortBy, selectedWardrobeItemIds, user, token]);
 
   useEffect(() => {
     fetchOutfits(true);
-  }, [personaliseLooks]);
+  }, []);
 
   // Compute sorted outfits based on current sortBy state
   const displayedOutfits = React.useMemo(() => {
@@ -484,93 +558,84 @@ export default function SmartBudgetStylistPage() {
             Set your budget, select an outfit mode and optional colour palette to curate beautiful complete looks.
           </p>
 
-          {/* Personalise My Looks Toggle (Privacy Control) */}
+          {/* TARIKA Coins Loyalty Rewards Banner (Automated Personalization) */}
           <div
             style={{
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              backgroundColor: '#FAF5F4',
+              backgroundColor: '#FFF9F5',
               borderRadius: '16px',
-              padding: '12px 18px',
-              border: '1px solid #EADBDA',
+              padding: '14px 20px',
+              border: '1.5px solid #F5E2D0',
               flexWrap: 'wrap',
               gap: '12px',
+              boxShadow: '0 2px 10px rgba(222, 155, 38, 0.08)',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
               <div
                 style={{
-                  width: '34px',
-                  height: '34px',
+                  width: '38px',
+                  height: '38px',
                   borderRadius: '50%',
-                  backgroundColor: '#FFFFFF',
-                  border: '1px solid #EADBDA',
+                  background: 'linear-gradient(135deg, #FFD56B 0%, #DE9B26 100%)',
+                  boxShadow: '0 2px 6px rgba(222, 155, 38, 0.35)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  fontSize: '20px',
                   flexShrink: 0,
                 }}
               >
-                <Sparkles size={17} color="#9C4146" />
+                🪙
               </div>
               <div>
-                <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#1F191B', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span>Personalise my looks</span>
+                <div style={{ fontSize: '0.92rem', fontWeight: 700, color: '#1F191B', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>TARIKA Rewards Balance</span>
                   <span
                     style={{
-                      fontSize: '0.68rem',
-                      fontWeight: 700,
-                      backgroundColor: personaliseLooks ? '#E6F4EA' : '#F1F3F4',
-                      color: personaliseLooks ? '#137333' : '#5F6368',
-                      padding: '2px 7px',
+                      fontSize: '0.78rem',
+                      fontWeight: 800,
+                      backgroundColor: '#FEF3D6',
+                      color: '#9E6500',
+                      padding: '2px 10px',
                       borderRadius: '999px',
+                      border: '1px solid #F6D884',
                     }}
                   >
-                    {personaliseLooks ? 'ON' : 'OFF'}
+                    {userCoins?.available_coins != null ? `${userCoins.available_coins} Coins Available` : (user ? 'Loading Coins...' : '150 Welcome Coins Available')}
                   </span>
                 </div>
-                <div style={{ fontSize: '0.74rem', color: '#6B5E63' }}>
-                  {user ? 'Curates outfits tailored to your wishlist items & past style preferences (Surprise Me).' : 'Log in to auto-personalise looks from your wishlist and order history.'}
+                <div style={{ fontSize: '0.76rem', color: '#6B5E63', marginTop: '2px' }}>
+                  {user ? (
+                    <>Save up to <strong>{userCoins?.max_redeem_percent || 15}%</strong> off on curated outfits (1 Coin = ₹1 discount) · Earn 5% back on every outfit purchase</>
+                  ) : (
+                    <>Log in to access your <strong>150 Welcome Coins</strong> and redeem discounts up to 15% on any look.</>
+                  )}
                 </div>
               </div>
             </div>
 
-            <label style={{ position: 'relative', display: 'inline-block', width: '48px', height: '26px', cursor: 'pointer', flexShrink: 0 }}>
-              <input
-                type="checkbox"
-                checked={personaliseLooks}
-                onChange={(e) => setPersonaliseLooks(e.target.checked)}
-                style={{ opacity: 0, width: 0, height: 0 }}
-              />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span
                 style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  backgroundColor: personaliseLooks ? '#9C4146' : '#D1C5C7',
-                  borderRadius: '26px',
-                  transition: 'background-color 0.2s ease',
+                  fontSize: '0.76rem',
+                  fontWeight: 700,
+                  color: '#2F6F4E',
+                  backgroundColor: '#EBF7EE',
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid #CFEBD5',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
                 }}
               >
-                <span
-                  style={{
-                    position: 'absolute',
-                    content: '""',
-                    height: '20px',
-                    width: '20px',
-                    left: personaliseLooks ? '24px' : '3px',
-                    bottom: '3px',
-                    backgroundColor: '#FFFFFF',
-                    borderRadius: '50%',
-                    transition: 'left 0.2s ease',
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                  }}
-                />
+                <Sparkles size={14} color="#2F6F4E" />
+                <span>Auto-Personalised from Your Wishlist & History</span>
               </span>
-            </label>
+            </div>
           </div>
         </div>
 
@@ -1062,9 +1127,16 @@ export default function SmartBudgetStylistPage() {
             }}
           >
             {baseFilteredOutfits.slice(0, visibleCount).map((outfit, idx) => {
-              const currentTotal = outfit.total_price || 0;
-              const isOverBudget = currentTotal > budget;
-              const coinsLeft = Math.max(0, budget - currentTotal);
+              const subtotal = outfit.subtotal_price || outfit.total_price || 0;
+              const isRedeemed = Boolean(redeemedOutfits[outfit.id]?.redeemed);
+              const appliedCoinDiscount = isRedeemed
+                ? (redeemedOutfits[outfit.id].discountAmount || outfit.coin_discount || 0)
+                : 0;
+              const finalPayable = Math.max(0, subtotal - appliedCoinDiscount);
+              const remainingBudget = Math.max(0, budget - finalPayable);
+              const eligibleCoins = outfit.eligible_coins || (userCoins?.available_coins ? Math.min(userCoins.available_coins, Math.floor(subtotal * 0.15)) : 0);
+              const currentTotal = finalPayable;
+              const coinsLeft = remainingBudget;
 
               // Secondary pieces for collage right column:
               const secondaryItems = [
@@ -1397,86 +1469,35 @@ export default function SmartBudgetStylistPage() {
                       </div>
                     </div>
                     <div style={{ textAlign: 'right' }}>
-                      <div
-                        style={{
-                          fontFamily: "'Playfair Display', serif",
-                          fontSize: '1.4rem',
-                          fontWeight: 700,
-                          color: '#1F191B',
-                        }}
-                      >
+                      <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#9C4146' }}>
                         ₹{currentTotal.toLocaleString()}
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: '#8A7A7F', fontWeight: 500 }}>
+                        Outfit Total
                       </div>
                     </div>
                   </div>
 
-                  {/* REMAINING FROM YOUR BUDGET BANNER */}
-                  {(() => {
-                    const leftoverPercent = budget > 0 ? (coinsLeft / budget) * 100 : 0;
-                    const isHighLeftover = leftoverPercent > 10;
-
-                    return (
-                      <div
-                        style={{
-                          backgroundColor: isHighLeftover ? '#FAF8F5' : '#EFF7F2',
-                          border: isHighLeftover ? '1px solid #EADBDA' : '1px solid #D2E9DA',
-                          borderRadius: '999px',
-                          padding: '8px 16px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '10px',
-                          margin: '6px 0 14px 0',
-                        }}
-                      >
-                        {!isHighLeftover ? (
-                          <>
-                            <div
-                              style={{
-                                width: '22px',
-                                height: '22px',
-                                borderRadius: '50%',
-                                backgroundColor: '#DE9B26',
-                                color: '#FFFFFF',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontSize: '12px',
-                                fontWeight: 800,
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
-                                flexShrink: 0,
-                              }}
-                            >
-                              ₹
-                            </div>
-                            <span
-                              style={{
-                                color: '#235A36',
-                                fontSize: '0.88rem',
-                                fontWeight: 600,
-                                letterSpacing: '0.1px',
-                              }}
-                            >
-                              ₹{coinsLeft.toLocaleString()} remaining from your budget
-                            </span>
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={15} color="#9C4146" style={{ flexShrink: 0 }} />
-                            <span
-                              style={{
-                                color: '#8A5256',
-                                fontSize: '0.82rem',
-                                fontWeight: 600,
-                                letterSpacing: '0.1px',
-                              }}
-                            >
-                              ₹{coinsLeft.toLocaleString()} unspent — {outfit.notes_remaining || `Add an accessory or belt (₹${coinsLeft.toLocaleString()}) to complete this look`}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })()}
+                  {/* COINS REMAINING BADGE */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      padding: '10px 18px',
+                      backgroundColor: '#FAF7F5',
+                      border: '1px solid #ECE3E1',
+                      borderRadius: '999px',
+                      margin: '12px 0 16px 0',
+                      fontSize: '0.88rem',
+                      fontWeight: 600,
+                      color: '#4A3E42',
+                    }}
+                  >
+                    <span style={{ fontSize: '1rem' }}>🪙</span>
+                    <span>{coinsLeft.toLocaleString()} coins remaining</span>
+                  </div>
 
                   {/* BOTTOM ACTION BUTTONS (Matching Screenshot 1 Pixel-Perfect) */}
                   <div

@@ -6,30 +6,23 @@ import {
   ArrowRight,
   ChevronRight,
 } from 'lucide-react';
+import ExclusiveOffersCarousel from '../../components/customer/ExclusiveOffersCarousel';
+import TrendingFashionCarousel from '../../components/customer/TrendingFashionCarousel';
+import SpinRewardsWheelSection from '../../components/customer/SpinRewardsWheelSection';
 import CategoryEditorialSection from '../../components/customer/CategoryEditorialSection';
-import CustomerOffers from '../../components/customer/CustomerOffers';
 import ProductCard from '../../components/customer/ProductCard';
 import PersonalizedSection from '../../components/customer/PersonalizedSection';
 import {
   SkeletonProductRow,
   SkeletonProductGrid,
-  SkeletonCategoryPills,
 } from '../../components/customer/Skeleton';
 import { useAuth } from '../../auth/AuthContext';
-import { getCategories, getNewArrivals, getSale } from '../../services/api';
-
-// Fallback artwork when a database category carries no image of its own.
-const FALLBACK_CATEGORY_IMAGE =
-  'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=600&auto=format&fit=crop&q=80';
+import { getNewArrivals, getSale } from '../../services/api';
 
 export default function CustomerHome() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  // Each section owns its own loading flag so the page paints progressively:
-  // a slow category/product request can no longer block the rest of the page.
-  const [categories, setCategories] = useState([]);
-  const [categoriesLoading, setCategoriesLoading] = useState(true);
   const [newArrivals, setNewArrivals] = useState([]);
   const [newArrivalsLoading, setNewArrivalsLoading] = useState(true);
   const [saleItems, setSaleItems] = useState([]);
@@ -38,14 +31,7 @@ export default function CustomerHome() {
   useEffect(() => {
     let alive = true;
 
-    // Fire each request independently and commit as it resolves instead of
-    // awaiting Promise.all, so the first paint is not gated by the slowest call.
-    getCategories()
-      .then((res) => { if (alive && res.success) setCategories(res.categories || []); })
-      .catch(() => {})
-      .finally(() => { if (alive) setCategoriesLoading(false); });
-
-    getNewArrivals(40)
+    getNewArrivals(20)
       .then((res) => { if (alive && res.success) setNewArrivals(res.products || []); })
       .finally(() => { if (alive) setNewArrivalsLoading(false); });
 
@@ -57,17 +43,12 @@ export default function CustomerHome() {
     return () => { alive = false; };
   }, []);
 
-  const goToCategory = useCallback(
-    (cat) => navigate(`/customer/shop?category=${encodeURIComponent(cat.slug || cat.name)}`),
-    [navigate]
-  );
-
-  const firstName = (user?.full_name || user?.customer_name || '').trim().split(' ')[0];
+  const firstName = (user?.full_name || user?.customer_name || 'Riya').trim().split(' ')[0];
 
   return (
     <div className="customer-home">
-      {/* 1. PERSONALIZED WELCOME — compact, no external image (fast LCP) */}
-      <section className="welcome-band">
+      {/* 1. WELCOME HERO BANNER — with boutique clothing rack & lilies on the right */}
+      <section className="welcome-band" style={{ marginBottom: '2.5rem' }}>
         <div className="welcome-band-inner">
           <span className="welcome-eyebrow">
             <Sparkles size={13} /> Welcome back{firstName ? `, ${firstName}` : ''}
@@ -87,19 +68,33 @@ export default function CustomerHome() {
             </Link>
           </div>
         </div>
+
+        {/* Right Boutique Clothing Rack Display */}
+        <div className="welcome-band-media">
+          <img
+            src="/images/tarika_hero_rack.jpg"
+            alt="Curated boutique wardrobe rack with gowns and lilies"
+          />
+        </div>
       </section>
 
-      {/* 2. PERSONALIZED OFFERS — from the latest RFM analysis + published campaigns */}
-      <CustomerOffers />
+      {/* 2. PERSONALIZED EXCLUSIVE OFFERS CAROUSEL */}
+      <ExclusiveOffersCarousel />
 
-      {/* 3. EXPLORE BY CATEGORY — editorial cards */}
+      {/* 3. DYNAMIC FASHION PRODUCT CAROUSEL ("TRENDING IN TARIKA") WITH CATEGORY FILTERS */}
+      <TrendingFashionCarousel />
+
+      {/* 4. REWARDS WHEEL: CENTRED "SPIN & EARN COINS" SECTION */}
+      <SpinRewardsWheelSection />
+
+      {/* 5. EXPLORE BY CATEGORY — editorial cards */}
       <CategoryEditorialSection />
 
-      {/* 3. PERSONALIZED RECOMMENDATIONS — Men/Women + Past Orders */}
+      {/* 6. PERSONALIZED RECOMMENDATIONS — Customer History */}
       <PersonalizedSection />
 
-      {/* 4. NEW ARRIVALS — single horizontal product rail */}
-      <section aria-label="New arrivals">
+      {/* 7. NEW ARRIVALS — curated horizontal product rail */}
+      <section aria-label="New arrivals" style={{ marginBottom: '2.75rem' }}>
         <div className="section-head">
           <div>
             <div className="section-eyebrow section-eyebrow--inline">
@@ -118,7 +113,7 @@ export default function CustomerHome() {
           <SkeletonProductRow count={5} />
         ) : newArrivals.length ? (
           <div className="horizontal-scroll-row">
-            {newArrivals.map((prod) => (
+            {newArrivals.slice(0, 10).map((prod) => (
               <div key={prod.product_id || prod.id} className="scroll-snap-card" style={{ width: '230px' }}>
                 <ProductCard product={prod} />
               </div>
@@ -129,8 +124,8 @@ export default function CustomerHome() {
         )}
       </section>
 
-      {/* 5. ON SALE — responsive product grid (distinct from New In) */}
-      <section aria-label="Sale products">
+      {/* 8. ON SALE — Deals & Reductions */}
+      <section aria-label="Sale products" style={{ marginBottom: '2.5rem' }}>
         <div className="section-head">
           <div>
             <div className="section-eyebrow section-eyebrow--inline">

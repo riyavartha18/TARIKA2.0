@@ -132,6 +132,7 @@ class ProductListSerializer(serializers.ModelSerializer):
     link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    discounted_price = serializers.FloatField(read_only=True)
     # Discount AMOUNT in currency (`discount_price` column) plus the derived
     # percentage — the percentage is never stored, always computed.
     discount_price = serializers.FloatField(read_only=True)
@@ -155,6 +156,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             'link',
             'base_price',
             'selling_price',
+            'discounted_price',
             'discount_price',
             'discount_percentage',
             'in_stock',
@@ -228,6 +230,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     link = serializers.CharField(read_only=True)
     base_price = serializers.SerializerMethodField()
     selling_price = serializers.SerializerMethodField()
+    discounted_price = serializers.FloatField(read_only=True)
     # Discount AMOUNT in currency + derived percentage (never stored as %).
     discount_price = serializers.FloatField(read_only=True)
     discount_percentage = serializers.SerializerMethodField()
@@ -249,6 +252,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'link',
             'base_price',
             'selling_price',
+            'discounted_price',
             'discount_price',
             'discount_percentage',
             'in_stock',

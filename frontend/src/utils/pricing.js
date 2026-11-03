@@ -11,32 +11,45 @@ export function getProductPricing(product = {}) {
     return Number.isFinite(num) ? num : null;
   };
 
-  const basePrice = Math.max(0, toFiniteNumber(product.base_price ?? product.initial_price) ?? 0);
+  const basePrice = Math.max(
+    0,
+    toFiniteNumber(product.base_price ?? product.initial_price ?? product.actual_price) ?? 0
+  );
 
-  // Final selling price as delivered by the API ('800' text or number).
-  const listedPriceValue = product.sale_price ?? product.selling_price ?? product.actual_price;
-  const listedPrice = toFiniteNumber(listedPriceValue);
+  const discountedPrice = toFiniteNumber(product.discounted_price);
+  const sellingPrice = toFiniteNumber(product.selling_price ?? product.sale_price);
+  const discountVal = toFiniteNumber(product.discount_amount ?? product.discount_price);
 
-  // Discount AMOUNT in currency (products.discount_price); legacy payloads
-  // may still carry discount_percentage — treat it as a percentage hint only.
-  const suppliedAmount = toFiniteNumber(product.discount_price);
-  let discountAmount = suppliedAmount != null && suppliedAmount >= 0 ? suppliedAmount : 0;
-  if (suppliedAmount == null && listedPrice != null && listedPrice < basePrice) {
-    discountAmount = basePrice - listedPrice;
-  }
-
-  // Current price: prefer the delivered final price; fall back to
-  // base - discount so older payloads (without actual_price) still render.
   let currentPrice;
-  if (listedPrice != null) {
-    currentPrice = listedPrice;
+  let discountAmount = 0;
+
+  if (discountedPrice != null && discountedPrice > 0) {
+    currentPrice = discountedPrice;
+    discountAmount = basePrice > currentPrice
+      ? Math.round((basePrice - currentPrice) * 100) / 100
+      : (discountVal || 0);
+  } else if (sellingPrice != null && sellingPrice > 0) {
+    // Guard: If sellingPrice is identical to discountVal (e.g. 100 when base is 1988)
+    // then 100 is the discount amount to be reduced from basePrice
+    if (basePrice > 0 && discountVal != null && Math.abs(sellingPrice - discountVal) < 0.01 && (basePrice - discountVal) > 0) {
+      currentPrice = Math.round((basePrice - discountVal) * 100) / 100;
+      discountAmount = discountVal;
+    } else {
+      currentPrice = sellingPrice;
+      discountAmount = basePrice > currentPrice
+        ? Math.round((basePrice - currentPrice) * 100) / 100
+        : (discountVal || 0);
+    }
+  } else if (discountVal != null && basePrice > 0) {
+    currentPrice = Math.max(0, Math.round((basePrice - discountVal) * 100) / 100);
+    discountAmount = discountVal;
   } else {
-    currentPrice = Math.max(0, basePrice - discountAmount);
+    currentPrice = basePrice;
+    discountAmount = 0;
   }
 
   // Percentage beside the discounted price: amount / original * 100, max 2 dp.
-  // A zero / missing original price is handled safely (no division).
-  const discountPercentage = basePrice > 0
+  const discountPercentage = basePrice > 0 && discountAmount > 0
     ? Math.round((discountAmount / basePrice) * 100 * 100) / 100
     : 0;
 
@@ -45,7 +58,7 @@ export function getProductPricing(product = {}) {
     currentPrice,
     discountAmount,
     discountPercentage,
-    isOnSale: discountAmount > 0,
+    isOnSale: discountAmount > 0 && currentPrice < basePrice,
   };
 }
 

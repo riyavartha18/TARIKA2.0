@@ -23,22 +23,41 @@ logger = logging.getLogger(__name__)
 
 
 def get_effective_product_price(p):
-    """Calculates effective selling price."""
+    """Calculates effective selling price using discounted_price / selling_price."""
     if not p:
         return 0.0
     if getattr(p, 'from_wardrobe', False) or getattr(p, '__class__', None).__name__ == 'WardrobeItem':
         return 0.0
+
+    # 1. First preference: selling_price property (real discounted_price or parsed actual_price)
+    try:
+        sp = getattr(p, 'selling_price', None)
+        if sp is not None and float(sp) > 0:
+            return float(sp)
+    except (ValueError, TypeError):
+        pass
+
+    # 2. Second preference: discounted_price column
+    try:
+        dp = getattr(p, 'discounted_price', None)
+        if dp is not None and float(dp) > 0:
+            return float(dp)
+    except (ValueError, TypeError):
+        pass
+
+    # 3. Third preference: base_price / original_price
+    try:
+        bp = getattr(p, 'base_price', None) or getattr(p, 'original_price', None)
+        if bp is not None and float(bp) > 0:
+            return float(bp)
+    except (ValueError, TypeError):
+        pass
+
+    # 4. Fallback: discount_price
     try:
         disc = getattr(p, 'discount_price', None)
         if disc is not None and float(disc) > 0:
             return float(disc)
-    except (ValueError, TypeError):
-        pass
-
-    try:
-        base = getattr(p, 'base_price', None)
-        if base is not None and float(base) > 0:
-            return float(base)
     except (ValueError, TypeError):
         pass
 
@@ -98,21 +117,29 @@ def serialize_catalog_product(p):
     elif not isinstance(dom_cols, list):
         dom_cols = []
 
+    discount_val = float(getattr(p, 'discount_price', 0.0) or 0.0)
+    base_val = float(p.base_price) if p.base_price else float(eff_price)
+    if discount_val <= 0 and base_val > eff_price:
+        discount_val = base_val - eff_price
+
     return {
         'product_id': p.product_id,
         'id': p.product_id,
         'product_name': p.product_name,
         'name': p.product_name,
         'selling_price': int(round(eff_price)),
-        'discount_price': float(p.discount_price) if (p.discount_price and p.discount_price > 0) else eff_price,
-        'base_price': int(round(float(p.base_price))) if p.base_price else int(round(eff_price)),
-        'actual_price': float(p.base_price) if p.base_price else eff_price,
+        'discounted_price': float(eff_price),
+        'discount_price': float(discount_val),
+        'discount_amount': float(discount_val),
+        'base_price': int(round(base_val)),
+        'actual_price': float(base_val),
         'image': clean_image or '',
         'primary_image': clean_image or '',
         'images': [clean_image] if clean_image else [],
         'main_category': p.main_category,
         'sub_category': p.sub_category,
         'is_active': (p.available_quantity or 0) > 0,
+
         'is_image_valid': getattr(p, 'is_image_valid', True),
         'total_stock': int(p.available_quantity or 0),
         'slot_type': getattr(p, 'slot_type', None),
@@ -537,6 +564,11 @@ class SmartBudgetOutfitService:
         if isinstance(personalise_flag, str):
             personalise_flag = personalise_flag.lower() in ('true', '1')
 
+        # Real customer coins & loyalty balance
+        from .coin_service import CoinService
+        coin_data = CoinService.get_customer_coins(customer_id)
+        available_coins = coin_data.get('available_coins', 0)
+
         taste_profile = None
         purchased_pids = set()
         if customer_id and personalise_flag:
@@ -554,7 +586,7 @@ class SmartBudgetOutfitService:
             Q(confidence__gte=0.6) &
             Q(slot_type__isnull=False) &
             Q(available_quantity__gt=0) &
-            Q(discount_price__gt=0)
+            Q(discounted_price__gt=0)
         )
 
         inner_q = Q()
@@ -569,7 +601,7 @@ class SmartBudgetOutfitService:
             gender_q = (
                 Q(main_category="women's clothing") |
                 Q(main_category="women's shoes") |
-                (Q(main_category='stores') & Q(sub_category__in=['Handbags', 'Potli Bags', 'Dupattas', 'Jewellery', 'Bags'])) |
+                (Q(main_category='stores') & Q(sub_category__in=['Handbags', 'Potli Bags', 'Dupattas', 'Jewellery', 'Bags', 'Sarees', 'Dresses', "Women's Fashion"])) |
                 (Q(main_category='accessories') & Q(sub_category__in=['Handbags', 'Potli Bags', 'Dupattas', 'Jewellery', 'Bags']))
             )
             men_noise = (
@@ -596,10 +628,26 @@ class SmartBudgetOutfitService:
         if purchased_pids:
             candidate_pool = candidate_pool.exclude(product_id__in=purchased_pids)
 
-        # Separate items by slot_type
-        top_qs = candidate_pool.filter(slot_type='top', discount_price__lte=budget_float)
-        bottom_qs = candidate_pool.filter(slot_type='bottom', discount_price__lte=budget_float)
-        op_qs = candidate_pool.filter(slot_type='one_piece', discount_price__lte=budget_float)
+        # Separate items by slot_type (Ensure pants / sweatpants / trousers are never in one_piece)
+        bottom_noise_q = (
+            Q(product_name__icontains='pant') | Q(product_name__icontains='trouser') |
+            Q(product_name__icontains='jeans') | Q(product_name__icontains='sweatpant') |
+            Q(product_name__icontains='jogger') | Q(product_name__icontains='palazzo') |
+            Q(product_name__icontains='salwar') | Q(product_name__icontains='track pant') |
+            Q(product_name__icontains='trackpant') | Q(product_name__icontains='shorts') |
+            Q(product_name__icontains='legging')
+        ) & ~(
+            Q(product_name__icontains='jumpsuit') | Q(product_name__icontains='romper') |
+            Q(product_name__icontains='playsuit') | Q(product_name__icontains='dress') |
+            Q(product_name__icontains='gown')
+        )
+
+        top_qs = candidate_pool.filter(slot_type='top', discounted_price__lte=budget_float)
+        bottom_qs = candidate_pool.filter(
+            (Q(slot_type='bottom') | (Q(slot_type='one_piece') & bottom_noise_q)),
+            discounted_price__lte=budget_float
+        )
+        op_qs = candidate_pool.filter(slot_type='one_piece', discounted_price__lte=budget_float).exclude(bottom_noise_q)
 
         # Footwear with junk exclusion
         fw_junk_q = Q()
@@ -609,11 +657,12 @@ class SmartBudgetOutfitService:
         sandal_keywords = [
             'sandal', 'sandals', 'sandle', 'sandles', 'sendal', 'sendel', 'sendle',
             'slide', 'slides', 'chappal', 'chappals', 'chappl',
-            'flip flop', 'flipflop', 'slipper', 'slippers', 'toe ring', 'thong', 'strappy flat'
+            'flip flop', 'flipflop', 'slipper', 'slippers', 'toe ring', 'thong', 'strappy flat',
+            'clog', 'clogs'
         ]
         sandal_q = (
             Q(footwear_type__in=['sandal', 'flip_flop', 'slipper']) |
-            Q(sub_category__in=['Sandals', 'Fashion Sandals', 'Slippers']) |
+            Q(sub_category__in=['Sandals', 'Fashion Sandals', 'Slippers', 'Flip Flops']) |
             Q(sub_category__icontains='sandal') |
             Q(sub_category__icontains='sandle')
         )
@@ -624,35 +673,35 @@ class SmartBudgetOutfitService:
             fw_qs = Product.objects.filter(
                 base_filter,
                 main_category="women's shoes",
-                discount_price__lte=budget_float
-            ).exclude(fw_junk_q).exclude(sandal_q)
+                discounted_price__lte=budget_float
+            ).exclude(fw_junk_q).exclude(sandal_q).exclude(men_noise)
             if purchased_pids:
                 fw_qs = fw_qs.exclude(product_id__in=purchased_pids)
         else:
             fw_qs = candidate_pool.filter(
                 slot_type='footwear',
-                discount_price__lte=budget_float
+                discounted_price__lte=budget_float
             ).exclude(fw_junk_q).exclude(sandal_q)
 
         # Bags
         bag_junk_q = Q()
         for kw in cls.BAG_JUNK_KEYWORDS:
             bag_junk_q |= Q(product_name__icontains=kw)
-        bag_qs = candidate_pool.filter(slot_type='bag', discount_price__lte=budget_float).exclude(bag_junk_q).exclude(subtype='pouch')
+        bag_qs = candidate_pool.filter(slot_type='bag', discounted_price__lte=budget_float).exclude(bag_junk_q).exclude(subtype='pouch')
         if gender_clean == 'women':
             bag_qs = bag_qs.exclude(Q(product_name__icontains=" men ") | Q(product_name__istartswith="men ") | Q(sub_category__icontains="men"))
-            acc_qs = candidate_pool.filter(slot_type='accessory', discount_price__lte=budget_float).exclude(
+            acc_qs = candidate_pool.filter(slot_type='accessory', discounted_price__lte=budget_float).exclude(
                 Q(product_name__icontains=" men ") | Q(product_name__istartswith="men ") | Q(sub_category__icontains="men")
             )
         else:
-            acc_qs = candidate_pool.filter(slot_type='accessory', discount_price__lte=budget_float)
+            acc_qs = candidate_pool.filter(slot_type='accessory', discounted_price__lte=budget_float)
 
         # Outerwear / Layers (Jackets, blazers, shrugs, cardigans)
         layer_kws = ['jacket', 'blazer', 'shrug', 'cardigan', 'coat']
         layer_q = Q()
         for k in layer_kws:
             layer_q |= Q(product_name__icontains=k) | Q(subtype__icontains=k)
-        layer_qs = candidate_pool.filter(layer_q, discount_price__lte=budget_float)
+        layer_qs = candidate_pool.filter(layer_q, discounted_price__lte=budget_float)
 
         # Occasion Footwear filtering
         occ_rules = OCCASION_RULES.get(occasion_clean, {})
@@ -699,48 +748,78 @@ class SmartBudgetOutfitService:
             return out
 
         # Fast batched retrieval across active slots (sampling premium and budget tiers)
-        raw_tops = dedup_items(list(top_qs.order_by('-discount_price')[:60]) + list(top_qs.order_by('discount_price')[:60]))
+        raw_tops = dedup_items(list(top_qs.order_by('-discounted_price')[:60]) + list(top_qs.order_by('discounted_price')[:60]))
         top_kurtas = [t for t in raw_tops if getattr(t, 'subtype', '') == 'kurta' or any(k in (getattr(t, 'product_name', '') or '').lower() for k in ('kurta', 'kurti', 'chikankari'))]
         top_western = [t for t in raw_tops if t not in top_kurtas and getattr(t, 'subtype', '') != 'choli']
         cholis = [t for t in raw_tops if getattr(t, 'subtype', '') == 'choli' or 'blouse' in (getattr(t, 'product_name', '') or '').lower() or 'choli' in (getattr(t, 'product_name', '') or '').lower()]
         tops = raw_tops
 
-        raw_bots = dedup_items(list(bottom_qs.order_by('-discount_price')[:60]) + list(bottom_qs.order_by('discount_price')[:60]))
+        raw_bots = dedup_items(list(bottom_qs.order_by('-discounted_price')[:60]) + list(bottom_qs.order_by('discounted_price')[:60]))
         bot_ethnic = [b for b in raw_bots if getattr(b, 'subtype', '') in ('palazzo', 'salwar', 'sharara') or any(k in (getattr(b, 'product_name', '') or '').lower() for k in ('palazzo', 'salwar', 'sharara'))]
         bot_western = [b for b in raw_bots if b not in bot_ethnic and getattr(b, 'subtype', '') != 'lehenga_skirt']
         lehenga_skirts = [b for b in raw_bots if getattr(b, 'subtype', '') == 'lehenga_skirt']
         bottoms = [b for b in raw_bots if getattr(b, 'subtype', '') != 'lehenga_skirt']
 
-        raw_ops = dedup_items(list(op_qs.order_by('-discount_price')[:60]) + list(op_qs.order_by('discount_price')[:60]))
+        raw_ops = dedup_items(list(op_qs.order_by('-discounted_price')[:60]) + list(op_qs.order_by('discounted_price')[:60]))
         one_pieces = [o for o in raw_ops if getattr(o, 'subtype', '') not in ('saree', 'lehenga_set')]
         op_lehenga_sets = [o for o in raw_ops if getattr(o, 'subtype', '') == 'lehenga_set']
         lehenga_sets = op_lehenga_sets
 
-        # Use ALL eligible sarees in catalogue
-        sarees = list(op_sarees.order_by('-discount_price')[:80])
+        # Use ALL eligible sarees in catalogue (sampling premium and budget tiers)
+        sarees = dedup_items(list(op_sarees.order_by('-discounted_price')[:50]) + list(op_sarees.order_by('discounted_price')[:50]))
 
         layer_kws = ['jacket', 'blazer', 'shrug', 'cardigan', 'coat']
         layer_q = Q()
         for k in layer_kws:
             layer_q |= Q(product_name__icontains=k) | Q(subtype__icontains=k)
-        layers_pool = dedup_items(list(candidate_pool.filter(layer_q, discount_price__lte=budget_float).order_by('-discount_price')[:20]) + list(candidate_pool.filter(layer_q, discount_price__lte=budget_float).order_by('discount_price')[:20]))
+        layers_pool = dedup_items(list(candidate_pool.filter(layer_q, discounted_price__lte=budget_float).order_by('-discounted_price')[:20]) + list(candidate_pool.filter(layer_q, discounted_price__lte=budget_float).order_by('discounted_price')[:20]))
 
-        raw_fws = dedup_items(list(fw_qs.order_by('-discount_price')[:50]) + list(fw_qs.order_by('discount_price')[:50]))
+        raw_fws = dedup_items(list(fw_qs.order_by('-discounted_price')[:50]) + list(fw_qs.order_by('discounted_price')[:50]))
+
+        def is_sandal_shoe(f):
+            nm = (getattr(f, 'product_name', '') or '').lower()
+            sub = (getattr(f, 'sub_category', '') or '').lower()
+            ft = getattr(f, 'footwear_type', '') or ''
+            if ft in ('sandal', 'flip_flop', 'slipper') or 'sandal' in sub or 'slipper' in sub or 'clog' in sub:
+                return True
+            return any(k in nm for k in ('sandal', 'sandle', 'slide', 'chappal', 'slipper', 'flip flop', 'flipflop', 'clog'))
+
+        raw_fws = [f for f in raw_fws if not is_sandal_shoe(f)]
+
         def is_western_heel(f):
             nm = (getattr(f, 'product_name', '') or '').lower()
             return getattr(f, 'footwear_type', '') == 'heel' or any(k in nm for k in ['heel', 'stiletto', 'pump', 'wedge', 'block heel', 'kitten heel'])
-        heels_desc = [f for f in raw_fws if is_western_heel(f)]
-        fallback_fw = [f for f in raw_fws if not is_western_heel(f)]
-        fw_western = heels_desc + fallback_fw
-        fw_ethnic = [f for f in raw_fws if getattr(f, 'footwear_type', '') in ('jutti', 'flat', 'heel') or any(k in (getattr(f, 'product_name', '') or '').lower() for k in ('juti', 'jutti', 'mojari', 'belly', 'bellies', 'heel'))] or raw_fws
-        fw_indo_western = raw_fws
 
-        raw_bags = dedup_items(list(bag_qs.order_by('-discount_price')[:30]) + list(bag_qs.order_by('discount_price')[:30]))
+        def is_sneaker_or_boot(f):
+            nm = (getattr(f, 'product_name', '') or '').lower()
+            ft = getattr(f, 'footwear_type', '')
+            return ft in ('sneaker', 'boot') or any(k in nm for k in ['sneaker', 'trainer', 'boot', 'boots', 'running', 'walking', 'loafer'])
+
+        def is_ethnic_fw(f):
+            nm = (getattr(f, 'product_name', '') or '').lower()
+            ft = getattr(f, 'footwear_type', '')
+            return ft == 'jutti' or any(k in nm for k in ['juti', 'jutti', 'mojari', 'kolhapuri', 'rajasthani', 'ethnic', 'belly', 'bellies'])
+
+        # Western jeans-and-top: prefer sneakers, boots, or heels (strictly NO flats, NO juttis)
+        fw_western_jeans = [f for f in raw_fws if (is_sneaker_or_boot(f) or is_western_heel(f)) and not is_ethnic_fw(f)] or [f for f in raw_fws if is_western_heel(f)]
+
+        # Western dresses & jumpsuits: prefer heels, boots, dress shoes (strictly NO juttis)
+        fw_western_dress = [f for f in raw_fws if (is_western_heel(f) or getattr(f, 'footwear_type', '') == 'boot') and not is_ethnic_fw(f)] or [f for f in raw_fws if not is_ethnic_fw(f)]
+
+        # Ethnic (sarees, Anarkalis, lehengas): prefer juttis, mojaris, traditional flats, or heels (NO sneakers, NO sports)
+        fw_ethnic = [f for f in raw_fws if (is_ethnic_fw(f) or getattr(f, 'footwear_type', '') in ('jutti', 'flat', 'heel')) and not is_sneaker_or_boot(f)] or [f for f in raw_fws if not is_sneaker_or_boot(f)]
+
+        # Indo-Western: juttis, flats, sneakers, or heels
+        fw_indo_western = raw_fws
+        fw_western = fw_western_jeans
+
+        raw_bags = dedup_items(list(bag_qs.order_by('-discounted_price')[:30]) + list(bag_qs.order_by('discounted_price')[:30]))
         bag_western = [b for b in raw_bags if 'potli' not in (getattr(b, 'product_name', '') or '').lower()]
         bag_ethnic = [b for b in raw_bags if any(k in (getattr(b, 'product_name', '') or '').lower() for k in ('potli', 'clutch', 'ethnic'))] or raw_bags
         bag_all = raw_bags
 
-        raw_accs = dedup_items(list(acc_qs.order_by('-discount_price')[:60]) + list(acc_qs.order_by('discount_price')[:60]))
+        raw_accs = dedup_items(list(acc_qs.order_by('-discounted_price')[:60]) + list(acc_qs.order_by('discounted_price')[:60]))
+
         necklaces = [a for a in raw_accs if any(k in (getattr(a, 'product_name', '') or '').lower() for k in ('necklace', 'choker', 'chain', 'pendant', 'haar', 'mangalsutra'))]
         earrings = [a for a in raw_accs if any(k in (getattr(a, 'product_name', '') or '').lower() for k in ('earring', 'earrings', 'jhumk', 'stud', 'hoop', 'dangler', 'drop'))]
         bangles = [a for a in raw_accs if any(k in (getattr(a, 'product_name', '') or '').lower() for k in ('bangle', 'bangles', 'bracelet', 'bracelets', 'kada', 'cuff'))]
@@ -793,8 +872,8 @@ class SmartBudgetOutfitService:
                 earrings = [a for a in w_accs if a.accessory_type == 'earrings'] or w_accs
                 bangles = [a for a in w_accs if a.accessory_type in ('bangles', 'bracelet')] or w_accs
 
-        # Target leftover bound
-        target_leftover = max(250.0, budget_float * 0.05)
+        # Target leftover bound (Strictly capped at 200 - 250 max)
+        target_leftover = min(250.0, max(200.0, budget_float * 0.05)) if budget_float >= 250 else budget_float
 
         # Accessory Knapsack Optimizer (selects combination to leave <= target_leftover)
         def select_best_accessories(rem_b, outfit_style='western', current_pieces=None):
@@ -849,6 +928,12 @@ class SmartBudgetOutfitService:
                 sub = getattr(anchor_prod, 'subtype', 'other')
                 style_fam = getattr(anchor_prod, 'style_family', 'western')
                 source_label = anchor_info['source']
+                anchor_nm = (getattr(anchor_prod, 'product_name', '') or '').lower()
+
+                # Defensive guard: If anchor has bottom keywords and is not a jumpsuit/dress, reclassify as bottom
+                is_bottom_anchor = any(k in anchor_nm for k in ['pant', 'trouser', 'jeans', 'sweatpant', 'jogger', 'palazzo', 'salwar', 'track pant', 'trackpant', 'shorts', 'legging']) and not any(k in anchor_nm for k in ['jumpsuit', 'romper', 'playsuit', 'dress', 'gown'])
+                if slot == 'one_piece' and is_bottom_anchor:
+                    slot = 'bottom'
 
                 if slot == 'one_piece':
                     clothing_bases.append({
@@ -1004,23 +1089,60 @@ class SmartBudgetOutfitService:
                 if b1_count >= 80:
                     break
 
-        # BASE 2: ONE-PIECE (Dresses, Jumpsuits) - Including expensive bases up to 100% of budget
-        if direction_clean in ('all', 'dresses', 'western'):
+        # BASE 2: ONE-PIECE (Dresses, Jumpsuits, Anarkalis & Fusion Gowns)
+        if direction_clean in ('all', 'dresses', 'western', 'ethnic', 'indo-western'):
             b2_count = 0
             for op in one_pieces:
                 p = item_price(op)
                 if p > budget_float:
                     continue
                 nm = (getattr(op, 'product_name', None) or getattr(op, 'name', '') or '').lower()
+                op_cat = ((getattr(op, 'main_category', '') or '') + ' ' + (getattr(op, 'sub_category', '') or '')).lower()
+                op_style = getattr(op, 'style_family', 'western')
+
+                is_anarkali = 'anarkali' in nm or 'anarkali' in op_cat
+                is_ethnic_dress = is_anarkali or op_style == 'ethnic' or (any(k in nm for k in ('kurti dress', 'ethnic dress', 'chikankari', 'angrakha', 'gown')) and ('kurti' in op_cat or 'ethnic' in op_cat))
+                is_fusion_dress = not is_anarkali and ('fusion' in nm or 'indo-western' in nm or ('dress' in nm and 'kurti' in op_cat))
+
+                # Mode filtering
+                if direction_clean == 'western':
+                    if is_anarkali or is_ethnic_dress:
+                        continue
+                    style_mode = 'western'
+                    role = 'Jumpsuit' if any(k in nm for k in ('jumpsuit', 'romper', 'playsuit')) else 'Dress'
+                elif direction_clean == 'ethnic':
+                    if not (is_anarkali or is_ethnic_dress):
+                        continue
+                    style_mode = 'ethnic'
+                    role = 'Anarkali Look' if is_anarkali else 'Ethnic Dress'
+                elif direction_clean == 'indo-western':
+                    if not (is_fusion_dress or any(k in nm for k in ('jumpsuit', 'romper', 'fusion', 'maxi'))):
+                        continue
+                    style_mode = 'indo-western'
+                    role = 'Indo-Western Jumpsuit' if any(k in nm for k in ('jumpsuit', 'romper')) else 'Fusion Dress'
+                else: # 'all' / 'dresses'
+                    if is_anarkali:
+                        style_mode = 'ethnic'
+                        role = 'Anarkali Look'
+                    elif is_ethnic_dress:
+                        style_mode = 'ethnic'
+                        role = 'Ethnic Dress'
+                    elif is_fusion_dress:
+                        style_mode = 'indo-western'
+                        role = 'Fusion Dress'
+                    else:
+                        style_mode = 'western'
+                        role = 'Jumpsuit' if any(k in nm for k in ('jumpsuit', 'romper', 'playsuit')) else 'Dress'
+
                 clothing_bases.append({
                     'base_type': 'one_piece',
-                    'style_mode': 'western',
+                    'style_mode': style_mode,
                     'item': op,
                     'top': None,
                     'bottom': None,
                     'subtype': 'one_piece',
                     'price': p,
-                    'role': 'Jumpsuit' if any(k in nm for k in ('jumpsuit', 'romper', 'playsuit')) else 'Dress',
+                    'role': role,
                     'notes': None
                 })
                 b2_count += 1
@@ -1127,7 +1249,10 @@ class SmartBudgetOutfitService:
             is_saree_or_lehenga = base.get('subtype') in ('saree', 'lehenga_set')
 
             if smode == 'western':
-                cur_fw_pool = fw_western
+                if base.get('role') in ('Dress', 'Jumpsuit') or base.get('base_type') == 'one_piece':
+                    cur_fw_pool = fw_western_dress
+                else:
+                    cur_fw_pool = fw_western_jeans
                 cur_bag_pool = bag_western
             elif smode == 'ethnic':
                 cur_fw_pool = fw_ethnic
@@ -1136,16 +1261,33 @@ class SmartBudgetOutfitService:
                 cur_fw_pool = fw_indo_western
                 cur_bag_pool = bag_all
 
-            # Filter footwear (prioritize heels for western, then higher priced to utilize budget)
+            # Filter footwear (prioritize appropriate styles and higher price to utilize budget)
             eligible_fw = [f for f in cur_fw_pool if base_p + item_price(f) <= budget_float]
             if smode == 'western':
-                def western_fw_sort_key(f):
-                    is_heel = getattr(f, 'footwear_type', '') == 'heel' or any(
+                if base.get('role') in ('Dress', 'Jumpsuit') or base.get('base_type') == 'one_piece':
+                    def western_dress_fw_key(f):
+                        is_heel = getattr(f, 'footwear_type', '') == 'heel' or any(
+                            k in (getattr(f, 'product_name', '') or '').lower()
+                            for k in ['heel', 'stiletto', 'pump', 'wedge', 'block heel', 'kitten heel']
+                        )
+                        return (2 if is_heel else 1, item_price(f))
+                    test_fws = sorted(eligible_fw, key=western_dress_fw_key, reverse=True)[:3] if eligible_fw else [None]
+                else:
+                    def western_jeans_fw_key(f):
+                        is_pref = getattr(f, 'footwear_type', '') in ('sneaker', 'boot') or any(
+                            k in (getattr(f, 'product_name', '') or '').lower()
+                            for k in ['sneaker', 'trainer', 'boot', 'boots', 'heel']
+                        )
+                        return (2 if is_pref else 1, item_price(f))
+                    test_fws = sorted(eligible_fw, key=western_jeans_fw_key, reverse=True)[:3] if eligible_fw else [None]
+            elif smode == 'ethnic':
+                def ethnic_fw_key(f):
+                    is_jutti = getattr(f, 'footwear_type', '') == 'jutti' or any(
                         k in (getattr(f, 'product_name', '') or '').lower()
-                        for k in ['heel', 'stiletto', 'pump', 'wedge', 'block heel', 'kitten heel']
+                        for k in ['juti', 'jutti', 'mojari', 'kolhapuri', 'belly', 'bellies']
                     )
-                    return (1 if is_heel else 0, item_price(f))
-                test_fws = sorted(eligible_fw, key=western_fw_sort_key, reverse=True)[:3] if eligible_fw else [None]
+                    return (2 if is_jutti else 1, item_price(f))
+                test_fws = sorted(eligible_fw, key=ethnic_fw_key, reverse=True)[:3] if eligible_fw else [None]
             else:
                 test_fws = sorted(eligible_fw, key=lambda f: item_price(f), reverse=True)[:3] if eligible_fw else [None]
 
@@ -1206,12 +1348,8 @@ class SmartBudgetOutfitService:
                     # HARD COMPATIBILITY GATE (validate_outfit)
                     passed, reasons = validate_outfit(pieces_now, user_prefs)
                     if not passed:
-                        if not hasattr(cls, '_printed_fails'):
-                            cls._printed_fails = 0
-                        if cls._printed_fails < 5:
-                            print(f"GATE FAIL [{cls._printed_fails}]: {reasons}")
-                            cls._printed_fails += 1
                         continue
+
 
                     coins_left = max(0, int(budget_float - total_cost))
 
@@ -1285,40 +1423,59 @@ class SmartBudgetOutfitService:
         # 3. Requested color matching
         def outfit_rank_key(o):
             rem = o['coins_remaining']
-            util_bonus = (2000 - rem) if (0 <= rem <= target_leftover) else (-rem)
+            util_bonus = (3000 - rem * 4) if (0 <= rem <= 250) else (-rem * 10)
             col_bonus = 500 if o.get('matched_preferred_color') else 0
             pers_bonus = 300 if o.get('is_personalised') else 0
             return (o['styling_score'] * 10 + util_bonus + col_bonus + pers_bonus)
 
         scored_outfits.sort(key=outfit_rank_key, reverse=True)
 
-        # Separate personalised vs non-personalised for "Surprise Me" placement
-        # First 3-4 outfits personalised (aiming ~half anchors, ~half taste profile)
-        pers_anchor_outfits = [o for o in scored_outfits if o.get('is_personalised') and o.get('base_meta', {}).get('is_anchor')]
-        pers_taste_outfits = [o for o in scored_outfits if o.get('is_personalised') and not o.get('base_meta', {}).get('is_anchor')]
-        normal_outfits = [o for o in scored_outfits if not o.get('is_personalised')]
+        # STRICT CAP: 200 - 250 coins max can remain after making an outfit!
+        # If qualifying outfits with coins_remaining <= 250 exist, filter out anything leaving > 250!
+        qualifying_outfits = [o for o in scored_outfits if o.get('coins_remaining', 9999) <= 250]
+        if qualifying_outfits:
+            scored_outfits = qualifying_outfits
 
-        assembled_order = []
-        if direction_clean == 'all' and (pers_anchor_outfits or pers_taste_outfits):
-            # Take up to 2 anchors, up to 2 taste profile
-            picked_anchors = pers_anchor_outfits[:2]
-            picked_taste = pers_taste_outfits[:2]
-            if len(picked_anchors) + len(picked_taste) < 4:
-                # Fill remaining up to 4 from whichever has more
-                if len(picked_anchors) < 2 and len(pers_taste_outfits) > 2:
-                    picked_taste = pers_taste_outfits[:4 - len(picked_anchors)]
-                elif len(picked_taste) < 2 and len(pers_anchor_outfits) > 2:
-                    picked_anchors = pers_anchor_outfits[:4 - len(picked_taste)]
-            assembled_order = picked_anchors + picked_taste + normal_outfits + pers_anchor_outfits[2:] + pers_taste_outfits[2:]
-        else:
-            assembled_order = scored_outfits
+        # Separate personalised vs non-personalised for preference placement
+        # Personalization: Only the first 2-3 outfits may receive preference-based personalization!
+        top_pers = []
+        if taste_profile and taste_profile.get('has_profile'):
+            pers_candidates = [o for o in scored_outfits if o.get('is_personalised')]
+            seen_anchor_ids = set()
+            for o in pers_candidates:
+                if len(top_pers) >= 3:
+                    break
+                anchor_prod = o.get('base_meta', {}).get('anchor_product')
+                a_id = getattr(anchor_prod, 'product_id', getattr(anchor_prod, 'id', None)) if anchor_prod else None
+                if a_id and a_id in seen_anchor_ids:
+                    continue
+                if a_id:
+                    seen_anchor_ids.add(a_id)
+                top_pers.append(o)
+
+        # Standard non-personalized outfits
+        standard_outfits = [o for o in scored_outfits if o not in top_pers]
+        # Any outfit outside the top 2-3 MUST use normal recommendation logic without personalization flags
+        for o in standard_outfits:
+            o['is_personalised'] = False
+            o['personalisation_reason'] = None
+
+        assembled_order = top_pers + standard_outfits
 
         # Apply DIVERSITY RULES:
-        # 1. Single product appears in AT MOST 3 outfits
-        # 2. No two outfits identical (share >= 2 primary garments)
+        # 1. Primary base garment appears AT MOST ONCE across looks
+        # 2. Bottomwear appears AT MOST TWICE
+        # 3. Footwear & accessories appear AT MOST TWICE
+        # 4. No combinations that differ by only 1 minor accessory
+        # 5. Single product in at most 3 outfits total
         curated_outfits = []
         seen_outfit_item_sets = []
+        seen_core_signatures = set()
         product_appearance_count = Counter()
+        primary_garment_count = Counter()
+        bottom_appearance_count = Counter()
+        footwear_appearance_count = Counter()
+        accessory_appearance_count = Counter()
 
         for cand in assembled_order:
             if len(curated_outfits) >= 50:
@@ -1329,22 +1486,64 @@ class SmartBudgetOutfitService:
             item_ids = [getattr(it, 'product_id', getattr(it, 'id', None)) for it in all_items if it]
             item_set = set(item_ids)
 
-            # Rule: Single product in at most 3 outfits
-            if any(product_appearance_count[pid] >= 3 for pid in item_ids):
-                continue
-
-            # Rule: No two outfits identical
+            # Rule: No identical product sets
             if item_set in seen_outfit_item_sets:
                 continue
 
-            # Garment diversity: primary base garment appears at most once across looks
-            primary_id = getattr(p.get('one_piece') or p.get('top'), 'product_id', None)
-            if primary_id and product_appearance_count[primary_id] >= 1:
+            # Core signature: (one_piece, top, bottom, footwear)
+            core_sig = (
+                getattr(p.get('one_piece'), 'product_id', None),
+                getattr(p.get('top'), 'product_id', None),
+                getattr(p.get('bottom'), 'product_id', None),
+                getattr(p.get('footwear'), 'product_id', None)
+            )
+            # Avoid duplicate outfits differing by only 1 minor accessory
+            if any(core_sig) and core_sig in seen_core_signatures:
                 continue
 
-            # Accept outfit
+            primary_id = getattr(p.get('one_piece') or p.get('top'), 'product_id', None)
+            is_priority_pers = cand.get('is_personalised') and len(curated_outfits) < 3
+
+            # Primary garment diversity: max 1 appearance (except priority personalized top 3)
+            if primary_id and primary_garment_count[primary_id] >= 1 and not is_priority_pers:
+                continue
+
+            # Bottomwear: max 2 appearances
+            bot_id = getattr(p.get('bottom'), 'product_id', None)
+            if bot_id and bottom_appearance_count[bot_id] >= 2 and not is_priority_pers:
+                continue
+
+            # Footwear: max 2 appearances
+            fw_id = getattr(p.get('footwear'), 'product_id', None)
+            if fw_id and footwear_appearance_count[fw_id] >= 2:
+                continue
+
+            # Accessories: max 2 appearances
+            acc_ids = [getattr(a, 'product_id', getattr(a, 'id', None)) for a in (p.get('accessories') or []) if a]
+            if any(accessory_appearance_count[aid] >= 2 for aid in acc_ids):
+                continue
+
+            # Single product appears in at most 3 outfits total
+            if any(product_appearance_count[pid] >= 3 for pid in item_ids):
+                continue
+
+            # STRICT RULE: Personalization applies only to the first 2-3 outfits!
+            if len(curated_outfits) >= 3:
+                cand['is_personalised'] = False
+                cand['personalisation_reason'] = None
+
             curated_outfits.append(cand)
             seen_outfit_item_sets.append(item_set)
+            if any(core_sig):
+                seen_core_signatures.add(core_sig)
+            if primary_id:
+                primary_garment_count[primary_id] += 1
+            if bot_id:
+                bottom_appearance_count[bot_id] += 1
+            if fw_id:
+                footwear_appearance_count[fw_id] += 1
+            for aid in acc_ids:
+                accessory_appearance_count[aid] += 1
             for pid in item_ids:
                 product_appearance_count[pid] += 1
 
@@ -1361,20 +1560,41 @@ class SmartBudgetOutfitService:
                 item_set = set(item_ids)
                 if any(product_appearance_count[pid] >= 3 for pid in item_ids):
                     continue
-                # Reject exact duplicate outfits
                 if item_set in seen_outfit_item_sets:
                     continue
+                if len(curated_outfits) >= 3:
+                    cand['is_personalised'] = False
+                    cand['personalisation_reason'] = None
                 curated_outfits.append(cand)
                 seen_outfit_item_sets.append(item_set)
                 for pid in item_ids:
                     product_appearance_count[pid] += 1
 
-        # Sarees in Surprise Me / Ethnic: Ensure sarees appear whenever occasion allows
-        if direction_clean in ('all', 'ethnic') and occasion_clean not in ('sportswear', 'activewear'):
-            has_saree = any(o['base_type'] == 'saree_lehenga' for o in curated_outfits)
-            if not has_saree:
+        # Surprise Me ("all") Diversity: ensure balanced representation across Western, Ethnic, and Indo-Western
+        if direction_clean == 'all' and occasion_clean not in ('sportswear', 'activewear'):
+            has_saree_or_ethnic = any(
+                o.get('base_type') == 'saree_lehenga' or
+                o.get('base_meta', {}).get('style_mode') == 'ethnic' or
+                'anarkali' in (o.get('base_meta', {}).get('role', '') or '').lower()
+                for o in curated_outfits
+            )
+            has_indo = any(o.get('base_meta', {}).get('style_mode') == 'indo-western' for o in curated_outfits)
+
+            if not has_saree_or_ethnic:
                 for cand in assembled_order:
-                    if cand['base_type'] == 'saree_lehenga':
+                    if cand.get('base_type') == 'saree_lehenga' or cand.get('base_meta', {}).get('style_mode') == 'ethnic':
+                        if len(curated_outfits) >= 3:
+                            cand['is_personalised'] = False
+                            cand['personalisation_reason'] = None
+                        curated_outfits.insert(min(1, len(curated_outfits)), cand)
+                        break
+
+            if not has_indo:
+                for cand in assembled_order:
+                    if cand.get('base_meta', {}).get('style_mode') == 'indo-western':
+                        if len(curated_outfits) >= 3:
+                            cand['is_personalised'] = False
+                            cand['personalisation_reason'] = None
                         curated_outfits.insert(min(2, len(curated_outfits)), cand)
                         break
 
@@ -1433,6 +1653,13 @@ class SmartBudgetOutfitService:
                     'text': 'Add a handbag or clutch to complete this look',
                 })
 
+            # Compute real coin pricing breakdown
+            pricing = CoinService.compute_outfit_pricing(
+                subtotal_price=total_cost,
+                budget=budget_float,
+                available_coins=available_coins
+            )
+
             serialized_outfits.append({
                 'id': f"outfit_{idx + 1}_{int(total_cost)}",
                 'base_type': o.get('base_type', 'two_piece'),
@@ -1450,9 +1677,15 @@ class SmartBudgetOutfitService:
                 'bag': bag_ser,
                 'accessories': acc_ser,
                 'total_price': total_cost,
+                'subtotal_price': pricing['subtotal_price'],
+                'eligible_coins': pricing['eligible_coins'],
+                'coin_discount': pricing['coin_discount'],
+                'final_price': pricing['final_price'],
+                'remaining_budget': pricing['remaining_budget'],
                 'budget': int(budget_float),
                 'savings': coins_left,
                 'coins_remaining': coins_left,
+                'coins_earned': pricing['coins_earned'],
                 'styling_score': o['styling_score'],
                 'score_breakdown': o['score_breakdown'],
                 'style_verdict': o['style_verdict'],
@@ -1489,5 +1722,6 @@ class SmartBudgetOutfitService:
             'category_direction': direction_clean,
             'total_candidates_analyzed': len(scored_outfits),
             'total_outfits': count,
+            'user_coins': coin_data,
             'outfits': serialized_outfits
         }

@@ -477,15 +477,20 @@ def serialize_catalog_product(p):
     prod_id = getattr(p, 'product_id', str(getattr(p, 'id', '')))
     prod_name = getattr(p, 'product_name', getattr(p, 'item_name', getattr(p, 'name', 'Item')))
 
+    base_val = float(getattr(p, 'base_price', 0)) if getattr(p, 'base_price', None) else eff_price
+    disc_val = float(getattr(p, 'discount_price', 0)) if getattr(p, 'discount_price', None) and getattr(p, 'discount_price', 0) > 0 else (base_val - eff_price if base_val > eff_price else 0.0)
+
     return {
         'product_id': prod_id,
         'id': prod_id,
         'product_name': prod_name,
         'name': prod_name,
         'selling_price': 0 if from_wardrobe else int(round(eff_price)),
-        'discount_price': 0.0 if from_wardrobe else (float(getattr(p, 'discount_price', 0)) if getattr(p, 'discount_price', None) and getattr(p, 'discount_price', 0) > 0 else eff_price),
-        'base_price': 0 if from_wardrobe else (int(round(float(getattr(p, 'base_price', 0)))) if getattr(p, 'base_price', None) else int(round(eff_price))),
-        'actual_price': 0.0 if from_wardrobe else (float(getattr(p, 'base_price', 0)) if getattr(p, 'base_price', None) else eff_price),
+        'discounted_price': 0.0 if from_wardrobe else float(eff_price),
+        'discount_price': 0.0 if from_wardrobe else float(disc_val),
+        'discount_amount': 0.0 if from_wardrobe else float(disc_val),
+        'base_price': 0 if from_wardrobe else int(round(base_val)),
+        'actual_price': 0.0 if from_wardrobe else float(base_val),
         'image': clean_image or '',
         'primary_image': clean_image or '',
         'images': [clean_image] if clean_image else [],

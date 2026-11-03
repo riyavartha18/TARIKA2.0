@@ -2246,6 +2246,103 @@ export async function getSmartBudgetOutfits({
 }
 
 /**
+ * Fetch customer coin balance & loyalty benefits from the server.
+ */
+export async function getCustomerCoins(customerId = null, token = null) {
+  try {
+    const query = new URLSearchParams();
+    if (customerId) query.append('customer_id', customerId);
+    query.append('_t', Date.now());
+
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const url = `${API_BASE_URL}/api/recommendations/smart-budget/coins/?${query.toString()}`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to fetch coins' };
+    }
+    return { success: true, coins: data.coins };
+  } catch (err) {
+    console.error('[getCustomerCoins network error]:', err);
+    return { success: false, error: 'Network error fetching coin balance' };
+  }
+}
+
+export const getCoinBalance = getCustomerCoins;
+
+/**
+ * Redeem loyalty coins for an outfit combination.
+ */
+export async function redeemCoinsForOutfit({ customerId, outfitId, coins, token = null }) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/recommendations/smart-budget/redeem-coins/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ customer_id: customerId, outfit_id: outfitId, coins }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to redeem coins' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    console.error('[redeemCoinsForOutfit network error]:', err);
+    return { success: false, error: 'Network error redeeming coins' };
+  }
+}
+
+/**
+ * Fetch Wheel Configuration (segments, spin cost)
+ */
+export async function getWheelConfig() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/recommendations/spin-reward/`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    const data = await response.json();
+    return data;
+  } catch (err) {
+    return { success: false, error: 'Failed to fetch wheel configuration' };
+  }
+}
+
+/**
+ * Spin Rewards Wheel with server-side validation
+ */
+export async function spinRewardWheel({ customerId = null, token = null } = {}) {
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/api/recommendations/spin-reward/`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ customer_id: customerId }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      return { success: false, error: data.error || data.detail || 'Failed to spin wheel' };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    console.error('[spinRewardWheel network error]:', err);
+    return { success: false, error: 'Network error spinning wheel' };
+  }
+}
+
+
+
+/**
  * Resolves a media URL (relative or absolute) to a full URL pointing to the active backend.
  */
 export function resolveMediaUrl(url) {
@@ -2371,7 +2468,7 @@ export async function deleteWardrobeItem(token, itemId) {
 }
 
 /**
- * Digital Wardrobe API: Toggle between 3D Studio Render and Original Photo.
+ * Digital Wardrobe API: Toggle between the studio render and original photo.
  */
 export async function toggleWardrobeDisplayMode(token, itemId, mode = null) {
   try {
@@ -2395,7 +2492,7 @@ export async function toggleWardrobeDisplayMode(token, itemId, mode = null) {
 }
 
 /**
- * Digital Wardrobe API: Re-run 3D Studio Rendering on original photo.
+ * Digital Wardrobe API: Re-run studio rendering on the original photo.
  */
 export async function reprocessWardrobeItem(token, itemId) {
   try {
@@ -2408,11 +2505,11 @@ export async function reprocessWardrobeItem(token, itemId) {
     });
     const data = await response.json();
     if (!response.ok) {
-      return { success: false, error: data.error || data.detail || 'Failed to reprocess 3D render' };
+      return { success: false, error: data.error || data.detail || 'Failed to reprocess studio render' };
     }
     return { success: true, item: data };
   } catch (err) {
-    return { success: false, error: 'Network error reprocessing 3D render' };
+    return { success: false, error: 'Network error reprocessing studio render' };
   }
 }
 

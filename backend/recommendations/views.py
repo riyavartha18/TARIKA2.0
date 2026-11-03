@@ -6,8 +6,8 @@ from rest_framework.permissions import AllowAny
 from .services import (
     RecommendationService,
     PersonalizedRecommendationService,
-    SmartBudgetOutfitService,
 )
+from .smart_budget_service import SmartBudgetOutfitService
 from .serializers import ProductRecommendationsResponseSerializer
 
 
@@ -174,3 +174,123 @@ class SmartBudgetOutfitView(APIView):
         resp['Pragma'] = 'no-cache'
         resp['Expires'] = '0'
         return resp
+
+
+class CustomerCoinsView(APIView):
+    """
+    GET /api/recommendations/smart-budget/coins/
+    Fetches real customer coin balance and loyalty benefits.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        customer_id = None
+        if request.user and request.user.is_authenticated:
+            try:
+                from cart.services import CustomerResolver
+                customer = CustomerResolver.get_customer_for_user(request.user)
+                if customer:
+                    customer_id = customer.customer_id
+            except Exception:
+                customer_id = getattr(request.user, 'auth_user_id', None) or getattr(request.user, 'id', None)
+
+        if not customer_id:
+            customer_id = request.query_params.get('customer_id') or request.headers.get('X-Customer-Id')
+
+        from .coin_service import CoinService
+        coin_data = CoinService.get_customer_coins(customer_id)
+        return Response({'success': True, 'coins': coin_data}, status=status.HTTP_200_OK)
+
+
+class RedeemCoinsView(APIView):
+    """
+    POST /api/recommendations/smart-budget/redeem-coins/
+    Redeems customer coins for a specific outfit combination with server-side validation.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        customer_id = None
+        if request.user and request.user.is_authenticated:
+            try:
+                from cart.services import CustomerResolver
+                customer = CustomerResolver.get_customer_for_user(request.user)
+                if customer:
+                    customer_id = customer.customer_id
+            except Exception:
+                customer_id = getattr(request.user, 'auth_user_id', None) or getattr(request.user, 'id', None)
+
+        if not customer_id:
+            customer_id = request.data.get('customer_id') or request.headers.get('X-Customer-Id')
+
+        if not customer_id:
+            return Response(
+                {'success': False, 'error': 'Customer ID is required to redeem coins.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        outfit_id = request.data.get('outfit_id')
+        coins = request.data.get('coins')
+
+        if not outfit_id:
+            return Response(
+                {'success': False, 'error': 'Outfit ID is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            coins_int = int(coins)
+        except (ValueError, TypeError):
+            return Response(
+                {'success': False, 'error': 'Invalid coin amount.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from .coin_service import CoinService
+        res = CoinService.redeem_coins_for_outfit(customer_id, outfit_id, coins_int)
+
+        if not res.get('success'):
+            return Response(res, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(res, status=status.HTTP_200_OK)
+
+
+class SpinRewardsView(APIView):
+    """
+    GET /api/recommendations/spin-reward/ -> get wheel config (segments, spin cost)
+    POST /api/recommendations/spin-reward/ -> execute verified spin with real coin balance
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .coin_service import CoinService
+        config = CoinService.get_wheel_config()
+        return Response({'success': True, **config}, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        customer_id = None
+        if request.user and request.user.is_authenticated:
+            try:
+                from cart.services import CustomerResolver
+                customer = CustomerResolver.get_customer_for_user(request.user)
+                if customer:
+                    customer_id = customer.customer_id
+            except Exception:
+                customer_id = getattr(request.user, 'auth_user_id', None) or getattr(request.user, 'id', None)
+
+        if not customer_id:
+            customer_id = request.data.get('customer_id') or request.headers.get('X-Customer-Id')
+
+        if not customer_id:
+            return Response(
+                {'success': False, 'error': 'Please log in to spin and earn rewards.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        from .coin_service import CoinService
+        res = CoinService.spin_wheel(customer_id)
+        if not res.get('success'):
+            return Response(res, status=status.HTTP_400_BAD_REQUEST)
+        return Response(res, status=status.HTTP_200_OK)
+
+
