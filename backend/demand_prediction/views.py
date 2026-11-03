@@ -1,5 +1,4 @@
 import time
-from datetime import datetime, timedelta
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -9,7 +8,7 @@ from django.core.cache import cache
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
 from catalog.normalize import normalize_category, sql_norm_expr
-from demand_prediction import engine
+from demand_prediction import engine, inventory_metrics as metrics
 from demand_prediction.engine import DecisionTreeEngine
 
 
@@ -389,31 +388,187 @@ class CategoryFilterView(APIView):
 
 class SlowMovingInventoryView(APIView):
     """
-    Slow-Moving Inventory Analysis — RETIRED.
+    Inventory Velocity Analysis — served from the cached summary table.
 
-    The original implementation joined the ``inventory``, ``order_items``,
-    ``categories`` and ``warehouses`` tables and keyed stock by a per-warehouse
-    ``inventory.stock_quantity``. None of those tables exist in the connected
-    ``public`` schema (verified against the live database), and stock now lives
-    directly on ``products.available_quantity``. Velocity analysis would need
-    per-product sales over time, which the current single-snapshot ``orders``
-    table (no ``order_date``/``order_items``) cannot supply.
+    Every active product (never a truncated 50) is classified from real
+    delivered-order sales in the last 30 days:
 
-    Rather than return fabricated figures, the feature is clearly retired with an
-    explicit 503. Demand-driven replenishment (Stock to Be Ordered) is the
-    supported, schema-correct replacement and already surfaces low/zero-stock and
-    high-demand products.
+      FAST MOVING  – days of stock <= 15  (needs frequent replenishment)
+      NORMAL       – days of stock <= 60
+      SLOW         – days of stock <= 180
+      NON MOVING   – zero valid sales in the window, or 180+ days of stock
+
+    Metrics per product: current_stock, sales_last_30_days (SUM of delivered
+    orders.quantity in the window), avg_daily_sales (window units / window
+    days) and days_of_stock (CEIL(stock / avg daily); NULL = no sales, which
+    the UI shows as “∞ / No Sales”).
+
+    The heavy aggregation runs once per TTL (or on invalidation) inside
+    demand_prediction.inventory_metrics; requests here are indexed reads with
+    server-side search / filter / sort / pagination, so the whole ~90k catalog
+    is pageable without re-aggregating orders on every render.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
+    # Whitelisted sort keys -> internal ORDER BY SQL (never user input).
+    # The default is the required fixed display order: Fast -> Normal -> Slow ->
+    # Not Moving, and highest sales first within each tier (backed by the
+    # (movement_rank, sales_last_30_days DESC) index).
+    _ORDER_BY = {
+        'movement': "v.movement_rank ASC, v.sales_last_30_days DESC",
+        'sales_last_30_days': "v.sales_last_30_days DESC, v.current_stock DESC",
+        'avg_daily_sales': "v.avg_daily_sales DESC, v.sales_last_30_days DESC",
+        'days_of_stock': ("v.days_of_stock ASC NULLS LAST, "
+                          "v.sales_last_30_days DESC"),
+        'current_stock': "v.current_stock DESC",
+        'product_name': "v.product_name ASC",
+    }
+
     def get(self, request):
-        return Response({
-            'unavailable': True,
-            'error': (
-                'Slow-moving inventory analysis is not supported by the current '
-                'database: the inventory / order_items / categories / warehouses '
-                'tables it required are not present. Use Stock to Be Ordered for '
-                'demand-driven replenishment instead.'
-            ),
-            'replacement': 'stock-to-be-ordered',
-        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        t0 = time.perf_counter()
+        try:
+            force = request.query_params.get('refresh', '').lower() in ('1', 'true')
+            state = metrics.ensure_fresh(force=force)
+
+            page = max(1, int(request.query_params.get('page', 1) or 1))
+            page_size = int(request.query_params.get('page_size', 50) or 50)
+            page_size = min(max(page_size, 1), 200)
+
+            search = request.query_params.get('search', '').strip().lower()
+            category = request.query_params.get('category', '').strip()
+            movement = request.query_params.get('movement_status', '').strip().upper()
+            sort_key = request.query_params.get('sort', 'movement').strip()
+            if movement not in metrics.MOVEMENT_LABELS:
+                movement = ''
+
+            where = []
+            params = []
+            has_search = bool(search)
+            has_category = bool(category and category.upper() != 'ALL')
+            if search:
+                where.append(
+                    "(LOWER(COALESCE(v.product_name, '')) LIKE %s "
+                    "OR LOWER(COALESCE(v.main_category, '')) LIKE %s "
+                    "OR LOWER(COALESCE(v.sub_category, '')) LIKE %s)")
+                like = f'%{search}%'
+                params += [like, like, like]
+            if has_category:
+                where.append(f"{sql_norm_expr('v.main_category')} = %s")
+                params.append(normalize_category(category))
+            if movement:
+                where.append("v.movement_status = %s")
+                params.append(movement)
+            where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+            order_sql = self._ORDER_BY.get(sort_key, self._ORDER_BY['movement'])
+
+            # Summary tiles come straight from the cached state row: they only
+            # change when the metrics table is rebuilt, so no per-request scan.
+            st_summary = (state or {}).get('summary', {})
+            total_products = int((state or {}).get('product_count', 0))
+            summary = {
+                'total_products': total_products,
+                'fast_moving': int(st_summary.get('fast_moving', 0)),
+                'normal_moving': int(st_summary.get('normal_moving', 0)),
+                'slow_moving': int(st_summary.get('slow_moving', 0)),
+                'not_moving': int(st_summary.get('not_moving', 0)),
+                'out_of_stock': int(st_summary.get('out_of_stock', 0)),
+                'total_window_units': int(st_summary.get('window_units', 0)),
+            }
+
+            # The filtered total is derivable from the cache in two cheap cases
+            # and only needs a COUNT scan for a genuine search / category.
+            if not where_sql:
+                filtered_total = total_products
+            elif movement and not has_search and not has_category:
+                _tier_key = {metrics.MOVEMENT_FAST: 'fast_moving',
+                             metrics.MOVEMENT_NORMAL: 'normal_moving',
+                             metrics.MOVEMENT_SLOW: 'slow_moving',
+                             metrics.MOVEMENT_NOT: 'not_moving'}[movement]
+                filtered_total = summary[_tier_key]
+            else:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"SELECT COUNT(*)::int FROM {metrics.METRICS_TABLE} v {where_sql}",
+                        params)
+                    filtered_total = int(cursor.fetchone()[0])
+
+            total_pages = (filtered_total + page_size - 1) // page_size
+            page = min(page, max(total_pages, 1))
+
+            # The requested page is a pure index+LIMIT scan. It carries no
+            # window function: COUNT(*) OVER() would force a full 88k scan and
+            # erase the index benefit for the default (unfiltered) view.
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT v.product_key, v.product_name, v.main_category,
+                           v.sub_category, v.current_stock, v.sales_last_30_days,
+                           v.movement_status
+                    FROM {metrics.METRICS_TABLE} v
+                    {where_sql}
+                    ORDER BY {order_sql}
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [page_size, (page - 1) * page_size])
+                cols = [c[0] for c in cursor.description]
+                rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+            items = []
+            for r in rows:
+                stock = float(r['current_stock'] or 0)
+                units = int(r['sales_last_30_days'] or 0)
+                items.append({
+                    'product_key': r['product_key'],
+                    'product_name': r['product_name'] or 'Unknown Product',
+                    'category_name': r['main_category'] or '',
+                    'sub_category': r['sub_category'] or '',
+                    'current_stock': int(stock),
+                    'sales_last_30_days': units,
+                    'movement_status': r['movement_status'],
+                })
+
+            def _fmt(date_text):
+                # 'YYYY-MM-DD' -> 'DD-MM-YYYY' for display, same as before.
+                if not date_text:
+                    return None
+                y, m, d = date_text.split('-')
+                return f'{d}-{m}-{y}'
+
+            return Response({
+                'success': True,
+                'analysis_date': _fmt(state and state['window_end']),
+                'sales_window_start': _fmt(state and state['window_start']),
+                'sales_window_days': metrics.SALES_WINDOW_DAYS,
+                # Data-driven, transparent tier boundaries: the sales-quantity
+                # cut points (units in the window) from the seller distribution.
+                'thresholds': {
+                    'basis': 'sales_quantity',
+                    'window_days': metrics.SALES_WINDOW_DAYS,
+                    'fast_percentile': metrics.FAST_PERCENTILE,
+                    'normal_percentile': metrics.NORMAL_PERCENTILE,
+                    'fast_cut': (state or {}).get('thresholds', {}).get('fast_cut'),
+                    'normal_cut': (state or {}).get('thresholds', {}).get('normal_cut'),
+                    'not_moving_rule': 'zero units sold in the window',
+                },
+                'summary': summary,
+                'items': items,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_filtered': filtered_total,
+                    'total_pages': total_pages,
+                },
+                'cache': {
+                    'refreshed_at': state and state['refreshed_at'],
+                    'ttl_seconds': metrics.METRICS_TTL_SECONDS,
+                },
+                'timing': {'view_ms': round((time.perf_counter() - t0) * 1000, 1)},
+            }, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            return Response(
+                {"error": f"Error generating slow inventory analysis: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+

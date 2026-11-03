@@ -1,6 +1,62 @@
 from django.test import SimpleTestCase
 from demand_prediction import engine, views
 from demand_prediction.engine import DecisionTreeEngine
+from demand_prediction import inventory_metrics as im
+
+
+class InventoryVelocityClassificationTest(SimpleTestCase):
+    """Movement is classified from ACTUAL sales quantity, not from stock."""
+
+    # Tier cuts for a distribution: FAST > 4 units, NORMAL > 2, SLOW <= 2.
+    FAST_CUT, NORMAL_CUT = 4.0, 2.0
+
+    def test_zero_sales_is_always_not_moving(self):
+        # Any zero-sales product is NOT MOVING regardless of stock, and its
+        # days_of_stock is None ("No Sales") when it still holds stock.
+        for stock in (0, 500):
+            movement, avg, days = im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=stock)
+            self.assertEqual(movement, im.MOVEMENT_NOT)
+            self.assertEqual(avg, 0.0)
+        self.assertIsNone(im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=500)[2])
+        self.assertEqual(im.classify(0, self.FAST_CUT, self.NORMAL_CUT, stock=0)[2], 0.0)
+
+    def test_higher_sales_never_lands_in_a_lower_tier(self):
+        # As sales quantity grows, the tier rank only stays or improves
+        # (lower rank number = higher movement tier); it never regresses.
+        prev_rank = 99
+        for units in range(0, 15):
+            movement, _avg, _d = im.classify(units, self.FAST_CUT, self.NORMAL_CUT, stock=100)
+            rank = im.MOVEMENT_RANK[movement]
+            self.assertLessEqual(rank, prev_rank)
+            prev_rank = rank
+
+    def test_bands_by_sales_quantity(self):
+        self.assertEqual(im.classify(10, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_FAST)
+        self.assertEqual(im.classify(3, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_NORMAL)
+        self.assertEqual(im.classify(2, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_SLOW)
+        self.assertEqual(im.classify(1, self.FAST_CUT, self.NORMAL_CUT)[0], im.MOVEMENT_SLOW)
+
+    def test_stock_never_moves_a_product_up_a_tier(self):
+        # Same sales, wildly different stock => same movement tier.
+        low = im.classify(10, self.FAST_CUT, self.NORMAL_CUT, stock=1)[0]
+        high = im.classify(10, self.FAST_CUT, self.NORMAL_CUT, stock=99999)[0]
+        self.assertEqual(low, high)
+
+    def test_avg_daily_and_days_of_stock_edges(self):
+        # avg daily = units / 30 (2 dp); zero stock with sales => 0 days.
+        _m, avg, days = im.classify(30, self.FAST_CUT, self.NORMAL_CUT, stock=0)
+        self.assertEqual(avg, 1.0)
+        self.assertEqual(days, 0.0)
+
+    def test_tier_labels_and_display_priority(self):
+        self.assertEqual(
+            list(im.MOVEMENT_LABELS),
+            ['FAST MOVING', 'NORMAL MOVING', 'SLOW MOVING', 'NOT MOVING'],
+        )
+        self.assertEqual(
+            [im.MOVEMENT_RANK[l] for l in im.MOVEMENT_LABELS], [0, 1, 2, 3],
+        )
+        self.assertEqual(im.SALES_WINDOW_DAYS, 30)
 
 
 class DemandPredictionEngineTest(SimpleTestCase):

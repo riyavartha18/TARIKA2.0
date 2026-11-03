@@ -25,19 +25,27 @@ export function AuthProvider({ children }) {
   });
 
   const [isLoading, setIsLoading] = useState(false);
+  const [authLoading, setAuthLoading] = useState(() => !!localStorage.getItem('iras_token'));
+
 
   useEffect(() => {
     if (token && !user) {
-      getMe(token).then((res) => {
-        if (res.success) {
-          setUser(res.user);
-          localStorage.setItem('iras_user', JSON.stringify(res.user));
-        } else if (res.error === 'Session expired') {
-          logout();
-        }
-      });
+      setAuthLoading(true);
+      getMe(token)
+        .then((res) => {
+          if (res.success) {
+            setUser(res.user);
+            localStorage.setItem('iras_user', JSON.stringify(res.user));
+          } else if (res.error === 'Session expired') {
+            logout();
+          }
+        })
+        .catch(() => {})
+        .finally(() => setAuthLoading(false));
+    } else {
+      setAuthLoading(false);
     }
-  }, [token]);
+  }, [token, user]);
 
   const handleLogin = async (email, password) => {
     setIsLoading(true);
@@ -93,6 +101,7 @@ export function AuthProvider({ children }) {
     warehouseId: user?.warehouse_id || null,
     isAuthenticated: Boolean(token && user),
     isLoading,
+    authLoading,
     login: handleLogin,
     register: handleRegister,
     logout,
