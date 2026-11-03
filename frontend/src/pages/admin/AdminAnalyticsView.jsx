@@ -936,41 +936,6 @@ export default function AdminAnalyticsView() {
           {/* Data Loaded */}
           {slowData && !slowError && (
             <>
-              {/* Analysis Info Banner */}
-              <div style={{
-                background: 'linear-gradient(135deg, #FFFBEB 0%, #FEF3C7 100%)',
-                border: '1px solid rgba(217, 119, 6, 0.25)',
-                borderRadius: '14px',
-                padding: '1.25rem 1.5rem',
-                marginBottom: '1.5rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flexWrap: 'wrap',
-                gap: '1rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  <div style={{
-                    width: '44px', height: '44px', borderRadius: '12px',
-                    backgroundColor: '#FEF3C7', color: '#D97706',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>
-                    <PackageSearch size={22} />
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Inventory Velocity Analysis
-                    </span>
-                    <h3 style={{ margin: '0.1rem 0 0', fontSize: '1.25rem', fontWeight: 800, color: '#1F191B', fontFamily: "var(--font-serif, 'Playfair Display', serif)" }}>
-                      Sales Window: <span style={{ color: '#D97706' }}>{slowData.sales_window_start} → {slowData.analysis_date}</span>
-                    </h3>
-                  </div>
-                </div>
-                <div style={{ fontSize: '0.85rem', color: '#6B5E63' }}>
-                  Analysis Date: <strong style={{ color: '#1F191B' }}>{slowData.analysis_date}</strong>
-                </div>
-              </div>
-
               {/* Summary Metrics Grid — 5 tiles for 4 tiers */}
               <div className="admin-metrics-grid" style={{ marginBottom: '1.5rem' }}>
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
