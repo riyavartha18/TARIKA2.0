@@ -1,5 +1,4 @@
 import time
-from datetime import datetime, timedelta
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -8,7 +7,7 @@ from django.db import connection
 
 from accounts.permissions import IsAuthenticatedUser, IsAdmin
 from catalog.normalize import normalize_category, sql_norm_expr
-from demand_prediction import engine
+from demand_prediction import engine, inventory_metrics as metrics
 from demand_prediction.engine import DecisionTreeEngine
 
 
@@ -325,177 +324,184 @@ class CategoryFilterView(APIView):
 
 class SlowMovingInventoryView(APIView):
     """
-    Slow-Moving Inventory Analysis.
+    Inventory Velocity Analysis — served from the cached summary table.
 
-    Queries products.available_quantity for current stock and aggregates
-    delivered orders (last 30 days) for sales velocity.
+    Every active product (never a truncated 50) is classified from real
+    delivered-order sales in the last 30 days:
 
-    Movement classification (4 tiers):
-      FAST MOVING  – days_of_stock <= 15
-      NORMAL       – days_of_stock <= 60
-      SLOW         – days_of_stock <= 180
-      VERY SLOW    – days_of_stock > 180, or zero sales with stock > 0
+      FAST MOVING  – days of stock <= 15  (needs frequent replenishment)
+      NORMAL       – days of stock <= 60
+      SLOW         – days of stock <= 180
+      NON MOVING   – zero valid sales in the window, or 180+ days of stock
 
-    Field names are aligned with the frontend expectations:
-      current_stock, sales_last_30_days, avg_daily_sales, days_of_stock
+    Metrics per product: current_stock, sales_last_30_days (SUM of delivered
+    orders.quantity in the window), avg_daily_sales (window units / window
+    days) and days_of_stock (CEIL(stock / avg daily); NULL = no sales, which
+    the UI shows as “∞ / No Sales”).
+
+    The heavy aggregation runs once per TTL (or on invalidation) inside
+    demand_prediction.inventory_metrics; requests here are indexed reads with
+    server-side search / filter / sort / pagination, so the whole ~90k catalog
+    is pageable without re-aggregating orders on every render.
     """
     permission_classes = [IsAuthenticatedUser, IsAdmin]
 
+    # Whitelisted sort keys -> internal ORDER BY SQL (never user input).
+    _ORDER_BY = {
+        'days_of_stock': ("v.days_of_stock ASC NULLS LAST, "
+                          "v.sales_last_30_days DESC"),
+        'sales_last_30_days': "v.sales_last_30_days DESC, v.current_stock DESC",
+        'avg_daily_sales': "v.avg_daily_sales DESC, v.sales_last_30_days DESC",
+        'current_stock': "v.current_stock DESC",
+        'product_name': "v.product_name ASC",
+    }
+
     def get(self, request):
+        t0 = time.perf_counter()
         try:
-            today = datetime.utcnow().date()
-            end_date = today
-            start_date = end_date - timedelta(days=30)
+            force = request.query_params.get('refresh', '').lower() in ('1', 'true')
+            state = metrics.ensure_fresh(force=force)
 
-            search = request.query_params.get("search", "").strip()
-            category = request.query_params.get("category", "").strip()
-            movement_status_filter = (
-                request.query_params.get("movement_status", "").strip().upper()
-            )
-            limit = int(request.query_params.get("limit", 500) or 500)
-            offset = int(request.query_params.get("offset", 0) or 0)
+            page = max(1, int(request.query_params.get('page', 1) or 1))
+            page_size = int(request.query_params.get('page_size', 50) or 50)
+            page_size = min(max(page_size, 1), 200)
 
-            # Build product filter WHERE clause
-            product_where_clauses = []
-            product_sql_params = []
+            search = request.query_params.get('search', '').strip().lower()
+            category = request.query_params.get('category', '').strip()
+            movement = request.query_params.get('movement_status', '').strip().upper()
+            sort_key = request.query_params.get('sort', 'days_of_stock').strip()
+            if movement not in metrics.MOVEMENT_LABELS:
+                movement = ''
+
+            where = []
+            params = []
+            has_search = bool(search)
+            has_category = bool(category and category.upper() != 'ALL')
             if search:
-                product_where_clauses.append(
-                    "(LOWER(p.name) LIKE %s"
-                    " OR LOWER(p.main_category) LIKE %s"
-                    " OR LOWER(p.sub_category) LIKE %s)"
-                )
-                like = f"%{search.lower()}%"
-                product_sql_params.extend([like, like, like])
-            if category and category.upper() != "ALL":
-                product_where_clauses.append("LOWER(p.main_category) = %s")
-                product_sql_params.append(category.lower())
+                where.append(
+                    "(LOWER(COALESCE(v.product_name, '')) LIKE %s "
+                    "OR LOWER(COALESCE(v.main_category, '')) LIKE %s "
+                    "OR LOWER(COALESCE(v.sub_category, '')) LIKE %s)")
+                like = f'%{search}%'
+                params += [like, like, like]
+            if has_category:
+                where.append(f"{sql_norm_expr('v.main_category')} = %s")
+                params.append(normalize_category(category))
+            if movement:
+                where.append("v.movement_status = %s")
+                params.append(movement)
+            where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+            order_sql = self._ORDER_BY.get(sort_key, self._ORDER_BY['days_of_stock'])
 
-            where_sql = ""
-            if product_where_clauses:
-                where_sql = "WHERE " + " AND ".join(product_where_clauses)
+            # Summary tiles come straight from the cached state row: they only
+            # change when the metrics table is rebuilt, so no per-request scan.
+            st_summary = (state or {}).get('summary', {})
+            total_products = int((state or {}).get('product_count', 0))
+            summary = {
+                'total_products': total_products,
+                'fast_moving': int(st_summary.get('fast_moving', 0)),
+                'normal': int(st_summary.get('normal', 0)),
+                'slow': int(st_summary.get('slow', 0)),
+                'non_moving': int(st_summary.get('non_moving', 0)),
+                'out_of_stock': int(st_summary.get('out_of_stock', 0)),
+                'total_window_units': int(st_summary.get('window_units', 0)),
+            }
 
-            # Aggregated sales sub-query for the last 30 days.
-            # The orders table uses product_id (TEXT), NOT product_key.
-            order_agg_sql = (
-                "SELECT o.product_id AS product_key,"
-                " SUM(o.quantity)::bigint AS units_sold"
-                " FROM orders o"
-                " WHERE o.delivery_status = 'Delivered'"
-                " AND o.purchase_date ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$'"
-                " AND to_date(o.purchase_date, 'DD-MM-YYYY') BETWEEN %s AND %s"
-                " GROUP BY o.product_id"
-            )
-            sql_params = [
-                start_date.strftime("%Y-%m-%d"),
-                end_date.strftime("%Y-%m-%d"),
-            ]
+            # The filtered total is derivable from the cache in two cheap cases
+            # and only needs a COUNT scan for a genuine search / category.
+            if not where_sql:
+                filtered_total = total_products
+            elif movement and not has_search and not has_category:
+                _tier_key = {metrics.MOVEMENT_FAST: 'fast_moving',
+                             metrics.MOVEMENT_NORMAL: 'normal',
+                             metrics.MOVEMENT_SLOW: 'slow',
+                             metrics.MOVEMENT_NON_MOVING: 'non_moving'}[movement]
+                filtered_total = summary[_tier_key]
+            else:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"SELECT COUNT(*)::int FROM {metrics.METRICS_TABLE} v {where_sql}",
+                        params)
+                    filtered_total = int(cursor.fetchone()[0])
 
-            sql = f"""
-                SELECT
-                    p.product_key,
-                    p.name            AS product_name,
-                    p.main_category,
-                    p.sub_category,
-                    COALESCE(p.available_quantity, 0) AS current_stock,
-                    COALESCE(oa.units_sold, 0)        AS sales_last_30_days
-                FROM products p
-                LEFT JOIN ({order_agg_sql}) oa ON p.product_key = oa.product_key
-                {where_sql}
-                ORDER BY sales_last_30_days DESC, current_stock DESC
-                LIMIT %s OFFSET %s
-            """
-            sql_params.extend(product_sql_params)
-            sql_params.extend([limit, offset])
+            total_pages = (filtered_total + page_size - 1) // page_size
+            page = min(page, max(total_pages, 1))
 
+            # The requested page is a pure index+LIMIT scan. It carries no
+            # window function: COUNT(*) OVER() would force a full 88k scan and
+            # erase the index benefit for the default (unfiltered) view.
             with connection.cursor() as cursor:
-                cursor.execute(sql, sql_params)
+                cursor.execute(
+                    f"""
+                    SELECT v.product_key, v.product_name, v.main_category,
+                           v.sub_category, v.current_stock, v.sales_last_30_days,
+                           v.avg_daily_sales, v.days_of_stock, v.movement_status
+                    FROM {metrics.METRICS_TABLE} v
+                    {where_sql}
+                    ORDER BY {order_sql}
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [page_size, (page - 1) * page_size])
                 cols = [c[0] for c in cursor.description]
                 rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
 
-            days_span = 30
             items = []
-            summary = {
-                "total_inventory": 0,
-                "fast_moving": 0,
-                "normal": 0,
-                "slow": 0,
-                "very_slow": 0,
-                "out_of_stock": 0,
-            }
-
             for r in rows:
-                stock = float(r.get("current_stock") or 0)
-                units = float(r.get("sales_last_30_days") or 0)
-                avg_daily = round(units / days_span, 2)
+                stock = float(r['current_stock'] or 0)
+                units = int(r['sales_last_30_days'] or 0)
+                avg_daily = round(float(r['avg_daily_sales'] or 0), 2)
+                days_of_stock = float(r['days_of_stock']) if r['days_of_stock'] is not None else None
+                no_sales = units == 0
+                items.append({
+                    'product_key': r['product_key'],
+                    'product_name': r['product_name'] or 'Unknown Product',
+                    'category_name': r['main_category'] or '',
+                    'sub_category': r['sub_category'] or '',
+                    'current_stock': int(stock),
+                    'sales_last_30_days': units,
+                    'avg_daily_sales': avg_daily,
+                    # NULL days_of_stock with stock on hand = no sales (∞).
+                    'days_of_stock': days_of_stock,
+                    'no_sales': no_sales,
+                    'movement_status': r['movement_status'],
+                })
 
-                if avg_daily > 0:
-                    days_of_stock = round(stock / avg_daily, 2)
-                else:
-                    days_of_stock = 999999 if stock > 0 else 0
+            def _fmt(date_text):
+                # 'YYYY-MM-DD' -> 'DD-MM-YYYY' for display, same as before.
+                if not date_text:
+                    return None
+                y, m, d = date_text.split('-')
+                return f'{d}-{m}-{y}'
 
-                # Four-tier movement classification
-                if stock <= 0:
-                    movement = "OUT OF STOCK"
-                elif units == 0:
-                    movement = "VERY SLOW"
-                elif days_of_stock <= 15:
-                    movement = "FAST MOVING"
-                elif days_of_stock <= 60:
-                    movement = "NORMAL"
-                elif days_of_stock <= 180:
-                    movement = "SLOW"
-                else:
-                    movement = "VERY SLOW"
-
-                item = {
-                    "product_key": r.get("product_key"),
-                    "product_name": r.get("product_name") or "Unknown Product",
-                    "category_name": r.get("main_category") or "",
-                    "sub_category": r.get("sub_category") or "",
-                    "current_stock": int(stock),
-                    "sales_last_30_days": int(units),
-                    "avg_daily_sales": avg_daily,
-                    "days_of_stock": days_of_stock,
-                    "movement_status": movement,
-                }
-                items.append(item)
-
-                summary["total_inventory"] += 1
-                if movement == "OUT OF STOCK":
-                    summary["out_of_stock"] += 1
-                elif movement == "FAST MOVING":
-                    summary["fast_moving"] += 1
-                elif movement == "NORMAL":
-                    summary["normal"] += 1
-                elif movement == "SLOW":
-                    summary["slow"] += 1
-                elif movement == "VERY SLOW":
-                    summary["very_slow"] += 1
-
-            # Apply movement_status filter post-query
-            if movement_status_filter and movement_status_filter != "ALL":
-                items = [i for i in items if i["movement_status"] == movement_status_filter]
-
-            return Response(
-                {
-                    "success": True,
-                    "analysis_date": end_date.strftime("%d-%m-%Y"),
-                    "sales_window_start": start_date.strftime("%d-%m-%Y"),
-                    "summary": summary,
-                    "items": items,
-                    "warehouses": [],  # No warehouse table in database schema
-                    "pagination": {
-                        "limit": limit,
-                        "offset": offset,
-                        "total": summary["total_inventory"],
-                    },
+            return Response({
+                'success': True,
+                'analysis_date': _fmt(state and state['window_end']),
+                'sales_window_start': _fmt(state and state['window_start']),
+                'sales_window_days': metrics.SALES_WINDOW_DAYS,
+                'thresholds': {
+                    'fast_max_days': metrics.FAST_MAX_DAYS,
+                    'normal_max_days': metrics.NORMAL_MAX_DAYS,
+                    'slow_max_days': metrics.SLOW_MAX_DAYS,
                 },
-                status=status.HTTP_200_OK,
-            )
+                'summary': summary,
+                'items': items,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_filtered': filtered_total,
+                    'total_pages': total_pages,
+                },
+                'cache': {
+                    'refreshed_at': state and state['refreshed_at'],
+                    'ttl_seconds': metrics.METRICS_TTL_SECONDS,
+                },
+                'timing': {'view_ms': round((time.perf_counter() - t0) * 1000, 1)},
+            }, status=status.HTTP_200_OK)
 
         except Exception as exc:
             return Response(
                 {"error": f"Error generating slow inventory analysis: {str(exc)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
 

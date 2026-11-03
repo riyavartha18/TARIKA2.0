@@ -1,6 +1,51 @@
 from django.test import SimpleTestCase
 from demand_prediction import engine
 from demand_prediction.engine import DecisionTreeEngine
+from demand_prediction import inventory_metrics as im
+
+
+class InventoryVelocityClassificationTest(SimpleTestCase):
+    """The transparent, configurable tier rules for the Admin analysis."""
+
+    def test_zero_sales_is_never_fast_moving(self):
+        # A product with stock but no sales in the window is NON MOVING, and
+        # days_of_stock is reported as None (∞ / No Sales), never 0.
+        movement, avg, days = im.classify(stock=500, units=0)
+        self.assertEqual(movement, im.MOVEMENT_NON_MOVING)
+        self.assertEqual(avg, 0.0)
+        self.assertIsNone(days)
+
+    def test_fast_moving_low_days_of_stock(self):
+        # 30 units / 30 days = 1/day; 10 stock -> 10 days <= 15 -> FAST MOVING.
+        movement, avg, days = im.classify(stock=10, units=30)
+        self.assertEqual(avg, 1.0)
+        self.assertEqual(days, 10.0)
+        self.assertEqual(movement, im.MOVEMENT_FAST)
+
+    def test_normal_and_slow_bands(self):
+        # avg 1/day: 40 stock -> 40 days (16-60) NORMAL.
+        self.assertEqual(im.classify(stock=40, units=30)[0], im.MOVEMENT_NORMAL)
+        # 120 stock -> 120 days (61-180) SLOW.
+        self.assertEqual(im.classify(stock=120, units=30)[0], im.MOVEMENT_SLOW)
+        # 400 stock -> 400 days (>180) NON MOVING.
+        self.assertEqual(im.classify(stock=400, units=30)[0], im.MOVEMENT_NON_MOVING)
+
+    def test_out_of_stock_with_sales_is_flagged_urgent(self):
+        # Zero stock but genuine sales => needs replenishment (FAST MOVING),
+        # and is never mislabelled NON MOVING just because stock is empty.
+        movement, _avg, days = im.classify(stock=0, units=12)
+        self.assertEqual(movement, im.MOVEMENT_FAST)
+        self.assertEqual(days, 0.0)
+
+    def test_thresholds_are_configurable_constants(self):
+        # The documented defaults are the ones the SQL and Python share.
+        self.assertEqual(im.SALES_WINDOW_DAYS, 30)
+        self.assertEqual((im.FAST_MAX_DAYS, im.NORMAL_MAX_DAYS, im.SLOW_MAX_DAYS),
+                         (15, 60, 180))
+        self.assertEqual(
+            list(im.MOVEMENT_LABELS),
+            ['FAST MOVING', 'NORMAL', 'SLOW', 'NON MOVING'],
+        )
 
 
 class DemandPredictionEngineTest(SimpleTestCase):
