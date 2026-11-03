@@ -22,9 +22,9 @@ from django.utils import timezone  # noqa: E402
 from django.db import transaction  # noqa: E402
 from rest_framework.exceptions import ValidationError  # noqa: E402
 
-from rfm_analysis import (cache_manager, clustering, coupon_validation,  # noqa: E402
-                          dashboard_cache, personalization, queries,
-                          segment_store, views)
+from rfm_analysis import (cache_manager, campaign_publishing, clustering,  # noqa: E402
+                          coupon_validation, dashboard_cache, personalization,
+                          queries, segment_store, views)
 from rfm_analysis.cluster_targeting import available_clusters  # noqa: E402
 from rfm_analysis.models import (Campaign, CampaignAudience,  # noqa: E402
                                  CampaignStatus, ClusteringRun,
@@ -178,7 +178,7 @@ def part_b(panel):
                     min_order_amount=0, usage_type='UNLIMITED',
                     status=CampaignStatus.DRAFT,
                 )
-                blocker, audience = views.CampaignStatusView._publish_blocker(campaign)
+                blocker, audience = campaign_publishing.publish_blocker(campaign)
                 if blocker:
                     line('publish refused for', f'{campaign.coupon_code}: {blocker}')
                     continue
@@ -224,8 +224,8 @@ def part_b(panel):
             # Re-issuing to the same campaign can never duplicate a coupon.
             first, _audience, group = published[0]
             before = CampaignAudience.objects.filter(campaign=first).count()
-            views.CampaignStatusView._issue_coupons(first)
-            views.CampaignStatusView._issue_coupons(first)
+            campaign_publishing.issue_coupons(first)
+            campaign_publishing.issue_coupons(first)
             after = CampaignAudience.objects.filter(campaign=first).count()
             distinct = (CampaignAudience.objects.filter(campaign=first)
                         .values_list('customer_id', flat=True).distinct().count())

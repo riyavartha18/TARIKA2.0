@@ -146,19 +146,7 @@ export default function AdminCampaignView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.4rem' }}>
-      <div>
-        <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.7rem', color: PALETTE.ink, margin: 0 }}>Campaign Management</h2>
-        <p style={{ color: PALETTE.muted, margin: '0.35rem 0 0', fontSize: '0.9rem' }}>
-          Create discount offers, Buy &amp; Get offers or both, and choose exactly which K-Means customer
-          groups receive them.
-          {clusteringRun && (
-            <> Targeting uses clustering run <strong>#{clusteringRun.run_id}</strong>
-              {' '}(RFM v{clusteringRun.rfm_version},
-              {' '}{clusteringRun.completed_at ? new Date(clusteringRun.completed_at).toLocaleString() : 'date unavailable'}).</>
-          )}
-          <br />Nothing is visible to customers until you <strong>Publish</strong> it.
-        </p>
-      </div>
+      <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: '1.7rem', color: PALETTE.ink, margin: 0 }}>Campaign Management</h2>
 
       {error && <Banner color="#B3261E" bg="#FDECEA" border="#F5C6C0" text={error} />}
       {notice && <Banner color="#2E7D32" bg="#EAF5EB" border="#C6E5C9" text={notice} />}

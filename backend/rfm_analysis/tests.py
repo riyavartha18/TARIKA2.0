@@ -2991,3 +2991,52 @@ class LegacyAudienceGateTests(ClusterFixtureMixin, TestCase):
             coupon_validation.validate_coupon(
                 member, 'GROUP30', 1000, cart_lines=self._cart(1000))['discount'],
             300.0)
+
+
+class SeedGroupCampaignCodeTests(TestCase):
+    """The seeding command may not mistake a historical campaign for a group's.
+
+    `coupon_code` is unique, and the old rule-segment campaigns took the natural
+    codes (`RISK_20OFF` aimed at the previous `At-Risk` segment). Treating such a
+    collision as "this group's campaign already exists" left the group with no
+    K-Means campaign at all - its customers were never issued a coupon, while the
+    command reported the offer as done. A squatted code must be stepped past, and
+    the code the group's own K-Means campaign holds must be recognised so a
+    re-run stays idempotent instead of minting duplicates.
+    """
+
+    def setUp(self):
+        from rfm_analysis.management.commands.seed_cluster_campaigns import Command
+        self.command = Command()
+        self.now = timezone.now()
+
+    def _campaign(self, coupon_code, **overrides):
+        base = dict(
+            name='Seeded offer', coupon_code=coupon_code,
+            discount_type=DiscountType.PERCENTAGE, discount_value=20,
+            start_date=self.now - timedelta(days=1),
+            end_date=self.now + timedelta(days=30),
+            usage_type=UsageType.UNLIMITED, status=CampaignStatus.PUBLISHED)
+        base.update(overrides)
+        return Campaign.objects.create(**base)
+
+    def test_a_code_held_by_a_legacy_campaign_is_stepped_past(self):
+        self._campaign('RISK_20OFF', target_segments=[utils.SEGMENT_AT_RISK])
+        resolved = self.command._resolve_code('RISK_20OFF')
+        self.assertNotEqual(resolved, 'RISK_20OFF')
+        self.assertTrue(resolved.startswith('RISK_20OFF'))
+        # The historical row is untouched: no re-targeting, no rewriting.
+        legacy = Campaign.objects.get(coupon_code='RISK_20OFF')
+        self.assertEqual(legacy.targeting_mode, TargetingMode.LEGACY_RFM)
+
+    def test_a_free_code_is_used_exactly_as_authored(self):
+        self.assertEqual(self.command._resolve_code('ATRISK_20OFF'),
+                         'ATRISK_20OFF')
+
+    def test_the_groups_own_kmeans_campaign_code_is_reused(self):
+        own = self._campaign('ATRISK_20OFF', targeting_mode=TargetingMode.KMEANS,
+                             target_cluster_ids=[1],
+                             target_cluster_labels=[utils.KMEANS_CATEGORY_AT_RISK])
+        self.assertEqual(self.command._resolve_code('ATRISK_20OFF'),
+                         own.coupon_code)
+        self.assertEqual(Campaign.objects.filter(coupon_code='ATRISK_20OFF').count(), 1)

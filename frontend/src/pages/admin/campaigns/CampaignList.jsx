@@ -17,14 +17,12 @@ const selectStyle = {
 /**
  * The campaign table. Every row states the customer groups it is aimed at (the
  * four K-Means clusters for a new campaign, the old rule-based segments for a
- * historical one, clearly labelled), its coupon figures from the persisted
- * assignments and redemptions, and its status.
+ * historical one, clearly labelled) and its status.
  */
 export default function CampaignList({
   token, editingId, onEdit, refreshToken, clusters = [], onPublished,
 }) {
   const [campaigns, setCampaigns] = useState([]);
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -35,7 +33,6 @@ export default function CampaignList({
   const [search, setSearch] = useState('');
   const [detail, setDetail] = useState(null); // loaded campaign for the modal
   const [detailLoading, setDetailLoading] = useState(false);
-  const [legacyAudience, setLegacyAudience] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -45,10 +42,8 @@ export default function CampaignList({
     });
     if (res.success) {
       setCampaigns(res.campaigns);
-      setTotal(res.count);
       setTotalPages(res.totalPages);
       setPage(res.currentPage);
-      setLegacyAudience(res.legacyAudience || null);
     }
     setLoading(false);
   }, [token, statusFilter, groupFilter, offerFilter, search, page]);
@@ -102,26 +97,7 @@ export default function CampaignList({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      <div>
-        <h3 style={{ margin: 0, fontFamily: "'Playfair Display', serif", fontSize: '1.3rem', color: PALETTE.ink }}>Your Campaigns</h3>
-        <p style={{ color: PALETTE.muted, margin: '0.25rem 0 0', fontSize: '0.85rem' }}>
-          {total} campaign{total === 1 ? '' : 's'}. Eligible-customer and coupon counts come from the latest
-          completed K-Means clustering and the issued-coupon records.
-        </p>
-      </div>
-
-      {/* Old rule-segment campaigns stay on record but no longer reach customers,
-          because their segments are not the customer's K-Means group. */}
-      {legacyAudience && legacyAudience.campaign_count > 0 && !legacyAudience.visible_to_customers && (
-        <div style={{ backgroundColor: '#FFF8E7', border: '1px solid #F0DFAE', borderRadius: 12, padding: '0.7rem 0.9rem', fontSize: '0.8rem', color: '#7A5B12' }}>
-          <strong>{legacyAudience.campaign_count} campaign{legacyAudience.campaign_count === 1 ? '' : 's'}</strong>
-          {' '}still target the previous rule-based RFM segments, so customers are not shown
-          those offers: a customer only ever sees the coupon of their own K-Means group.
-          Nothing is deleted — the campaigns, their issued coupons and their redemption
-          history are intact, and to serve such an offer again create a new campaign aimed
-          at the matching customer groups.
-        </div>
-      )}
+      <h3 style={{ margin: 0, fontFamily: "'Playfair Display', serif", fontSize: '1.3rem', color: PALETTE.ink }}>Your Campaigns</h3>
 
       {/* Filters */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
@@ -167,7 +143,7 @@ export default function CampaignList({
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
             <thead>
               <tr style={{ backgroundColor: '#FBF5F4' }}>
-                {['Campaign', 'Offer Type', 'Offer Details', 'Target Customer Group', 'Validity', 'Status', 'Eligible Customers', 'Coupons (Issued / Redeemed / Left)', 'Actions'].map((h) => (
+                {['Campaign', 'Offer Type', 'Offer Details', 'Target Customer Group', 'Validity', 'Status', 'Eligible Customers', 'Actions'].map((h) => (
                   <th key={h} style={{ padding: '0.7rem 0.8rem', textAlign: 'left', color: PALETTE.muted, fontWeight: 700, whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
@@ -199,13 +175,9 @@ export default function CampaignList({
                           <span style={{ fontSize: '0.72rem', color: PALETTE.faint }}>None selected</span>
                         )}
                       </div>
-                      {isLegacyAudience(c) ? (
+                      {isLegacyAudience(c) && (
                         <div style={{ fontSize: '0.68rem', color: '#7A5B12', marginTop: 2 }}>
                           Previous RFM segmentation
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: '0.68rem', color: PALETTE.faint, marginTop: 2 }}>
-                          K-Means run #{c.clustering_run_id ?? '—'}
                         </div>
                       )}
                     </td>
@@ -217,9 +189,6 @@ export default function CampaignList({
                     </td>
                     <td style={{ padding: '0.7rem 0.8rem', color: PALETTE.ink, whiteSpace: 'nowrap' }}>
                       {c.eligible_audience_count == null ? 'Run clustering first' : c.eligible_audience_count.toLocaleString('en-IN')}
-                    </td>
-                    <td style={{ padding: '0.7rem 0.8rem', color: PALETTE.ink, whiteSpace: 'nowrap', fontSize: '0.78rem' }}>
-                      {(c.coupons_issued ?? 0).toLocaleString('en-IN')} / {(c.coupons_redeemed ?? 0).toLocaleString('en-IN')} / {(c.coupons_remaining ?? 0).toLocaleString('en-IN')}
                     </td>
                     <td style={{ padding: '0.7rem 0.5rem', whiteSpace: 'nowrap' }}>
                       <IconBtn title="View details" onClick={() => openDetail(c)}><Eye size={15} /></IconBtn>

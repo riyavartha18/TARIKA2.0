@@ -80,7 +80,7 @@ OFFER_SETS = {
          'Rs.200 cashback credited after delivery on orders above Rs.2,000.',
          'cashback_200'),
     ]),
-    'At Risk': ('RISK', [
+    'At Risk': ('ATRISK', [
         ('20OFF', '20% OFF Comeback', 'Flat 20% off, up to Rs.500 — we miss you.',
          'percentage_20_capped'),
         ('B2G1', 'Buy 2 Get 1 Free', 'Buy any 2 items, get 1 free.',
@@ -251,7 +251,8 @@ class Command(BaseCommand):
         """Create + publish a group campaign, or leave an existing one alone."""
         from rfm_analysis import campaign_publishing
 
-        coupon_code = definition['coupon_code']
+        coupon_code = self._resolve_code(definition['coupon_code'])
+        definition = dict(definition, coupon_code=coupon_code)
         existing = Campaign.objects.filter(coupon_code=coupon_code).first()
         if existing and existing.status != CampaignStatus.DRAFT:
             # Its coupons are already in customers' accounts: the terms, dates
@@ -284,6 +285,29 @@ class Command(BaseCommand):
                 f"{', '.join(c['category'] for c in audience['clusters'])}")
         return 'published' if existing else 'created'
 
+    @staticmethod
+    def _resolve_code(coupon_code):
+        """The code this group's campaign may actually use.
+
+        `coupon_code` is unique, and the historical rule-segment campaigns took
+        most of the natural codes long ago (an `RISK_20OFF` aimed at the old
+        `At-Risk` segment, for instance). Such a row is history - its issued
+        coupons and redemption records are never rewritten, and it is not the
+        customer-group campaign being seeded here, whose audience has to come
+        from the stored K-Means assignments. So a code squatted by a non-K-Means
+        campaign is stepped past, while the code of the group's own K-Means
+        campaign is recognised and left untouched (which keeps re-running
+        idempotent).
+        """
+        code = coupon_code
+        step = 2
+        while True:
+            existing = Campaign.objects.filter(coupon_code=code).first()
+            if existing is None or existing.targets_clusters:
+                return code
+            code = f'{coupon_code}_{step}'
+            step += 1
+
     # ------------------------------------------------------- legacy cleanup
 
     def _retire_other_campaigns(self, by_label, run_id):
@@ -294,7 +318,11 @@ class Command(BaseCommand):
                 for _label, (suffix, offers) in OFFER_SETS.items()
                 for code, *_rest in offers}
         seed_labels = set(by_label)
-        for campaign in Campaign.objects.exclude(coupon_code__in=keep):
+        for campaign in (Campaign.objects
+                         .exclude(coupon_code__in=keep)
+                         .exclude(targeting_mode='KMEANS')):
+            # The campaigns of the four customer groups are never retired here,
+            # whatever code they ended up on; only the rows outside this set are.
             if campaign.status == CampaignStatus.EXPIRED:
                 continue
             audience = CampaignAudience.objects.filter(campaign=campaign).count()
@@ -311,82 +339,121 @@ class Command(BaseCommand):
 
     # ------------------------------------------------------ real product data
 
+    # The seeded offers only ever need a few dozen products (two selected-product
+    # slices, five three-piece combos, five gifts), so the pool is read by
+    # primary key instead of loading and pricing all ~90k `public.products` rows
+    # into the process. Nothing is invented: every id, name, category, price and
+    # bundle still comes from the live catalogue, just never more rows than the
+    # offers use.
+    POOL_SIZE = 120
+
     def _load_catalog(self):
-        products = list(Product.objects.filter(is_active=True)
-                        .order_by('product_id'))
+        """A bounded slice of the live catalogue, priced with authoritative prices."""
+        pool_ids = self._candidate_ids()
+        products = list(Product.objects.filter(product_id__in=pool_ids))
         price_map = get_product_selling_price_map(p.product_id for p in products)
-        priced = [p for p in products if float(price_map.get(str(p.product_id)) or 0) > 0]
-        by_id = {str(p.product_id): p for p in priced}
-        ids = [str(p.product_id) for p in priced]
+        by_id = {str(p.product_id): p for p in products}
+        # Keep the candidate order (best sellers first), drop unpriced rows.
+        priced = [by_id[i] for i in pool_ids
+                  if i in by_id and float(price_map.get(i) or 0) > 0]
 
         # Stable, deterministic slices for the "selected products" offers.
-        slices = {'slice_a': ids[0:6], 'slice_b': ids[6:12]}
+        slices = {'slice_a': [str(p.product_id) for p in priced[0:6]],
+                  'slice_b': [str(p.product_id) for p in priced[6:12]]}
 
-        # Combos: prefer real best sellers (units_sold), fall back to the
-        # deterministic catalogue order if the analytics table is unavailable.
-        ordered_ids = self._top_seller_ids(fallback=ids)
-        combo_pool = [by_id[i] for i in ordered_ids if i in by_id]
+        # Combos of real best sellers, priced at 80% of their live selling price.
         combos = []
         for start in range(0, 15, 3):
-            chunk = combo_pool[start:start + 3]
+            chunk = priced[start:start + 3]
             if len(chunk) < 3:
                 continue
-            gross = sum(float(price_map.get(str(p.product_id))) for p in chunk)
-            combos.append({
-                'product_ids': [str(p.product_id) for p in chunk],
-                'bundle_price': _round_rupee(gross * 0.8),
-            })
-        while len(combos) < 5:  # extremely small catalogues: reuse order slices
-            chunk = priced[len(combos) * 3:len(combos) * 3 + 3]
-            if len(chunk) < 3:
-                break
-            gross = sum(float(price_map.get(str(p.product_id))) for p in chunk)
+            gross = sum(float(price_map[str(p.product_id)]) for p in chunk)
             combos.append({
                 'product_ids': [str(p.product_id) for p in chunk],
                 'bundle_price': _round_rupee(gross * 0.8),
             })
 
-        # Gifts: five distinct real, low-priced items.
-        cheapest = sorted(priced, key=lambda p: (float(price_map.get(str(p.product_id))),
-                                                 str(p.product_id)))
-        gifts = [{'name': f'Complimentary {p.product_name or p.product_id}',
-                  'price': _round_rupee(float(price_map.get(str(p.product_id))))}
-                 for p in cheapest[:5]]
+        # Gifts: five distinct real, low-priced items from the live catalogue.
+        cheap = list(Product.objects.filter(is_active=True, discounted_price__gt=0)
+                     .order_by('discounted_price', 'product_id')[:5])
+        cheap_prices = get_product_selling_price_map(p.product_id for p in cheap)
+        gifts = []
+        for p in cheap:
+            value = float(cheap_prices.get(str(p.product_id)) or 0)
+            if value > 0:
+                gifts.append({'name': f'Complimentary {p.product_name or p.product_id}',
+                              'price': _round_rupee(value)})
 
-        # Categories: the two most common main categories in the live catalog,
-        # counted CASE/WHITESPACE-INSENSITIVELY so "Dress"/"dress" form one.
-        from catalog.normalize import normalize_category
-        counts = {}
-        displays = {}
-        for p in priced:
-            key = normalize_category(p.main_category)
-            if key:
-                counts[key] = counts.get(key, 0) + 1
-                displays.setdefault(key, (p.main_category or '').strip())
-        categories = [displays[c] for c, _n in sorted(counts.items(),
-                                                       key=lambda kv: (-kv[1], kv[0]))][:2]
+        categories = self._top_categories()
 
         if len(combos) < 5 or len(gifts) < 5 or not categories:
             raise RuntimeError('Live catalog too small to seed combos/gifts/categories')
         return {'priced': priced, 'ids': slices, 'combos': combos,
                 'gifts': gifts, 'categories': categories}
 
-    @staticmethod
-    def _top_seller_ids(fallback):
+    def _candidate_ids(self):
+        """Product ids the seeded offers draw from, real best sellers first.
+
+        One LIMIT-ed read of the analytics table, then only those catalogue rows
+        that are active and exist. Falls back to the deterministic primary-key
+        order when the analytics table cannot be read.
+        """
+        ranked = []
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    """
-                    SELECT product_key FROM public.fact_product_analysis
-                    WHERE units_sold IS NOT NULL AND units_sold > 0
-                    ORDER BY units_sold DESC, product_key ASC
-                    """
-                )
+                    'SELECT product_key FROM public.fact_product_analysis '
+                    'WHERE units_sold IS NOT NULL AND units_sold > 0 '
+                    'ORDER BY units_sold DESC, product_key ASC LIMIT %s',
+                    [self.POOL_SIZE])
                 ranked = [str(row[0]) for row in cursor.fetchall()]
-            merged = ranked + [i for i in fallback if i not in set(ranked)]
-            return merged
         except Exception:
-            return list(fallback)
+            ranked = []
+        candidates = list(ranked)
+        if len(candidates) < self.POOL_SIZE:
+            # Catalogue order tops up (and completely replaces) a missing or
+            # short analytics table, so the offers always have real products.
+            spare = (Product.objects.filter(is_active=True)
+                     .order_by('product_id')
+                     .values_list('product_id', flat=True)[:self.POOL_SIZE * 2])
+            seen = set(candidates)
+            candidates += [str(pk) for pk in spare if str(pk) not in seen]
+        live = set(Product.objects.filter(product_id__in=candidates, is_active=True)
+                   .values_list('product_id', flat=True))
+        return [key for key in candidates if key in live][:self.POOL_SIZE]
+
+    @staticmethod
+    def _top_categories():
+        """The two most common main categories, counted in the database.
+
+        Grouped CASE/WHITESPACE-INSENSITIVELY (so "Dress"/"dress" form one),
+        which is one aggregate over the catalogue instead of a Python scan of
+        every product row.
+        """
+        from catalog.normalize import normalize_category
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    'SELECT TRIM(main_category) AS display, COUNT(*) AS count '
+                    'FROM public.products '
+                    "WHERE is_active AND main_category IS NOT NULL "
+                    "AND TRIM(main_category) <> '' "
+                    'GROUP BY 1 ORDER BY count DESC, LOWER(MIN(main_category)) ASC '
+                    'LIMIT 40')
+                rows = cursor.fetchall()
+        except Exception:
+            return []
+        displays = []
+        seen = set()
+        for display, _count in rows:
+            key = normalize_category(display)
+            if key and key not in seen:
+                seen.add(key)
+                displays.append(str(display).strip())
+            if len(displays) == 2:
+                break
+        return displays
 
 
 def _bundle(combos, index):
