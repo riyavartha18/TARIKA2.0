@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import demandForecastingVisual from '../../assets/demand_forecasting_visual.png';
 import { useAuth } from '../../auth/AuthContext';
@@ -6,9 +6,9 @@ import {
   getDemandPredictionAnalytics,
   getDemandPredictionProducts,
   getDemandPredictionCategories,
-  getSlowMovingInventory,
   getProductSalesHistory,
 } from '../../services/api';
+import { getSlowMovingInventory } from '../../services/slowInventory';
 import {
   BrainCircuit,
   Search,
@@ -70,13 +70,19 @@ export default function AdminAnalyticsView() {
   const [productsError, setProductsError] = useState(null);
   const [categoriesList, setCategoriesList] = useState([]);
 
-  // === Slow-Moving Inventory State ===
+  // === Inventory Velocity (Slow-Moving) State — server-driven ===
   const [slowLoading, setSlowLoading] = useState(false);
   const [slowError, setSlowError] = useState(null);
   const [slowData, setSlowData] = useState(null);
   const [slowSearchQuery, setSlowSearchQuery] = useState('');
+  const [slowDebouncedSearch, setSlowDebouncedSearch] = useState('');
   const [slowStatusFilter, setSlowStatusFilter] = useState('ALL');
-  const [slowWarehouseFilter, setSlowWarehouseFilter] = useState('ALL');
+  const [slowCategoryFilter, setSlowCategoryFilter] = useState('ALL');
+  const [slowSort, setSlowSort] = useState('movement');
+  const [slowPage, setSlowPage] = useState(1);
+  const slowPageSize = 50;
+  // Guards against out-of-order responses when filters change quickly.
+  const slowReqId = useRef(0);
 
   // Product detail drawer (image click) + sales-history graph
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -177,22 +183,54 @@ export default function AdminAnalyticsView() {
     }
   }, [activeView, fetchProducts]);
 
-  const fetchSlowInventoryData = async () => {
+  const fetchSlowInventoryData = useCallback(async (opts = {}) => {
+    const reqId = ++slowReqId.current;
     setSlowLoading(true);
     setSlowError(null);
     try {
-      const res = await getSlowMovingInventory(getActiveToken());
+      const res = await getSlowMovingInventory(getActiveToken(), {
+        page: opts.page ?? slowPage,
+        page_size: slowPageSize,
+        search: opts.search ?? slowDebouncedSearch,
+        category: opts.category ?? slowCategoryFilter,
+        movement_status: opts.movement_status ?? slowStatusFilter,
+        sort: opts.sort ?? slowSort,
+        refresh: opts.refresh ?? false,
+      });
+      // Ignore a stale response superseded by a newer filter change.
+      if (reqId !== slowReqId.current) return;
       if (res.success) {
         setSlowData(res);
       } else {
-        setSlowError(res.error || 'Failed to load slow-moving inventory data.');
+        setSlowError(res.error || 'Failed to load inventory velocity data.');
       }
     } catch (err) {
-      setSlowError('An unexpected error occurred while fetching slow-moving inventory data.');
+      if (reqId !== slowReqId.current) return;
+      setSlowError('An unexpected error occurred while fetching inventory velocity data.');
     } finally {
-      setSlowLoading(false);
+      if (reqId === slowReqId.current) setSlowLoading(false);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slowPage, slowDebouncedSearch, slowCategoryFilter, slowStatusFilter, slowSort]);
+
+  // Debounce the velocity search box (no request per keystroke).
+  useEffect(() => {
+    const id = setTimeout(() => setSlowDebouncedSearch(slowSearchQuery.trim()), 350);
+    return () => clearTimeout(id);
+  }, [slowSearchQuery]);
+
+  // Any filter/sort change returns to the first page.
+  useEffect(() => {
+    setSlowPage(1);
+  }, [slowDebouncedSearch, slowCategoryFilter, slowStatusFilter, slowSort]);
+
+  // Fetch the current page whenever the paged query changes (only while open).
+  useEffect(() => {
+    if (activeView === 'slow_inventory') {
+      fetchSlowInventoryData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, slowPage, slowDebouncedSearch, slowCategoryFilter, slowStatusFilter, slowSort]);
 
   // Open the demand forecasting detail view (loads analytics + categories once).
   const handleOpenDetailView = () => {
@@ -223,8 +261,8 @@ export default function AdminAnalyticsView() {
 
   const handleOpenSlowInventoryView = () => {
     setActiveView('slow_inventory');
-    if (!slowData) {
-      fetchSlowInventoryData();
+    if (categoriesList.length === 0) {
+      fetchCategories();
     }
   };
 
@@ -246,29 +284,22 @@ export default function AdminAnalyticsView() {
   const lowCount = distribution.Low || 0;
   const totalCount = summary.total_products || 0;
 
-  // === Slow-Moving Inventory Filtering (client-side) ===
-  const slowItems = slowData?.items || [];
+  // === Inventory Velocity rows (already filtered/paged server-side) ===
+  const slowItems = useMemo(() => slowData?.items || [], [slowData]);
   const slowSummary = slowData?.summary || {};
-  const slowWarehouses = slowData?.warehouses || [];
+  const slowPagination = slowData?.pagination || {};
 
-  const filteredSlowItems = slowItems.filter((item) => {
-    const matchesSearch =
-      item.product_name.toLowerCase().includes(slowSearchQuery.toLowerCase()) ||
-      item.category_name.toLowerCase().includes(slowSearchQuery.toLowerCase());
-    const matchesStatus = slowStatusFilter === 'ALL' || item.movement_status === slowStatusFilter;
-    const matchesWarehouse = slowWarehouseFilter === 'ALL' || String(item.warehouse_id) === slowWarehouseFilter;
-    return matchesSearch && matchesStatus && matchesWarehouse;
-  });
-
-  // Movement status badge style helper
+  // Movement status badge style helper — 4 sales-quantity tiers
   const getStatusStyle = (status) => {
     switch (status) {
-      case 'VERY SLOW':
-        return { backgroundColor: '#FEF2F2', color: '#DC2626', borderColor: '#FCA5A5' };
-      case 'SLOW':
-        return { backgroundColor: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' };
-      case 'NORMAL':
+      case 'FAST MOVING':
         return { backgroundColor: '#ECFDF5', color: '#059669', borderColor: '#A7F3D0' };
+      case 'NORMAL MOVING':
+        return { backgroundColor: '#EFF6FF', color: '#2563EB', borderColor: '#BFDBFE' };
+      case 'SLOW MOVING':
+        return { backgroundColor: '#FFFBEB', color: '#D97706', borderColor: '#FDE68A' };
+      case 'NOT MOVING':
+        return { backgroundColor: '#FEF2F2', color: '#DC2626', borderColor: '#FCA5A5' };
       default:
         return { backgroundColor: '#F3F4F6', color: '#6B7280', borderColor: '#D1D5DB' };
     }
@@ -334,7 +365,6 @@ export default function AdminAnalyticsView() {
                   </span>
                 </div>
               </div>
-
               <span
                 style={{
                   display: 'inline-flex',
@@ -354,8 +384,6 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-           
-
             {/* Demand Forecasting Visual Banner */}
             <div style={{ marginBottom: '2rem', borderRadius: '14px', overflow: 'hidden', background: '#FAF7F5', border: '1px solid rgba(216, 114, 126, 0.1)' }}>
               <img
@@ -370,7 +398,6 @@ export default function AdminAnalyticsView() {
               <span style={{ fontSize: '0.9rem', color: '#6B5E63' }}>
                 Open product-level demand predictions
               </span>
-
               <button
                 style={{
                   background: 'linear-gradient(135deg, #B8505E 0%, #8E3642 100%)',
@@ -432,14 +459,13 @@ export default function AdminAnalyticsView() {
                 </div>
                 <div>
                   <h2 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.6rem', fontWeight: 700, color: '#1F191B', margin: 0, lineHeight: 1.2 }}>
-                    Slow-Moving Inventory
+                    Inventory Velocity
                   </h2>
                   <span style={{ fontSize: '0.75rem', color: '#9E8F94', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    FEATURE #2 &bull; INVENTORY VELOCITY ANALYSIS
+                    FEATURE #2 &bull; MOVEMENT ANALYSIS
                   </span>
                 </div>
               </div>
-
               <span
                 style={{
                   display: 'inline-flex',
@@ -459,42 +485,49 @@ export default function AdminAnalyticsView() {
               </span>
             </div>
 
-
-            {/* Visual Banner for Slow-Moving Inventory */}
+            {/* Visual Banner — 4 movement tiers */}
             <div style={{
               marginBottom: '2rem',
               borderRadius: '14px',
               overflow: 'hidden',
-              background: 'linear-gradient(135deg, #FEF3C7 0%, #FDE68A 40%, #FBBF24 100%)',
-              border: '1px solid rgba(216, 114, 126, 0.1)',
-              padding: '2rem',
+              background: 'linear-gradient(135deg, #ECFDF5 0%, #EFF6FF 35%, #FFFBEB 65%, #FEF2F2 100%)',
+              border: '1px solid rgba(0, 0, 0, 0.06)',
+              padding: '1.75rem',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: '2rem',
+              gap: '1.5rem',
               flexWrap: 'wrap'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <Archive size={28} style={{ color: '#92400E' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Flame size={24} style={{ color: '#059669' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#92400E' }}>Very Slow</div>
-                  <div style={{ fontSize: '0.8rem', color: '#78350F' }}>0 sales or 180+ days stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#059669' }}>Fast Moving</div>
+                  <div style={{ fontSize: '0.76rem', color: '#065F46' }}>Highest sales</div>
                 </div>
               </div>
-              <div style={{ width: '1px', height: '40px', background: 'rgba(146, 64, 14, 0.2)' }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <TrendingDown size={28} style={{ color: '#B45309' }} />
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Box size={24} style={{ color: '#2563EB' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#92400E' }}>Slow</div>
-                  <div style={{ fontSize: '0.8rem', color: '#78350F' }}>60–180 days of stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#2563EB' }}>Normal Moving</div>
+                  <div style={{ fontSize: '0.76rem', color: '#1E40AF' }}>Moderate sales</div>
                 </div>
               </div>
-              <div style={{ width: '1px', height: '40px', background: 'rgba(146, 64, 14, 0.2)' }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <Box size={28} style={{ color: '#15803D' }} />
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <TrendingDown size={24} style={{ color: '#D97706' }} />
                 <div>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#15803D' }}>Normal</div>
-                  <div style={{ fontSize: '0.8rem', color: '#166534' }}>≤ 60 days of stock</div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#D97706' }}>Slow Moving</div>
+                  <div style={{ fontSize: '0.76rem', color: '#92400E' }}>Low sales</div>
+                </div>
+              </div>
+              <div style={{ width: '1px', height: '34px', background: 'rgba(0,0,0,0.1)' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <Archive size={24} style={{ color: '#DC2626' }} />
+                <div>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#DC2626' }}>Not Moving</div>
+                  <div style={{ fontSize: '0.76rem', color: '#991B1B' }}>Zero sales (30d)</div>
                 </div>
               </div>
             </div>
@@ -504,7 +537,6 @@ export default function AdminAnalyticsView() {
               <span style={{ fontSize: '0.9rem', color: '#6B5E63' }}>
                 Open product-level inventory velocity analysis
               </span>
-
               <button
                 style={{
                   background: 'linear-gradient(135deg, #D97706 0%, #B45309 100%)',
@@ -885,35 +917,36 @@ export default function AdminAnalyticsView() {
                   Slow-Moving Inventory Analysis
                 </h1>
                 <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: 0 }}>
-                  Product inventory velocity classification based on last 30 days of sales data.
+                  Product movement classification from actual sales quantity in the last 30 days.
                 </p>
               </div>
             </div>
 
             <button
-              onClick={fetchSlowInventoryData}
+              onClick={() => fetchSlowInventoryData({ refresh: true, page: 1 })}
               className="tarika-btn-outline"
               style={{ padding: '0.55rem 1.1rem', fontSize: '0.82rem' }}
+              disabled={slowLoading}
             >
-              <RefreshCw size={14} />
+              <RefreshCw size={14} className={slowLoading ? 'animate-spin' : ''} />
               <span>Refresh Analysis</span>
             </button>
           </div>
 
-          {/* Loading State */}
-          {slowLoading && (
+          {/* Loading State (first load only — later pages keep the table visible) */}
+          {slowLoading && !slowData && (
             <div style={{ padding: '4rem 1rem', textAlign: 'center' }}>
               <RefreshCw size={36} className="animate-spin" style={{ color: '#D97706', marginBottom: '1rem' }} />
               <h3 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", color: '#1F191B', margin: '0 0 0.5rem 0' }}>
                 Analyzing Inventory Velocity...
               </h3>
               <p style={{ color: '#6B5E63', fontSize: '0.9rem', margin: 0 }}>
-                Calculating sales velocity and stock movement from database...
+                Aggregating sales and stock for every catalog product on the database...
               </p>
             </div>
           )}
 
-          {/* Error State */}
+          {/* Data Loaded */}
           {!slowLoading && slowError && (
             <div style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', padding: '1.5rem', borderRadius: '12px', color: '#991B1B', marginBottom: '1.5rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
@@ -921,74 +954,53 @@ export default function AdminAnalyticsView() {
                 <strong style={{ fontSize: '1.05rem' }}>Slow-Moving Inventory Engine Notice</strong>
               </div>
               <p style={{ margin: '0 0 1rem 0', fontSize: '0.92rem' }}>{slowError}</p>
-              <button className="tarika-btn-outline" onClick={fetchSlowInventoryData}>
+              <button className="tarika-btn-outline" onClick={() => fetchSlowInventoryData({ refresh: true })}>
                 <RefreshCw size={14} /> Retry
               </button>
             </div>
           )}
 
           {/* Data Loaded */}
-          {!slowLoading && !slowError && slowData && (
+          {slowData && !slowError && (
             <>
-              {/* Analysis Info Banner */}
-              <div style={{
-                background: 'linear-gradient(135deg, #FFFBEB 0%, #FEF3C7 100%)',
-                border: '1px solid rgba(217, 119, 6, 0.25)',
-                borderRadius: '14px',
-                padding: '1.25rem 1.5rem',
-                marginBottom: '1.5rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flexWrap: 'wrap',
-                gap: '1rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  <div style={{
-                    width: '44px', height: '44px', borderRadius: '12px',
-                    backgroundColor: '#FEF3C7', color: '#D97706',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>
-                    <PackageSearch size={22} />
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Inventory Velocity Analysis
-                    </span>
-                    <h3 style={{ margin: '0.1rem 0 0', fontSize: '1.25rem', fontWeight: 800, color: '#1F191B', fontFamily: "var(--font-serif, 'Playfair Display', serif)" }}>
-                      Sales Window: <span style={{ color: '#D97706' }}>{slowData.sales_window_start} → {slowData.analysis_date}</span>
-                    </h3>
-                  </div>
-                </div>
-                <div style={{ fontSize: '0.85rem', color: '#6B5E63' }}>
-                  Analysis Date: <strong style={{ color: '#1F191B' }}>{slowData.analysis_date}</strong>
-                </div>
-              </div>
-
-              {/* Summary Metrics Grid */}
+              {/* Summary Metrics Grid — 5 tiles for 4 tiers */}
               <div className="admin-metrics-grid" style={{ marginBottom: '1.5rem' }}>
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title">Total Inventory</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem' }}>{slowSummary.total_inventory || 0}</p>
-                  <p className="admin-metric-subtext">Product-warehouse entries</p>
+                  <p className="admin-metric-title">Total Products</p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem' }}>{(slowSummary.total_products || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Analyzed from catalog</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#DC2626' }}>Very Slow</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#DC2626' }}>{slowSummary.very_slow || 0}</p>
-                  <p className="admin-metric-subtext">No sales or 180+ days stock</p>
+                  <p className="admin-metric-title" style={{ color: '#059669' }}>
+                    <Flame size={13} style={{ verticalAlign: '-2px' }} /> Fast Moving
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#059669' }}>{(slowSummary.fast_moving || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Highest sales ({'> '}{Math.round(slowData?.thresholds?.fast_cut ?? 0)} units/30d)</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#D97706' }}>Slow</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#D97706' }}>{slowSummary.slow || 0}</p>
-                  <p className="admin-metric-subtext">60–180 days of stock</p>
+                  <p className="admin-metric-title" style={{ color: '#2563EB' }}>
+                    <Activity size={13} style={{ verticalAlign: '-2px' }} /> Normal Moving
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#2563EB' }}>{(slowSummary.normal_moving || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Moderate sales ({'> '}{Math.round(slowData?.thresholds?.normal_cut ?? 0)} units/30d)</p>
                 </div>
 
                 <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
-                  <p className="admin-metric-title" style={{ color: '#059669' }}>Normal</p>
-                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#059669' }}>{slowSummary.normal || 0}</p>
-                  <p className="admin-metric-subtext">Healthy movement ≤ 60 days</p>
+                  <p className="admin-metric-title" style={{ color: '#D97706' }}>
+                    <TrendingDown size={13} style={{ verticalAlign: '-2px' }} /> Slow Moving
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#D97706' }}>{(slowSummary.slow_moving || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Low but positive sales</p>
+                </div>
+
+                <div className="admin-metric-card" style={{ padding: '1.1rem 1.25rem' }}>
+                  <p className="admin-metric-title" style={{ color: '#DC2626' }}>
+                    <AlertTriangle size={13} style={{ verticalAlign: '-2px' }} /> Not Moving
+                  </p>
+                  <p className="admin-metric-val" style={{ fontSize: '1.5rem', color: '#DC2626' }}>{(slowSummary.not_moving || 0).toLocaleString('en-IN')}</p>
+                  <p className="admin-metric-subtext">Zero sales in last 30 days</p>
                 </div>
               </div>
 
@@ -1016,35 +1028,46 @@ export default function AdminAnalyticsView() {
                     />
                   </div>
 
-                  {/* Movement Status Filter Pills */}
-                  <div style={{ display: 'flex', gap: '0.35rem', background: '#FAF7F5', padding: '0.25rem', borderRadius: '8px', border: '1px solid rgba(216, 114, 126, 0.2)' }}>
-                    {['ALL', 'VERY SLOW', 'SLOW', 'NORMAL'].map((lvl) => (
-                      <button
-                        key={lvl}
-                        onClick={() => setSlowStatusFilter(lvl)}
-                        style={{
-                          padding: '0.35rem 0.85rem',
-                          fontSize: '0.78rem',
-                          fontWeight: 700,
-                          borderRadius: '6px',
-                          border: 'none',
-                          cursor: 'pointer',
-                          background: slowStatusFilter === lvl ? '#FFFFFF' : 'transparent',
-                          color: slowStatusFilter === lvl ? '#D97706' : '#6B5E63',
-                          boxShadow: slowStatusFilter === lvl ? '0 2px 6px rgba(0,0,0,0.06)' : 'none',
-                          transition: 'all 0.2s ease',
-                          whiteSpace: 'nowrap'
-                        }}
-                      >
-                        {lvl}
-                      </button>
-                    ))}
+                  {/* Movement Status Filter Pills — 4 tiers */}
+                  <div style={{ display: 'flex', gap: '0.35rem', background: '#FAF7F5', padding: '0.25rem', borderRadius: '8px', border: '1px solid rgba(216, 114, 126, 0.2)', flexWrap: 'wrap' }}>
+                    {['ALL', 'FAST MOVING', 'NORMAL MOVING', 'SLOW MOVING', 'NOT MOVING'].map((lvl) => {
+                      const activeColors = {
+                        'ALL':           { color: '#B8505E', bg: '#FFFFFF' },
+                        'FAST MOVING':   { color: '#059669', bg: '#FFFFFF' },
+                        'NORMAL MOVING': { color: '#2563EB', bg: '#FFFFFF' },
+                        'SLOW MOVING':   { color: '#D97706', bg: '#FFFFFF' },
+                        'NOT MOVING':    { color: '#DC2626', bg: '#FFFFFF' },
+                      };
+                      const ac = activeColors[lvl];
+                      const isActive = slowStatusFilter === lvl;
+                      return (
+                        <button
+                          key={lvl}
+                          onClick={() => setSlowStatusFilter(lvl)}
+                          style={{
+                            padding: '0.35rem 0.85rem',
+                            fontSize: '0.78rem',
+                            fontWeight: 700,
+                            borderRadius: '6px',
+                            border: 'none',
+                            cursor: 'pointer',
+                            background: isActive ? ac.bg : 'transparent',
+                            color: isActive ? ac.color : '#6B5E63',
+                            boxShadow: isActive ? '0 2px 6px rgba(0,0,0,0.06)' : 'none',
+                            transition: 'all 0.2s ease',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          {lvl === 'ALL' ? 'All' : lvl}
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  {/* Warehouse Dropdown */}
+                  {/* Category Dropdown (server-side filter) */}
                   <select
-                    value={slowWarehouseFilter}
-                    onChange={(e) => setSlowWarehouseFilter(e.target.value)}
+                    value={slowCategoryFilter}
+                    onChange={(e) => setSlowCategoryFilter(e.target.value)}
                     style={{
                       padding: '0.6rem 0.85rem',
                       fontSize: '0.85rem',
@@ -1055,93 +1078,144 @@ export default function AdminAnalyticsView() {
                       outline: 'none'
                     }}
                   >
-                    <option value="ALL">All Warehouses ({slowWarehouses.length})</option>
-                    {slowWarehouses.map((wh) => (
-                      <option key={wh.warehouse_id} value={String(wh.warehouse_id)}>{wh.warehouse_name}</option>
+                    <option value="ALL">All Categories</option>
+                    {categoriesList.map((cat) => (
+                      <option key={cat} value={cat}>{cat}</option>
                     ))}
+                  </select>
+
+                  {/* Sort Dropdown (server-side ordering) */}
+                  <select
+                    value={slowSort}
+                    onChange={(e) => setSlowSort(e.target.value)}
+                    style={{
+                      padding: '0.6rem 0.85rem',
+                      fontSize: '0.85rem',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(216, 114, 126, 0.25)',
+                      backgroundColor: '#FAF7F5',
+                      color: '#1F191B',
+                      outline: 'none'
+                    }}
+                  >
+                    <option value="movement">Sort: Movement (Fast → Not)</option>
+                    <option value="sales_last_30_days">Sort: Sales Last 30 Days</option>
+                    <option value="current_stock">Sort: Current Stock</option>
+                    <option value="product_name">Sort: Product Name</option>
                   </select>
                 </div>
               </div>
 
-              {/* Slow-Moving Inventory Table */}
-              <div className="admin-table-wrapper">
+              {/* Inventory Velocity Table — redesigned with 4-tier status badges */}
+              <div className="admin-table-wrapper" style={{ position: 'relative', opacity: slowLoading ? 0.6 : 1, transition: 'opacity 0.15s ease' }}>
+                {slowLoading && (
+                  <div style={{ position: 'absolute', top: '0.6rem', right: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#D97706', fontSize: '0.78rem', zIndex: 2 }}>
+                    <RefreshCw size={13} className="animate-spin" /> Updating…
+                  </div>
+                )}
                 <table className="admin-table">
                   <thead>
                     <tr>
                       <th>Product</th>
                       <th>Category</th>
-                      <th>Warehouse</th>
                       <th>Current Stock</th>
                       <th>Sales Last 30 Days</th>
-                      <th>Avg Daily Sales</th>
-                      <th>Days of Stock</th>
                       <th>Movement Status</th>
-                      <th>Recommended Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredSlowItems.length > 0 ? (
-                      filteredSlowItems.map((item, idx) => {
+                    {slowItems.length > 0 ? (
+                      slowItems.map((item, idx) => {
                         const badgeStyle = getStatusStyle(item.movement_status);
-                        const daysDisplay = item.days_of_stock >= 999999 ? '∞' : item.days_of_stock;
 
                         return (
-                          <tr key={`${item.product_id}-${item.warehouse_id}-${idx}`}>
+                          <tr key={`${item.product_key}-${idx}`}>
                             <td>
                               <strong style={{ color: '#1F191B', fontWeight: 600 }}>{item.product_name}</strong>
                             </td>
                             <td>
-                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>{item.category_name}</span>
-                            </td>
-                            <td>
-                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>{item.warehouse_name}</span>
-                            </td>
-                            <td>
-                              <span style={{ fontWeight: 700, color: '#1F191B' }}>{item.current_stock}</span>
-                            </td>
-                            <td>
-                              <span style={{ fontWeight: 600, color: item.sales_last_30_days === 0 ? '#DC2626' : '#1F191B' }}>
-                                {item.sales_last_30_days}
+                              <span style={{ color: '#6B5E63', fontSize: '0.85rem' }}>
+                                {item.category_name}{item.sub_category ? ` · ${item.sub_category}` : ''}
                               </span>
                             </td>
                             <td>
-                              <span style={{ color: '#6B5E63' }}>{item.avg_daily_sales}</span>
+                              <span style={{ fontWeight: 700, color: '#1F191B' }}>
+                                {(item.current_stock ?? 0).toLocaleString('en-IN')}
+                              </span>
+                            </td>
+                            <td>
+                              <span style={{ fontWeight: 600, color: (item.sales_last_30_days ?? 0) === 0 ? '#DC2626' : '#1F191B' }}>
+                                {(item.sales_last_30_days ?? 0).toLocaleString('en-IN')}
+                              </span>
                             </td>
                             <td>
                               <span style={{
+                                ...badgeStyle,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.35rem',
+                                padding: '0.3rem 0.8rem',
+                                borderRadius: '9999px',
+                                border: `1px solid ${badgeStyle.borderColor}`,
+                                fontSize: '0.78rem',
                                 fontWeight: 700,
-                                color: daysDisplay === '∞' ? '#DC2626' : item.days_of_stock > 180 ? '#DC2626' : item.days_of_stock > 60 ? '#D97706' : '#059669'
+                                letterSpacing: '0.02em',
+                                whiteSpace: 'nowrap',
                               }}>
-                                {daysDisplay}
-                              </span>
-                            </td>
-                            <td>
-                              <span className="admin-metric-status" style={badgeStyle}>
+                                <span style={{
+                                  width: '7px', height: '7px', borderRadius: '50%',
+                                  backgroundColor: badgeStyle.color, flexShrink: 0
+                                }} />
                                 {item.movement_status}
-                              </span>
-                            </td>
-                            <td>
-                              <span style={{ fontSize: '0.82rem', color: '#6B5E63', fontStyle: 'italic' }}>
-                                {item.recommended_action}
                               </span>
                             </td>
                           </tr>
                         );
                       })
                     ) : (
-                      <tr>
-                        <td colSpan="9" style={{ textAlign: 'center', padding: '3rem 1rem', color: '#9E8F94' }}>
-                          No inventory items found matching the selected filters.
-                        </td>
-                      </tr>
+                      !slowLoading && (
+                        <tr>
+                          <td colSpan="5" style={{ textAlign: 'center', padding: '3rem 1rem', color: '#9E8F94' }}>
+                            No inventory items found matching the selected filters.
+                          </td>
+                        </tr>
+                      )
                     )}
                   </tbody>
                 </table>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63' }}>
-                <span>Showing <strong>{filteredSlowItems.length}</strong> of {slowSummary.total_inventory || 0} inventory entries</span>
-                <span>Dataset Source: <code style={{ fontSize: '0.75rem' }}>public.inventory</code> + <code style={{ fontSize: '0.75rem' }}>public.order_items</code> (Supabase)</span>
+              {/* Pagination — database-side paging over the full catalog */}
+              {(slowPagination.total_pages || 0) > 1 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '0.82rem', color: '#6B5E63' }}>
+                    Page <strong>{slowPagination.page}</strong> of {slowPagination.total_pages}
+                    {' '}· {slowPagination.total_filtered?.toLocaleString('en-IN')} matching products
+                  </span>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      className="tarika-btn-outline"
+                      style={{ padding: '0.5rem 0.9rem', fontSize: '0.8rem', opacity: slowPagination.page <= 1 ? 0.5 : 1 }}
+                      disabled={slowPagination.page <= 1 || slowLoading}
+                      onClick={() => setSlowPage((pg) => Math.max(1, pg - 1))}
+                    >
+                      <ChevronLeft size={15} /> Prev
+                    </button>
+                    <button
+                      className="tarika-btn-outline"
+                      style={{ padding: '0.5rem 0.9rem', fontSize: '0.8rem', opacity: slowPagination.page >= slowPagination.total_pages ? 0.5 : 1 }}
+                      disabled={slowPagination.page >= slowPagination.total_pages || slowLoading}
+                      onClick={() => setSlowPage((pg) => pg + 1)}
+                    >
+                      Next <ChevronRight size={15} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', fontSize: '0.82rem', color: '#6B5E63', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <span>Showing <strong>{slowItems.length}</strong> of {(slowPagination.total_filtered ?? slowSummary.total_products ?? 0).toLocaleString('en-IN')} analyzed products</span>
+                <span>Data: <code style={{ fontSize: '0.75rem' }}>public.products</code> + <code style={{ fontSize: '0.75rem' }}>public.orders</code> (Neon PostgreSQL)</span>
               </div>
             </>
           )}

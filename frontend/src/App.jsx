@@ -38,7 +38,11 @@ function PortalFallback() {
 }
 
 function ProtectedRoute({ children, allowedRole }) {
-  const { isAuthenticated, role } = useAuth();
+  const { isAuthenticated, role, authLoading } = useAuth();
+
+  if (authLoading) {
+    return <PortalFallback />;
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;

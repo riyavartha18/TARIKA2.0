@@ -43,6 +43,12 @@ def bump_catalog_version():
     can never be lost (a plain get-then-set would race under a shared backend).
     ``cache.incr`` is atomic on Redis and on LocMemCache; when the key does not
     exist yet it is seeded, so the first request after a restart still works.
+
+    A product mutation that changes stock (checkout, replenishment receipt,
+    warehouse/admin edit) also invalidates the cached inventory-velocity
+    summary, so the next Admin analysis rebuilds it. Imported lazily to avoid
+    a catalog -> analysis import cycle, and best-effort so a cache-invalidation
+    error can never break the committed mutation.
     """
     try:
         version = cache.incr(VERSION_KEY)
@@ -50,4 +56,9 @@ def bump_catalog_version():
         cache.add(VERSION_KEY, 1, None)
         version = cache.incr(VERSION_KEY)
     cache.delete(CATEGORIES_KEY)
+    try:
+        from demand_prediction.inventory_metrics import mark_metrics_stale
+        mark_metrics_stale()
+    except Exception:  # noqa: BLE001 - invalidation must never break a write
+        pass
     return version
