@@ -1,3 +1,8 @@
+import os, django
+if not os.environ.get('DJANGO_SETTINGS_MODULE'):
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+django.setup()
+
 from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
 from django.urls import reverse, resolve
@@ -267,6 +272,36 @@ class CatalogViewsAPITests(SimpleTestCase):
             color=None,
             subcategory_search=None,
             starts_with=None,
+            letter=None,
+        )
+
+    @patch('catalog.services.CatalogService.filter_and_sort_products')
+    def test_products_endpoint_letter_filter_passed(self, mock_filter):
+        mock_qs = MagicMock()
+        mock_qs.count.return_value = 5
+        mock_qs.__len__.return_value = 5
+        mock_qs.__getitem__.return_value = []
+        mock_filter.return_value = mock_qs
+
+        request = self.factory.get('/api/catalog/products/?letter=A')
+        view = ProductListView.as_view()
+        response = view(request)
+
+        self.assertEqual(response.status_code, 200)
+        mock_filter.assert_called_once_with(
+            category=None,
+            sub_category=None,
+            search=None,
+            min_price=None,
+            max_price=None,
+            in_stock=None,
+            sort='newest',
+            on_sale=None,
+            size=None,
+            color=None,
+            subcategory_search=None,
+            starts_with=None,
+            letter='A',
         )
 
     @patch('catalog.views.get_object_or_404')

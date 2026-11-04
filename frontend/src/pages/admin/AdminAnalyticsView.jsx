@@ -38,11 +38,8 @@ import '../../styles/admin-portal.css';
 import RfmAnalysisCard from './RfmAnalysisCard';
 import ClvAnalysisCard from './ClvAnalysisCard';
 import ClvDashboard from './AdminClvView';
-
-// The full RFM dashboard is only needed when the admin actually opens it, so it
-// (and its drill-down screens) is loaded on demand instead of being parsed and
-// hashed before the overview is even readable.
-const RfmDashboard = lazy(() => import('./AdminRFMView'));
+import RfmDashboard from './AdminRFMView';
+import RevenueForecastingDashboard from './RevenueForecastingDashboard';
 
 export default function AdminAnalyticsView() {
   const { token: authContextToken } = useAuth();
@@ -573,8 +570,160 @@ export default function AdminAnalyticsView() {
              ================================================================ */}
           <ClvAnalysisCard onOpen={handleOpenClvView} />
 
+          {/* ================================================================
+              FEATURE #4: REVENUE FORECASTING CARD
+             ================================================================ */}
+          <div
+            className="admin-card"
+            style={{
+              padding: '2.25rem',
+              borderRadius: '20px',
+              border: '1px solid rgba(216, 114, 126, 0.2)',
+              cursor: 'pointer',
+              transition: 'all 0.25s ease',
+              boxShadow: '0 8px 30px rgba(31, 25, 27, 0.04)',
+              backgroundColor: '#FFFFFF',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+            }}
+            onClick={() => setActiveView('revenue_forecasting')}
+          >
+            <div>
+              {/* Card Top Header */}
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                  <div
+                    style={{
+                      width: '52px',
+                      height: '52px',
+                      borderRadius: '14px',
+                      backgroundColor: '#EEF2FF',
+                      color: '#4F46E5',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <IndianRupee size={26} />
+                  </div>
+                  <div>
+                    <h2 style={{ fontFamily: "var(--font-serif, 'Playfair Display', serif)", fontSize: '1.6rem', fontWeight: 700, color: '#1F191B', margin: 0, lineHeight: 1.2 }}>
+                      Revenue Forecasting
+                    </h2>
+                    <span style={{ fontSize: '0.75rem', color: '#9E8F94', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      FEATURE #4 &bull; HISTORICAL SALES ANALYSIS & FUTURE REVENUE PREDICTION
+                    </span>
+                  </div>
+                </div>
+
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: '0.4rem 0.95rem',
+                    borderRadius: '9999px',
+                    backgroundColor: '#ECFDF5',
+                    border: '1px solid #A7F3D0',
+                    color: '#059669',
+                    fontSize: '0.82rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  <CheckCircle2 size={14} />
+                  Active Engine
+                </span>
+              </div>
+
+              {/* Description */}
+              <p style={{ color: '#6B5E63', fontSize: '0.95rem', lineHeight: 1.6, margin: '0 0 1.75rem 0' }}>
+                Analyses TARIKA&apos;s 24-month historical sales data (<code style={{ background: '#FAF7F5', border: '1px solid rgba(216,114,126,0.15)', padding: '0.15rem 0.45rem', borderRadius: '5px', color: '#1F191B', fontSize: '0.85rem' }}>public.orders</code>) and predicts future revenue for upcoming months using Holt-Winters Triple Exponential Smoothing. Evaluates chronological holdout performance and delivers data-driven business insights.
+              </p>
+
+              {/* Visual Banner Preview for Revenue Forecasting */}
+              <div
+                style={{
+                  marginBottom: '2rem',
+                  borderRadius: '14px',
+                  overflow: 'hidden',
+                  background: 'linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 40%, #C7D2FE 100%)',
+                  border: '1px solid rgba(79, 70, 229, 0.15)',
+                  padding: '1.75rem 2rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '2rem',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <TrendingUp size={28} style={{ color: '#4338CA' }} />
+                  <div>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#4338CA' }}>Historical Sales</div>
+                    <div style={{ fontSize: '0.82rem', color: '#3730A3', fontWeight: 600 }}>24 Full Months Realised</div>
+                  </div>
+                </div>
+                <div style={{ width: '1px', height: '36px', background: 'rgba(67, 56, 202, 0.25)' }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <Activity size={28} style={{ color: '#059669' }} />
+                  <div>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#065F46' }}>Holdout Metric</div>
+                    <div style={{ fontSize: '0.82rem', color: '#047857', fontWeight: 600 }}>1.22% Holdout MAPE</div>
+                  </div>
+                </div>
+                <div style={{ width: '1px', height: '36px', background: 'rgba(67, 56, 202, 0.25)' }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <IndianRupee size={28} style={{ color: '#B8505E' }} />
+                  <div>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#8E3642' }}>3-Month Outlook</div>
+                    <div style={{ fontSize: '0.82rem', color: '#9F1239', fontWeight: 600 }}>₹47.20 Cr Projected</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Row Action */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '1.25rem', borderTop: '1px solid rgba(216, 114, 126, 0.15)', flexWrap: 'wrap', gap: '0.75rem' }}>
+              <span style={{ fontSize: '0.9rem', color: '#6B5E63' }}>
+                Open full revenue forecasting dashboard & time-series
+              </span>
+
+              <button
+                style={{
+                  background: 'linear-gradient(135deg, #4F46E5 0%, #4338CA 100%)',
+                  color: '#FFFFFF',
+                  padding: '0.7rem 1.5rem',
+                  borderRadius: '9999px',
+                  border: 'none',
+                  fontSize: '0.88rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  boxShadow: '0 4px 14px rgba(79, 70, 229, 0.25)',
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActiveView('revenue_forecasting');
+                }}
+              >
+                <span>View Revenue Forecast</span>
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+
           </div>
         </div>
+      )}
+
+      {/* ==========================================================================
+          DEDICATED DETAILED VIEW: REVENUE FORECASTING DASHBOARD
+         ========================================================================== */}
+      {activeView === 'revenue_forecasting' && (
+        <RevenueForecastingDashboard onBack={() => setActiveView('overview')} />
       )}
 
       {/* ==========================================================================

@@ -5,6 +5,8 @@ from demand_prediction.views import (
     CategoryFilterView,
     SlowMovingInventoryView,
     ProductSalesHistoryView,
+    RevenueForecastingView,
+    RevenueOLAPView,
 )
 
 app_name = 'demand_prediction'
@@ -15,4 +17,6 @@ urlpatterns = [
     path('history/', ProductSalesHistoryView.as_view(), name='sales_history'),
     path('categories/', CategoryFilterView.as_view(), name='categories'),
     path('slow-inventory/', SlowMovingInventoryView.as_view(), name='slow_inventory'),
+    path('revenue-forecast/', RevenueForecastingView.as_view(), name='revenue_forecast'),
+    path('revenue-olap/', RevenueOLAPView.as_view(), name='revenue_olap'),
 ]

@@ -101,7 +101,8 @@ class WarehouseGroupedProductsView(APIView):
     authentication_classes = []
 
     def get(self, request):
-        categories = WarehouseService.get_grouped_category_products()
+        letter = request.query_params.get('letter') or request.query_params.get('starts_with')
+        categories = WarehouseService.get_grouped_category_products(letter=letter)
         # categories is already a list of plain dicts — return directly
         return Response({
             'count': len(categories),
