@@ -655,3 +655,95 @@
   }
 }
 
+
+
+/* Warehouse A-Z Alphabetical Filter Styling */
+.warehouse-alphabet-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px;
+  background-color: #FFFFFF;
+  border-radius: 16px;
+  border: 1px solid rgba(240, 226, 224, 0.9);
+  margin-bottom: 1.25rem;
+  box-shadow: 0 4px 15px rgba(184, 80, 94, 0.04);
+}
+
+.az-filter-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.az-filter-btn {
+  width: 27px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid #F0E2E0;
+  background-color: #FAF7F5;
+  color: #4A3E42;
+  transition: all 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.az-filter-btn-all {
+  width: auto;
+  min-width: 38px;
+  padding: 0 10px;
+}
+
+.az-filter-btn:hover:not(.az-filter-btn-active) {
+  background-color: #F7E4E2;
+  border-color: #D8727E;
+  color: #8E3642;
+  transform: translateY(-1px);
+}
+
+.az-filter-btn-active {
+  border: 1px solid #8E3642 !important;
+  background: linear-gradient(135deg, #B8505E 0%, #8E3642 100%) !important;
+  color: #FFFFFF !important;
+  font-weight: 800 !important;
+  box-shadow: 0 2px 8px rgba(142, 54, 66, 0.32) !important;
+  transform: scale(1.08);
+}
+
+.az-filter-count-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .warehouse-alphabet-bar {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .az-filter-btn {
+    width: 24px;
+    height: 26px;
+    font-size: 0.72rem;
+  }
+  .az-filter-btn-all {
+    min-width: 34px;
+    padding: 0 8px;
+  }
+}

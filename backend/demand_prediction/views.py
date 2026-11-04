@@ -572,3 +572,119 @@ class SlowMovingInventoryView(APIView):
             )
 
 
+class RevenueForecastingView(APIView):
+    """
+    GET /api/demand-prediction/revenue-forecast/
+
+    Analyses historical delivered sales from public.orders (excluding Returned and
+    In Transit orders) and produces a 3-month future revenue forecast using
+    Holt-Winters Triple Exponential Smoothing (Additive Trend & Seasonality, L=12).
+    Includes chronological train/test validation metrics, baseline comparison,
+    and factual business insights.
+    """
+    permission_classes = [IsAuthenticatedUser, IsAdmin]
+
+    def get(self, request):
+        try:
+            from demand_prediction.revenue_forecasting import RevenueForecastingService
+            force_refresh = request.query_params.get('force_refresh', '').strip().lower() in ('true', '1', 'yes')
+            result = RevenueForecastingService.get_forecast_data(force_refresh=force_refresh)
+            if not result.get('success', False):
+                return Response(
+                    {'success': False, 'error': result.get('error', 'Failed to generate revenue forecast.')},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception("Unexpected error in RevenueForecastingView: %s", exc)
+            return Response(
+                {'success': False, 'error': f'Failed to generate revenue forecast: {str(exc)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class RevenueOLAPView(APIView):
+    """
+    GET /api/demand-prediction/revenue-olap/
+
+    Executes Online Analytical Processing (OLAP) on actual delivered retail
+    sales transactions strictly along the Time Dimension:
+      - Roll-up: Month -> Quarter -> Year
+      - Drill-down: Year -> Quarter -> Month
+      - Slice: Fixing one time coordinate (Year or Quarter)
+      - Dice: Multi-dimensional time filter (Selected Years x Selected Months)
+      - Pivot: 2D Year x Quarter revenue matrix
+      - Ranking: Deterministic revenue leaderboards
+      - Drill-Through: Paginated raw transaction inspection (max page_size: 50, masked customer IDs)
+      - Trend Analysis: Historical MoM change, MoM %, YoY %, and 3-Month Moving Average (SMA-3)
+    Uses SUM(final_price) for delivered orders, AOV = SUM(final_price)/COUNT(DISTINCT orderid),
+    strict Gregorian calendar date validation, and explicit partial period labeling.
+    """
+    permission_classes = [IsAuthenticatedUser, IsAdmin]
+
+    def get(self, request):
+        from demand_prediction.olap_service import RevenueTimeOLAPService
+
+        operation = request.query_params.get('operation', 'rollup').strip().lower()
+        level = request.query_params.get('level', 'quarter').strip().lower()
+        year = request.query_params.get('year', None)
+        quarter = request.query_params.get('quarter', None)
+
+        slice_type = request.query_params.get('slice_type', 'year')
+        slice_value = request.query_params.get('slice_value', None)
+
+        # Handle dice parameters (accept list of params, comma-separated string, or empty)
+        years_param = request.query_params.getlist('years') if 'years' in request.query_params else None
+        months_param = request.query_params.getlist('months') if 'months' in request.query_params else None
+
+        granularity = request.query_params.get('granularity', None)
+        sort_order = request.query_params.get('sort_order', 'desc')
+
+        period_type = request.query_params.get('period_type', None)
+        period_key = request.query_params.get('period_key', None)
+
+        try:
+            page = int(request.query_params.get('page', 1))
+        except (ValueError, TypeError):
+            page = 1
+
+        try:
+            page_size = int(request.query_params.get('page_size', 50))
+        except (ValueError, TypeError):
+            page_size = 50
+
+        # Validate page size ceiling (max 50)
+        if operation == 'drillthrough' and page_size > 50:
+            return Response(
+                {'error': 'Maximum page size for Drill-Through is 50. Requests exceeding 50 records per page are rejected for performance and security.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        force_refresh = request.query_params.get('force_refresh', '').strip().lower() in ('true', '1', 'yes')
+
+        result = RevenueTimeOLAPService.get_time_olap_analysis(
+            operation=operation,
+            level=level,
+            selected_year=year,
+            selected_quarter=quarter,
+            slice_type=slice_type,
+            slice_value=slice_value,
+            selected_years=years_param,
+            selected_months=months_param,
+            granularity=granularity,
+            sort_order=sort_order,
+            period_type=period_type,
+            period_key=period_key,
+            page=page,
+            page_size=page_size,
+            force_refresh=force_refresh,
+        )
+
+        if not result.get('success', False):
+            err_msg = result.get('error', 'Failed to execute Revenue OLAP analysis.')
+            status_code = status.HTTP_400_BAD_REQUEST if 'Maximum page size' in err_msg else status.HTTP_500_INTERNAL_SERVER_ERROR
+            return Response({'error': err_msg}, status=status_code)
+
+        return Response(result, status=status.HTTP_200_OK)

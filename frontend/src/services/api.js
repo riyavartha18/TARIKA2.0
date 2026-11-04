@@ -197,6 +197,7 @@ function appendProductFilters(query, params = {}) {
     'on_sale',
     'size',
     'color',
+    'letter',
     'sort',
     'starts_with',
     'page',
@@ -1786,6 +1787,137 @@ export async function getSlowMovingInventory(token, params = {}) {
     return { success: true, ...data };
   } catch (err) {
     return { success: false, error: 'Network error fetching slow-moving inventory data.' };
+  }
+}
+
+/**
+ * GET /api/demand-prediction/revenue-forecast/
+ * Fetches historical monthly revenue aggregates, Holt-Winters 3-month forecast,
+ * validation metrics, baseline comparison, and business insights.
+ */
+export async function getRevenueForecast(token = null, forceRefresh = false) {
+  try {
+    const activeToken = token || localStorage.getItem('iras_token') || localStorage.getItem('token') || localStorage.getItem('tarika_auth_token');
+    const headers = { 'Content-Type': 'application/json' };
+    if (activeToken) headers['Authorization'] = `Bearer ${activeToken}`;
+
+    const url = `${API_BASE_URL}/api/demand-prediction/revenue-forecast/${forceRefresh ? '?force_refresh=true' : ''}`;
+    const response = await fetch(url, { headers });
+
+    let data;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      const text = await response.text();
+      data = { error: text || `HTTP ${response.status} ${response.statusText}` };
+    }
+
+    if (!response.ok) {
+      let errorMsg = data.error || data.detail;
+      if (!errorMsg) {
+        if (response.status === 401) {
+          errorMsg = 'Authentication required. Please log in as an administrator.';
+        } else if (response.status === 403) {
+          errorMsg = 'Access denied. Administrator privileges required to access Revenue Forecasting.';
+        } else if (response.status >= 500) {
+          errorMsg = `Server error (${response.status}) while generating revenue forecast.`;
+        } else {
+          errorMsg = `Failed to fetch revenue forecast (HTTP ${response.status}).`;
+        }
+      }
+      return { success: false, error: errorMsg, status: response.status };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    console.error('getRevenueForecast network error:', err);
+    return {
+      success: false,
+      error: 'Network error fetching revenue forecast data. Please check that the backend server is running and accessible.',
+    };
+  }
+}
+
+/**
+ * GET /api/demand-prediction/revenue-olap/
+ * Fetches Online Analytical Processing (OLAP) aggregations on delivered order revenue
+ * along the Time Dimension (Roll-up, Drill-down, Slice, Dice, Pivot, Ranking,
+ * Drill-Through, Trend Analysis).
+ */
+export async function getRevenueOLAP({
+  operation = 'rollup',
+  level = 'quarter',
+  year = null,
+  quarter = null,
+  sliceType = null,
+  sliceValue = null,
+  years = null,
+  months = null,
+  granularity = null,
+  sortOrder = null,
+  periodType = null,
+  periodKey = null,
+  page = 1,
+  pageSize = 50,
+  forceRefresh = false,
+} = {}, token = null) {
+  try {
+    const activeToken =
+      token ||
+      localStorage.getItem('iras_token') ||
+      localStorage.getItem('tarika_auth_token') ||
+      localStorage.getItem('token');
+    const headers = { 'Content-Type': 'application/json' };
+    if (activeToken) headers['Authorization'] = `Bearer ${activeToken}`;
+
+    const params = new URLSearchParams();
+    if (operation) params.append('operation', operation);
+    if (level) params.append('level', level);
+    if (year) params.append('year', year);
+    if (quarter) params.append('quarter', quarter);
+    if (sliceType) params.append('slice_type', sliceType);
+    if (sliceValue) params.append('slice_value', sliceValue);
+
+    if (years !== null && years !== undefined) {
+      if (Array.isArray(years)) params.append('years', years.join(','));
+      else params.append('years', String(years));
+    }
+    if (months !== null && months !== undefined) {
+      if (Array.isArray(months)) params.append('months', months.join(','));
+      else params.append('months', String(months));
+    }
+
+    if (granularity) params.append('granularity', granularity);
+    if (sortOrder) params.append('sort_order', sortOrder);
+    if (periodType) params.append('period_type', periodType);
+    if (periodKey) params.append('period_key', periodKey);
+
+    if (page != null) params.append('page', String(page));
+    if (pageSize != null) params.append('page_size', String(pageSize));
+    if (forceRefresh) params.append('force_refresh', 'true');
+
+    const url = `${API_BASE_URL}/api/demand-prediction/revenue-olap/?${params.toString()}`;
+    const response = await fetch(url, { headers });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: data?.error || data?.detail || `Server returned error (${response.status}).`,
+        status: response.status,
+      };
+    }
+    return { success: true, ...data };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message ? `Network error: ${err.message}` : 'Network error fetching Revenue OLAP data.',
+    };
   }
 }
 

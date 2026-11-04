@@ -46,7 +46,7 @@ class WarehouseService:
     ]
 
     @staticmethod
-    def get_grouped_category_products(warehouse_id=None):
+    def get_grouped_category_products(warehouse_id=None, letter=None):
         """
         Fetch all products from the real `public.products` table in ONE query,
         then group by main_category in Python.  Stock is read directly from the
@@ -63,6 +63,16 @@ class WarehouseService:
             .only(*WarehouseService.GROUPED_PRODUCT_FIELDS)
             .order_by('main_category', 'product_name')
         )
+        if letter:
+            import re
+            letter_str = str(letter).strip()
+            if letter_str and letter_str.upper() != 'ALL':
+                char = letter_str[:1]
+                from django.db.models import Q
+                products = products.filter(
+                    Q(product_name__istartswith=char) |
+                    Q(product_name__iregex=rf'^\s*{re.escape(char)}')
+                )
 
         # Group in Python by the CASE- AND WHITESPACE-INSENSITIVE category key
         # (centralized normalize_category), so "Dress"/"dress"/" DRESS " form one

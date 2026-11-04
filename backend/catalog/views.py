@@ -181,7 +181,8 @@ class ProductListView(APIView):
         size = request.query_params.get('size')
         color = request.query_params.get('color')
         subcategory_search = request.query_params.get('subcategory_search')
-        starts_with = request.query_params.get('starts_with')
+        letter = request.query_params.get('letter') or request.query_params.get('starts_with')
+        starts_with = request.query_params.get('starts_with') or letter
         sort = request.query_params.get('sort')
         starts_with = request.query_params.get('starts_with')
 
@@ -198,6 +199,7 @@ class ProductListView(APIView):
             color=color,
             subcategory_search=subcategory_search,
             starts_with=starts_with,
+            letter=letter,
         )
 
         queryset = queryset.only(*CatalogService.PRODUCT_LIST_FIELDS)

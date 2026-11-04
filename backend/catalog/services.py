@@ -88,6 +88,7 @@ class CatalogService:
         color=None,
         subcategory_search=None,
         starts_with=None,
+        letter=None,
     ):
         if queryset is None:
             queryset = cls.get_annotated_products_queryset()
@@ -171,6 +172,16 @@ class CatalogService:
                     Q(product_name__icontains=color_term) |
                     Q(main_category__icontains=color_term) |
                     Q(sub_category__icontains=color_term)
+                )
+
+        # Alphabetical letter filter (A-Z) on actual product name field
+        if letter:
+            letter_str = str(letter).strip()
+            if letter_str and letter_str.upper() != 'ALL':
+                char = letter_str[:1]
+                queryset = queryset.filter(
+                    Q(product_name__istartswith=char) |
+                    Q(product_name__iregex=rf'^\s*{re.escape(char)}')
                 )
 
         min_p = cls._parse_price_filter(min_price)

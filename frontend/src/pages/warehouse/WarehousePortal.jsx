@@ -81,6 +81,8 @@ const CATEGORY_SUBCATEGORIES = {
   'Accessories': ['All Accessories', 'Jewelry', 'Belts', 'Scarves', 'Sunglasses']
 };
 
+const ALPHABET_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+
 const CATEGORY_HERO_META = {
   'Dresses': { title: 'THE DRESS STORY', quote: 'Same dress. A different you.', image: 'https://images.unsplash.com/photo-1572804013309-59a88b7e92f1?w=600&auto=format&fit=crop&q=80' },
   'Tops': { title: 'TOP STORIES', quote: 'Unapologetic silhouettes. Effortless you.', image: 'https://images.unsplash.com/photo-1564257631407-4deb1f99d992?w=600&auto=format&fit=crop&q=80' },
@@ -122,6 +124,7 @@ function WarehouseProductCard({ product, onCardClick, onToggleFlag, pending }) {
 
   return (
     <div
+      id={`warehouse-product-${product.product_id || product.id}`}
       className="tarika-product-card"
       onClick={() => onCardClick && onCardClick(product)}
       onMouseEnter={() => setHovered(true)}
@@ -936,10 +939,20 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
     return () => { cancelled = true; };
   }, [cardProduct?.product_id]);
 
-  // Lock body scroll while modal is open
+  // Lock body scroll while modal is open, preserving and restoring scroll position
   React.useEffect(() => {
+    const scrollY =
+      window.scrollY ||
+      document.documentElement.scrollTop ||
+      document.body.scrollTop ||
+      0;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = ''; };
+    return () => {
+      document.body.style.overflow = '';
+      if (scrollY > 0) {
+        window.scrollTo({ top: scrollY, behavior: 'instant' });
+      }
+    };
   }, []);
 
   const handleChange = (field, value) => {
@@ -1017,6 +1030,12 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
   const handleSave = async () => {
     if (!product?.product_id || saving) return;
 
+    const savedScrollY =
+      window.scrollY ||
+      document.documentElement.scrollTop ||
+      document.body.scrollTop ||
+      0;
+
     const name = (form.product_name || '').trim();
     if (!name) {
       setSaveError('Product name is required.');
@@ -1073,7 +1092,10 @@ function ProductEditModal({ product: cardProduct, onClose, onSaveSuccess, onDele
       setDiscountedPrice(String(res.product.selling_price ?? res.product.actual_price ?? ''));
       setSaveSuccess(true);
       // Notify parent so the product list and category counts refresh
-      if (onSaveSuccess) onSaveSuccess(res.product);
+      if (onSaveSuccess) onSaveSuccess(res.product, savedScrollY);
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: savedScrollY, behavior: 'instant' });
+      });
     } else {
       setSaveError(res.error || 'Failed to save changes. Please try again.');
     }
@@ -1636,6 +1658,7 @@ export default function WarehousePortal() {
   const [productsError, setProductsError] = useState(null);
   const [selectedProductForEdit, setSelectedProductForEdit] = useState(null);
   const [productFlagsPending, setProductFlagsPending] = useState({});
+  const editScrollPosRef = useRef(0);
 
   // Filters & Selection matching Customer Shop/Categories
   const [selectedCategory, setSelectedCategory] = useState('ALL');
@@ -1653,6 +1676,7 @@ export default function WarehousePortal() {
   // re-fetches on demand, not on every keystroke.
   const [customLetterInput, setCustomLetterInput] = useState('');
   const [appliedLetter, setAppliedLetter] = useState('');
+  const [selectedLetter, setSelectedLetter] = useState('ALL');
 
   // --- 2. Orders State ---
   const [orders, setOrders] = useState([]);
@@ -1790,7 +1814,11 @@ export default function WarehousePortal() {
     if (onlySale) params.on_sale = 'true';
     if (selectedSize !== 'All') params.size = selectedSize;
     if (selectedColor !== 'All') params.color = selectedColor;
-    if (appliedLetter) params.starts_with = appliedLetter;
+    const effectiveLetter = (selectedLetter && selectedLetter !== 'ALL') ? selectedLetter : appliedLetter;
+    if (effectiveLetter) {
+      params.letter = effectiveLetter;
+      params.starts_with = effectiveLetter;
+    }
     return params;
   };
 
@@ -1836,7 +1864,7 @@ export default function WarehousePortal() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCategory, isRealSubcategory, activeSubcategory, debouncedSearch, selectedSort,
-    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor, token, appliedLetter]);
+    onlyInStock, maxPriceFilter, onlySale, selectedSize, selectedColor, token, appliedLetter, selectedLetter]);
 
   // Re-fetch page one whenever the active server-side filters change.
   useEffect(() => {
@@ -1941,6 +1969,7 @@ export default function WarehousePortal() {
   }, [filteredCategories]);
 
   const hasActiveFilters = Boolean(
+    selectedLetter !== 'ALL' ||
     activeSubcategory !== 'All' ||
     selectedSize !== 'All' ||
     selectedColor !== 'All' ||
@@ -1953,6 +1982,7 @@ export default function WarehousePortal() {
   );
 
   const resetAllFilters = () => {
+    setSelectedLetter('ALL');
     setActiveSubcategory('All');
     setSelectedSize('All');
     setSelectedColor('All');
@@ -2982,6 +3012,84 @@ export default function WarehousePortal() {
                     </div>
                   </div>
 
+                  {/* Compact A-Z Alphabetical Filter Bar */}
+                  <div
+                    className="warehouse-alphabet-bar"
+                    role="region"
+                    aria-label="A to Z alphabetical product filter"
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span
+                        style={{
+                          fontSize: '0.72rem',
+                          fontWeight: 800,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                          color: '#8E3642',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        A–Z:
+                      </span>
+                    </div>
+
+                    <div className="az-filter-track">
+                      {/* 'All' Button */}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLetter('ALL')}
+                        className={`az-filter-btn az-filter-btn-all ${selectedLetter === 'ALL' ? 'az-filter-btn-active' : ''}`}
+                        title="Show products starting with any letter"
+                        aria-pressed={selectedLetter === 'ALL'}
+                      >
+                        All
+                      </button>
+
+                      {/* Letters A to Z */}
+                      {ALPHABET_LETTERS.map((letter) => {
+                        const isSelected = selectedLetter === letter;
+                        return (
+                          <button
+                            key={letter}
+                            type="button"
+                            onClick={() => setSelectedLetter(letter)}
+                            className={`az-filter-btn ${isSelected ? 'az-filter-btn-active' : ''}`}
+                            title={`Show products starting with ${letter}`}
+                            aria-pressed={isSelected}
+                          >
+                            {letter}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Small count showing how many products match the selected letter */}
+                    <div
+                      className="az-filter-count-badge"
+                      style={{
+                        backgroundColor: selectedLetter === 'ALL' ? '#FAF7F5' : '#FBF1F0',
+                        border: `1px solid ${selectedLetter === 'ALL' ? '#F0E2E0' : 'rgba(216, 114, 126, 0.35)'}`,
+                        color: selectedLetter === 'ALL' ? '#6B5E63' : '#8E3642',
+                      }}
+                    >
+                      {selectedLetter === 'ALL' ? (
+                        <>
+                          <span>All products:</span>
+                          <strong style={{ color: '#1F191B' }}>
+                            {productsLoading ? '…' : productsTotalCount.toLocaleString()}
+                          </strong>
+                        </>
+                      ) : (
+                        <>
+                          <span>Letter {selectedLetter}:</span>
+                          <strong style={{ color: '#B8505E' }}>
+                            {productsLoading ? '…' : `${productsTotalCount.toLocaleString()} ${productsTotalCount === 1 ? 'product' : 'products'}`}
+                          </strong>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Products Count Header */}
                   <div
                     style={{
@@ -2992,7 +3100,7 @@ export default function WarehousePortal() {
                     }}
                   >
                     <span style={{ fontSize: '0.86rem', color: '#6B5E63', fontWeight: 600 }}>
-                      {totalFilteredProducts.toLocaleString()} Loaded Products ({productsTotalCount.toLocaleString()} Matched in Database)
+                      {totalFilteredProducts.toLocaleString()} Loaded Products ({productsTotalCount.toLocaleString()} Matched in Database{selectedLetter !== 'ALL' ? ` starting with "${selectedLetter}"` : ''})
                     </span>
                     {hasActiveFilters && (
                       <button
@@ -3106,7 +3214,14 @@ export default function WarehousePortal() {
                               <WarehouseProductCard
                                 key={prod.product_id || prod.id}
                                 product={prod}
-                                onCardClick={(productToEdit) => setSelectedProductForEdit(productToEdit)}
+                                onCardClick={(productToEdit) => {
+                                  editScrollPosRef.current =
+                                    window.scrollY ||
+                                    document.documentElement.scrollTop ||
+                                    document.body.scrollTop ||
+                                    0;
+                                  setSelectedProductForEdit(productToEdit);
+                                }}
                                 onToggleFlag={handleToggleProductFlag}
                                 pending={Boolean(productFlagsPending[prod.product_id || prod.id])}
                               />
@@ -3157,18 +3272,34 @@ export default function WarehousePortal() {
                           margin: '0 0 0.5rem 0',
                         }}
                       >
-                        No Database Products Found In This Selection
+                        {selectedLetter !== 'ALL'
+                          ? `No products found starting with ${selectedLetter}`
+                          : 'No Database Products Found In This Selection'}
                       </h3>
                       <p style={{ color: '#6B5E63', fontSize: '0.88rem', margin: '0 0 1.5rem 0' }}>
-                        {`Try resetting your price, size, search query, or stock filters to view available items in ${selectedCategory === 'ALL' ? 'the catalog' : selectedCategory}.`}
+                        {selectedLetter !== 'ALL'
+                          ? `There are no products with names beginning with "${selectedLetter}" matching your current selection. Select another letter or click All.`
+                          : `Try resetting your price, size, search query, or stock filters to view available items in ${selectedCategory === 'ALL' ? 'the catalog' : selectedCategory}.`}
                       </p>
-                      <button
-                        type="button"
-                        className="tarika-btn-outline"
-                        onClick={resetAllFilters}
-                      >
-                        Reset All Filters
-                      </button>
+                      <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+                        {selectedLetter !== 'ALL' && (
+                          <button
+                            type="button"
+                            className="tarika-btn-primary"
+                            onClick={() => setSelectedLetter('ALL')}
+                            style={{ width: 'auto', padding: '0.65rem 1.4rem' }}
+                          >
+                            Show All Letters
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="tarika-btn-outline"
+                          onClick={resetAllFilters}
+                        >
+                          Reset All Filters
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3988,24 +4119,66 @@ export default function WarehousePortal() {
         <ProductEditModal
           product={selectedProductForEdit}
           token={token}
-          onClose={() => setSelectedProductForEdit(null)}
-          onSaveSuccess={(updatedProduct) => {
-            // An ordinary edit must NOT reset pagination: merge the saved
-            // record into the already loaded list in place (the modal hands
-            // over the authoritative product re-read from Django) and never
-            // refetch page 1. Loaded pages, current page counter and scroll
-            // position all stay untouched.
-            if (updatedProduct?.product_id) {
-              setRawProducts((prev) => prev.map((p) => (
-                (p.product_id || p.id) === updatedProduct.product_id
-                  ? { ...p, ...updatedProduct }
-                  : p
-              )));
+          onClose={() => {
+            const restoreY = editScrollPosRef.current || window.scrollY || 0;
+            setSelectedProductForEdit(null);
+            requestAnimationFrame(() => {
+              window.scrollTo({ top: restoreY, behavior: 'instant' });
+              setTimeout(() => {
+                window.scrollTo({ top: restoreY, behavior: 'instant' });
+              }, 50);
+            });
+          }}
+          onSaveSuccess={(updatedProduct, modalScrollY) => {
+            const restoreY =
+              typeof modalScrollY === 'number' && modalScrollY > 0
+                ? modalScrollY
+                : (editScrollPosRef.current || window.scrollY || 0);
+
+            // Update the product directly in rawProducts so the UI reflects the
+            // new image and attributes without collapsing the catalogue or resetting scroll.
+            if (updatedProduct) {
+              setRawProducts((prev) =>
+                prev.map((p) => {
+                  const pId = p.product_id || p.id;
+                  const uId = updatedProduct.product_id || updatedProduct.id;
+                  if (pId === uId) {
+                    return {
+                      ...p,
+                      ...updatedProduct,
+                      image: updatedProduct.image || p.image,
+                      category_name: updatedProduct.category_name || updatedProduct.main_category || p.category_name,
+                      selling_price: updatedProduct.selling_price ?? updatedProduct.discount_price ?? p.selling_price,
+                      base_price: updatedProduct.base_price ?? updatedProduct.actual_price ?? p.base_price,
+                      total_stock: updatedProduct.total_stock ?? updatedProduct.available_quantity ?? p.total_stock,
+                    };
+                  }
+                  return p;
+                })
+              );
             }
-            // Category names/counts may have changed — that is a cheap meta
-            // refresh, not a product-list reload.
+
+            // Invalidate categories cache and update category counts in background
             invalidateCategoriesCache();
             loadCategories();
+
+            // Restore exact scroll position and ensure edited card stays in view
+            requestAnimationFrame(() => {
+              window.scrollTo({ top: restoreY, behavior: 'instant' });
+              setTimeout(() => {
+                window.scrollTo({ top: restoreY, behavior: 'instant' });
+                const targetId = updatedProduct?.product_id || updatedProduct?.id;
+                if (targetId) {
+                  const el = document.getElementById(`warehouse-product-${targetId}`);
+                  if (el) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                  }
+                }
+              }, 50);
+            });
           }}
           onDeleted={({ productId }) => {
             // Delete/archive: drop exactly this row from the loaded pages and
